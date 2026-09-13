@@ -2,17 +2,35 @@ from rest_framework import serializers
 
 from accounts.models import Player
 
-from .models import ConversionRate, GameDay, Transaction
+from .models import ConversionRate, GameDay, GameDaySummary, Transaction
+
+
+class GameDaySummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GameDaySummary
+        fields = [
+            'num_players', 'chips_out_total', 'chips_in_total', 'rake_total', 'tips_total',
+            'chips_variance', 'total_payments', 'game_balance', 'created_at',
+        ]
 
 
 class GameDaySerializer(serializers.ModelSerializer):
+    # None until the game-day is closed — see gaming.services.close_game_day.
+    summary = serializers.SerializerMethodField()
+
     class Meta:
         model = GameDay
         fields = [
             'id', 'number', 'started_at', 'ended_at', 'status',
-            'opened_by', 'opened_by_floor_manager', 'closed_by', 'closed_by_floor_manager',
+            'opened_by', 'opened_by_floor_manager', 'closed_by', 'closed_by_floor_manager', 'summary',
         ]
         read_only_fields = fields
+
+    def get_summary(self, obj):
+        try:
+            return GameDaySummarySerializer(obj.summary).data
+        except GameDaySummary.DoesNotExist:
+            return None
 
 
 class OpenGameDaySerializer(serializers.Serializer):
@@ -20,6 +38,8 @@ class OpenGameDaySerializer(serializers.Serializer):
     started_at = serializers.DateTimeField(required=False)
     floor_manager_id = serializers.IntegerField(required=False, allow_null=True)
     floor_manager_pin = serializers.CharField(required=False, allow_blank=True)
+    owner_id = serializers.IntegerField(required=False, allow_null=True)
+    owner_pin = serializers.CharField(required=False, allow_blank=True)
 
 
 class CloseGameDaySerializer(serializers.Serializer):
@@ -40,6 +60,8 @@ class SetConversionRateSerializer(serializers.Serializer):
     game_day = serializers.PrimaryKeyRelatedField(queryset=GameDay.objects.all(), required=False, allow_null=True)
     floor_manager_id = serializers.IntegerField(required=False, allow_null=True)
     floor_manager_pin = serializers.CharField(required=False, allow_blank=True)
+    owner_id = serializers.IntegerField(required=False, allow_null=True)
+    owner_pin = serializers.CharField(required=False, allow_blank=True)
 
 
 class TransactionSerializer(serializers.ModelSerializer):

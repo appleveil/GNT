@@ -14,9 +14,13 @@ class GameDay(models.Model):
     ended_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)
 
-    # Opening requires the Owner or a Floor Manager PIN — Cashier can't open one solo.
+    # Opening requires the Owner (login or PIN) or a Floor Manager PIN — a Cashier
+    # is never the authorizer, under any circumstance. Nullable because a Floor
+    # Manager PIN authorizes the open without any StaffUser row to point to —
+    # see opened_by_floor_manager, and CONCEPT.md's "Open Game-Day flow."
     opened_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='game_days_opened',
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='game_days_opened', limit_choices_to={'role': StaffUser.Role.OWNER},
     )
     opened_by_floor_manager = models.ForeignKey(
         FloorManager, on_delete=models.PROTECT, null=True, blank=True, related_name='game_days_opened',
@@ -47,8 +51,12 @@ class ConversionRate(models.Model):
     # null = standing/default rate; set = override for that specific game-day
     game_day = models.ForeignKey(GameDay, on_delete=models.CASCADE, null=True, blank=True, related_name='fx_rates')
 
-    # Owner or a Floor Manager PIN can set this — Cashier/Accountant cannot.
-    set_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='fx_rates_set')
+    # Owner (login or PIN) or a Floor Manager PIN can set this — Cashier/Accountant
+    # cannot. Nullable for the same reason as GameDay.opened_by above.
+    set_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='fx_rates_set', limit_choices_to={'role': StaffUser.Role.OWNER},
+    )
     set_by_floor_manager = models.ForeignKey(
         FloorManager, on_delete=models.PROTECT, null=True, blank=True, related_name='fx_rates_set',
     )
@@ -70,8 +78,9 @@ class Transaction(models.Model):
     class Type(models.TextChoices):
         CHIPS_OUT = 'CHIPS_OUT', 'Chips out'
         CHIPS_IN = 'CHIPS_IN', 'Chips in'
-        CHIPS_OFFSITE_OUT = 'CHIPS_OFFSITE_OUT', 'Chips taken off-site'
-        CHIPS_OFFSITE_RETURN = 'CHIPS_OFFSITE_RETURN', 'Off-site chips returned'
+        # CHIPS_OFFSITE_OUT / CHIPS_OFFSITE_RETURN removed 2026-09-13 — off-site/excess
+        # chips are no longer a per-incident Transaction; they're a computed
+        # end-of-day variance on GameDaySummary. See CONCEPT.md's "Off-site chips."
         PAYMENT_CASH = 'PAYMENT_CASH', 'Cash payment'
         PAYMENT_TRANSFER = 'PAYMENT_TRANSFER', 'Transfer payment'
         PAYMENT_POS = 'PAYMENT_POS', 'POS payment'
@@ -161,7 +170,12 @@ class GameDaySummary(models.Model):
     chips_in_total = models.DecimalField(max_digits=14, decimal_places=2)
     rake_total = models.DecimalField(max_digits=14, decimal_places=2)
     tips_total = models.DecimalField(max_digits=14, decimal_places=2)
-    chips_outstanding = models.DecimalField(max_digits=14, decimal_places=2)
+    # Signed: chips_out_total - chips_in_total - rake_total - tips_total.
+    # Positive = unreturned/off-site chips this game-day; negative = excess chips
+    # returned this game-day (off-site chips from an earlier day coming back).
+    # Renamed from the never-implemented `chips_outstanding` placeholder — see
+    # CONCEPT.md's "Off-site chips."
+    chips_variance = models.DecimalField(max_digits=14, decimal_places=2)
     total_payments = models.DecimalField(max_digits=14, decimal_places=2)
     game_balance = models.DecimalField(max_digits=14, decimal_places=2)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -21,6 +21,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         owner = self._get_or_create_staff('owner1', StaffUser.Role.OWNER, 'Olu', 'Owner')
+        if not owner.pin_hash:
+            owner.set_pin(DEMO_PIN)
+            owner.save(update_fields=['pin_hash'])
         cashier = self._get_or_create_staff('cashier1', StaffUser.Role.CASHIER, 'Chidi', 'Cashier')
         self._get_or_create_staff('accountant1', StaffUser.Role.ACCOUNTANT, 'Ada', 'Accountant')
 
@@ -61,6 +64,7 @@ class Command(BaseCommand):
         self.stdout.write(f'Staff logins (password for all): {DEMO_PASSWORD}')
         self.stdout.write('  owner1 (Owner) / cashier1 (Cashier) / accountant1 (Accountant)')
         self.stdout.write(f'Floor Manager: "Femi Floor", PIN {DEMO_PIN}')
+        self.stdout.write(f"Owner's own in-person PIN (separate from their password): {DEMO_PIN}")
         self.stdout.write(f'Game-day #{game_day.number} is {game_day.status.lower()}, {len(players)} players seeded.')
 
     def _get_or_create_staff(self, username, role, first_name, last_name):

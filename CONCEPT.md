@@ -149,12 +149,13 @@ The brief above used "Promoter," "Manager," and "Owner" interchangeably for the 
 - **Accountant visibility**: Accountant sees outstanding balances/obligations only — not the actual Main account bank balance. That stays Owner-only.
 - **Payout approval**: Every cashier-initiated player payout requires Owner approval, no threshold exemption, for v1.
 - **Player bank accounts**: Cashier manages a player's receiving bank account(s) on their behalf (players have no login), and one account can be marked default.
+- **Cashier player-history visibility** (resolved 2026-09-13, answers the "still open" item below): A Cashier cannot see a player's history from previous game-days at all — no per-player game-day history list on Player Detail, and no access to the Outstanding (between-game-day) ledger; both move to Accountant/Owner-only. On Player Detail, a Cashier sees a player's balance only when it is **positive** (club owes the player — shown regardless of when that credit accrued, since it's what makes a payout possible) or when a **negative balance accrued during the current game-day** (today's fresh debt, operationally relevant to tonight). A negative balance carried over from a previous day is never surfaced to the Cashier, full stop — not even a masked "you have some debt" hint.
 
 **Still open** (flagged, not blocking v1 feature scope, revisit before/while building):
 - WhatsApp interface: exact action set available to the Owner via WhatsApp vs. the full app.
 - Notification matrix: which event notifies which role via which channel (partially specified in brief).
 - Failure handling: webhook/sweep failure, insufficient Main-account balance at payout time, failed transfer to a player.
-- Whether Cashier can see a player's full cross-game-day history at seating time, or only the current game-day.
+- ~~Whether Cashier can see a player's full cross-game-day history at seating time, or only the current game-day.~~ — resolved above (2026-09-13): neither, in the sense of raw history; only today's negative or any positive balance.
 - ~~Technical validation of the Paystack dedicated-virtual-account-per-player approach~~ — confirmed feasible directly with Paystack support (2026-09-13); proceeding on that basis.
 
 ## Completeness pass (resolved 2026-09-13)
@@ -166,34 +167,53 @@ Reviewed each role's v1 scope against the Challenges/Problem statement. Decision
 - **Player deposit notifications**: Stay excluded for v1, per the original brief. Player experience remains verbal confirmation via Cashier only.
 - **Chips taken off-site**: Added as an explicit v1 feature (was previously an untracked edge case). See Cashier scope below.
 - **Staff account management**: Owner manages Cashier and Accountant accounts in-app (create, deactivate, reset password), plus Floor Manager staff records (name + PIN only, no login).
-- **Game-day open/close authorization**: Opening a game-day requires the Owner or a Floor Manager (PIN) — Cashier cannot open one alone. Closing/locking a game-day can be done by the Cashier, the Owner, or a Floor Manager (PIN) — any of the three.
+- **Game-day open/close authorization**: Opening a game-day is restricted to the Owner (own login) or a Floor Manager (PIN) — a Cashier cannot open one under any circumstance, not even with a Floor Manager's PIN as backup on their own session (revised 2026-09-13; supersedes the earlier "Cashier can't open one alone" phrasing, which wrongly implied a Cashier is a party to the authorization at all). Closing/locking a game-day can be done by the Cashier, the Owner, or a Floor Manager (PIN) — any of the three.
 - **FX conversion rate ownership**: Owner or Floor Manager (PIN) can set/update the rate per currency, including per-game-day overrides. Cashier and Accountant cannot.
+
+## Domain corrections (resolved 2026-09-13, surfaced while wireframing the Cashier UI)
+
+- **Rake is not a per-player entry.** It's counted from a physical rake-box at the end of the game (usually once all players have left), so there is no "record rake for player X" action — it's a single general/day-level entry (`Transaction.player = null`, already how `RAKE` is modeled in `SCHEMA.md`). The Cashier UI must not offer Rake from a player-scoped context.
+- **Off-site chips: redesigned 2026-09-13 (supersedes the original per-player-attribution idea entirely).** Off-site chips are **not** a Transaction type at all any more — no `CHIPS_OFFSITE_OUT`/`CHIPS_OFFSITE_RETURN` rows, no player attribution, no manual Cashier action, nothing to enter mid-game. It's a pure end-of-day reconciliation equation instead: **chips out = chips in + rake + tips + off-site chips**, so `unreturned chips = chips_out_total − chips_in_total − rake_total − tips_total`, computed exactly once at close as part of `GameDaySummary` (the same snapshot that already holds `chips_outstanding`, previously unused — this is what finally puts it to work). When that figure comes out **negative** — more chips came back than went out this game-day, net of rake/tips — it means chips that went off-site on some *earlier* day are being returned tonight; track that case as **excess chips returned** for the day, the mirror image of the same number. Across game-days, the club-wide liability ("**Outstanding chips**") is just the live running sum of every closed game-day's variance (positive days add to it, negative/excess days pay it down) — no separate stored counter, matching the project's compute-don't-store principle for balances. This removes the off-site player-attribution problem from the earlier note in one move, by removing the Cashier action that caused it.
+  - **Where it surfaces**: the per-game-day variance (unreturned or excess) belongs in the Close Game-Day summary (Cashier-facing, since that's the natural moment it becomes knowable — right after the rake box is counted); the cumulative Outstanding Chips figure belongs on the Accountant's club-health dashboard and the Owner's views, alongside the existing outstanding-balance figures.
+  - Frontend consequence: the old "Off-site Chips" button is removed entirely from the Active Game-Day screen's General section (nothing left to manually enter) — only Rake remains there.
+- **Two more user-types are coming later, not in v1**: **Worker** and **Dealer** — staff who are tipped directly by players. `TIP` is currently modeled as `player = null`, `qty + source` only (a free-text/generic "source"); once Worker/Dealer exist as real records, `TIP` will likely need a recipient reference instead of a free-text source. Not building this now — noted so the `TIP` schema isn't treated as final.
+- **Payout history is scoped per game-day, not lifetime.** A player's list of payouts shown on the Cashier's payout screen covers only the currently-open (or currently-viewed) game-day — the next game-day starts with no payout history shown for that player, unless a new payout is requested within it. This is a query-scoping decision (filter `Transaction.type=PAYOUT` by `game_day`), not a schema change — `Transaction.game_day` already exists as a filterable field.
 
 ### Known gaps / backlog (deliberately out of v1, revisit later)
 
+- **Worker/Dealer as first-class user-types**, tipped directly by players — see "Domain corrections" above; will likely require a schema change to `Transaction.TIP` (a recipient FK instead of a free-text source).
 - Owner: pending-approvals *queue* (a live inbox), not just an approval history list
 - Owner: settings UI for the fraud/transfer limits the brief flags as needed (per-transaction, per-24hr, per-recipient-frequency)
 - Period-over-period reporting (weekly/monthly trends, top debtors) beyond per-game-day and live totals
 - Search/filter/export across player lists, game-day history, and ledgers
 - An "unattributed payment" queue for money landing in a non-DVA club account or cash with an unclear source — the DVA design solves this for player-linked transfers, but manually-registered transfers/cash into shared accounts have no matching workflow
+- **A dedicated Payout view/history** — the original brief never specified one. The Cashier's payout screen shows a list scoped to the current game-day and one player (see "Payout history is scoped per game-day" below), but there's no cross-game-day or cross-player payout ledger/list for the Accountant or Owner to review all payouts at once. Revisit once a role needs that wider view.
+
+### Built (2026-09-13) — the four backend design questions from the design phase
+
+All four are now implemented, migrated, and verified (51/51 existing tests still pass, plus live smoke tests against the dev DB and real HTTP endpoints). Noting the actual shape shipped, since it differs in one respect from the earlier spec sketch below (additive fields instead of a full rename — less churn, same effect):
+
+- **Floor Manager AND Owner PINs authenticate the action directly, not just confirm someone else's session.** `StaffUser.pin_hash` added (mirrors `FloorManager.pin_hash`; in v1 only Owner-role rows set one, via `POST /api/auth/set-pin/`, Owner-only). `gaming/services.py` gained `_resolve_owner_pin` and a shared `_resolve_owner_or_floor_manager` helper used by `open_game_day` and `set_conversion_rate`: if the operator's own session is already an Owner login, no PIN needed (unchanged); otherwise an `owner_id`+`owner_pin` pair (new, additive — sits alongside the existing `floor_manager_id`+`floor_manager_pin` pair rather than replacing it) is resolved independently of `request.user`, so a Cashier's session never becomes the authorizer no matter which pair is submitted through it. `GameDay.opened_by`/`ConversionRate.set_by` are now nullable (`limit_choices_to={'role': OWNER}`) and record the *resolved* Owner or stay null when a Floor Manager's PIN authorized it instead. Physical-count confirmations remain Floor-Manager-PIN-only, unchanged.
+- **Off-site/excess chips and Outstanding Chips.** `GameDaySummary.chips_outstanding` renamed to `chips_variance` (signed). `gaming/selectors.game_day_summary_data(game_day)` computes it (and every other summary field) fresh from `Transaction` at close time; `close_game_day` now calls it and writes the `GameDaySummary` row via `update_or_create` — previously `close_game_day` never touched `GameDaySummary` at all. `selectors.outstanding_chips_total()` is the live club-wide `SUM(chips_variance)`, surfaced on `GET /api/dashboard/` as `outstanding_chips` (Accountant and Owner both see it, per the Accountant dashboard update above). `CHIPS_OFFSITE_OUT`/`CHIPS_OFFSITE_RETURN` are removed from `Transaction.Type` entirely.
+- **Chips-limit enforcement.** `Player.chips_limit` (nullable Decimal) added. `record_transaction` rejects a `CHIPS_OUT` whose resulting game-day debt (via the new `selectors.player_game_day_balance(player, game_day)`) would exceed it, raising `InvalidStateError` before the Floor Manager PIN step runs. `PlayerSerializer.validate_chips_limit` restricts writes to Owner-role callers (verified: a Cashier's write attempt fails validation, an Owner's succeeds). Added `chips_used_today` (read-only) alongside it so the Cashier UI doesn't need a second call for "used ₦X of ₦Y."
+- **Cashier balance-visibility split + outstanding-ledger permission gate.** `OutstandingLedgerView.permission_classes` changed to `IsOwnerOrAccountant` (verified: Cashier gets 403, Accountant gets 200). `PlayerSerializer.get_balance` is now role-conditional: a Cashier caller gets the lifetime `player_balance` only when it's ≥ 0; when it's negative, they get `player_game_day_balance` for the currently-open game-day instead (0 if that's also ≥0, or if no game-day is open) — the lifetime negative figure is never returned to a Cashier caller, matching "not even a hint of how much."
 
 ## Role feature scope (v1)
 
 #### Cashier (staff account, logged in)
 
-- Close/lock a game-day at the end (alone, no extra authorization needed)
-- Cannot open/start a game-day alone — needs the Owner or a Floor Manager PIN to authorize it (see Floor Manager note below)
+- Close/lock a game-day at the end (alone, no extra authorization needed) — closing automatically computes the day's off-site/excess chips variance (see "Off-site chips" under Domain corrections); nothing to manually mark, no per-player action exists for this any more
+- Cannot open/start a game-day under any circumstance — the Owner or a Floor Manager must authorize it themselves (see Floor Manager note and Open Game-Day flow below); a Cashier's own login is never part of that authorization, even as the session a Floor Manager's PIN is entered into
+- Chips-limit enforcement: cannot issue chips that would push a player's current game-day debt beyond their Owner-set limit (see "Chips limit" below) — the limit and current usage are shown inline wherever chips are issued
 - Add player (create profile → linked to next available Gaming Account/DVA)
 - Update player details, incl. receiving bank account(s) and default
 - Issue chips to a player (logged with issuing cashier for activity tracking)
 - Register chips returned, in real time, per player
-- Mark chips as **taken off-site** by a player (distinct from a normal cash-out) — carries as an open balance/liability across game-days until the player returns to play them or cash them
-- Register a player's return of previously off-site chips (either back into play, or cashed out)
 - Register manual payments: Cash (with currency + conversion rate), POS card reader, and confirm auto-captured Transfer/POS payments
 - Register rake and tips (qty + source)
 - Initiate a player payout (cash-out transfer) — always requires Owner approval before funds move
 - Void/edit their own entries for the current, still-open game-day
-- Cannot: create/edit a Deal; approve payouts; amend a closed game-day; set FX conversion rates; open a game-day unassisted
+- Cannot: create/edit a Deal; approve payouts; amend a closed game-day; set FX conversion rates; open a game-day (not even with a Floor Manager's PIN as backup — see below); view a player's history from any previous game-day, including the Outstanding (between-game-day) ledger; see a player's balance when it's a negative figure carried over from before today (see "Cashier player-history visibility" above)
 - Out of scope / explicitly excluded: registering payments via the old/existing payment providers (flagged in the brief as "deprecated / anathema to reconciliation")
 - Every physical-count entry (chip issuance/return/off-site, cash, rake, tips) requires a Floor Manager confirmation password entered inline, in the same form, before it saves — see Floor Manager note below.
 
@@ -204,13 +224,15 @@ Reviewed each role's v1 scope against the Challenges/Problem statement. Decision
 - A wrong/mismatched PIN simply blocks the save, prompting a recount/correction on the spot rather than surfacing as a later dispute
 - Needs a lightweight staff record (name + PIN) for each Floor Manager, managed by the Owner alongside other staff accounts — but no login, dashboard, or permissions of their own beyond that PIN
 - The same PIN also gates three higher-stakes actions, entered on whichever staff device is performing the action:
-    - **Opening a game-day** — requires the Owner's own login, or a Floor Manager PIN (Cashier cannot open one solo)
+    - **Opening a game-day** — requires the Owner's own PIN or login, or a Floor Manager PIN; a Cashier cannot open one under any circumstance, including as the session that submits someone else's PIN (see "Built" below)
     - **Closing a game-day** — Cashier, Owner, or a Floor Manager PIN can each do this alone
     - **Setting/updating the FX conversion rate** — Owner's own login, or a Floor Manager PIN (Cashier and Accountant cannot)
 
+**Open Game-Day flow (revised 2026-09-13)**: Cashier taps "Open Game-Day" → picks who's authorizing from one list showing the Owner and every active Floor Manager → enters that person's PIN → game-day opens (number and start time are system-assigned, not manually keyed in as part of this flow). **Decided (2026-09-13)**: the Owner gets a PIN credential for exactly this kind of in-person authorization, distinct from their account password (`StaffUser.pin_hash`, mirroring `FloorManager.pin_hash`) — so the picker-then-PIN flow is genuinely unified across both. See "Built" below for the backend implication: the PIN itself is what authenticates the action, independent of whichever staff session (if any) is logged into the device.
+
 #### Accountant (staff account, logged in — read-only + no write actions in v1)
 
-- Dashboard: outstanding balances (total owed by players), outstanding obligations (total owed to players); no Main account bank balance
+- Dashboard: outstanding balances (total owed by players), outstanding obligations (total owed to players), Outstanding Chips (club-wide unreturned-chips liability — see "Off-site chips" under Domain corrections); no Main account bank balance
 - View game-day summary, detail, and full history
 - View player list and per-player detail, including any game-day's ledger (for disputes/reconciliation)
 - No correction rights (corrections are Cashier same-day / Owner post-close, per decision above)
@@ -219,14 +241,16 @@ Reviewed each role's v1 scope against the Challenges/Problem statement. Decision
 
 - All Accountant views, plus the actual Main account balance
 - Edit a player's outstanding balance downward only (player, amount, reason/notes) — write-offs/credit
+- Set/update a player's chips limit (per-game-day credit ceiling — see "Chips limit" under Player profile)
 - Create and record Deal entries
 - Approve every player payout before funds move
 - Approve credit requests
 - Amend/correct any entry after its game-day is closed/locked
 - History views: approvals, transfers, forgiveness/write-offs
 - Manage staff accounts: create/deactivate Cashier and Accountant logins, reset passwords
+- Set/reset their own PIN, used for in-person authorization (Open Game-Day, FX rate) alongside their normal login (see "Open Game-Day flow")
 - Set/update FX conversion rates per currency (incl. per-game-day overrides; past rates stay immutable per the original brief) — a Floor Manager PIN can also authorize this
-- Open a game-day alone (a Floor Manager PIN can also authorize this; Cashier cannot open one solo)
+- Open a game-day (a Floor Manager PIN can also authorize this; a Cashier cannot open one under any circumstance)
 
 #### Player (no login in v1 — interacts only through the Cashier and notifications)
 
@@ -378,7 +402,7 @@ Gaming accounts (GA) are Paystack accounts/integrations (similar to Stripe). Mul
         
     
     ~~A player can have multiple receiving bank accounts, and a default. The default can be changed, new accounts added, and existing ones deleted (this will happen on the player side)~~
-    
+    - **Chips limit** (added 2026-09-13, v1 feature): a per-player credit ceiling, set and updated only by the Owner, capping how much a player can be issued **on credit in one game-day**. Concretely: the check is against the player's *current game-day debt* (chips issued minus what they've paid/returned back so far tonight), not a raw lifetime or per-transaction cap — paying down mid-game frees up room to take more chips. The Cashier's Issue Chips flow shows the limit and current usage inline, and the system blocks (does not just warn on) an issuance that would push the player's game-day debt past their limit, before it ever reaches the Floor Manager PIN step. A player with no limit set has no cap (existing behavior, unchanged). Raising a player's limit mid-game-day is an Owner action, out of Cashier scope.
 
 #### Ledgers
 

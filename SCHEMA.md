@@ -14,6 +14,7 @@ Target: Django + PostgreSQL. This is a plan to review, not code — field names/
 #### `Player`
 - `account_code` — club-assigned short code (e.g. "WWI 7"), unique
 - `display_name`
+- `chips_limit` — `DecimalField`, nullable (null = no cap), Owner-set-and-edited only. Per-game-day credit ceiling: checked against the player's *current game-day debt* (chips issued minus paid/returned so far that game-day), not a lifetime or per-transaction cap. Added 2026-09-13 — see `CONCEPT.md`'s "Chips limit."
 - `is_active`, `created_at`
 
 #### `PaystackAccount`
@@ -38,6 +39,7 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 #### `StaffProfile` (Cashier / Accountant / Owner — real logins)
 - `user` — OneToOne → Django `User`
 - `role` — `CASHIER` | `ACCOUNTANT` | `OWNER`
+- `pin_hash` — hashed, nullable; mirrors `FloorManager.pin_hash`. In v1 only Owner-role rows have one set — it's how the Owner authenticates in-person for Open Game-Day / Set Conversion Rate without a full login-switch on the Cashier's device. Added 2026-09-13.
 - `is_active`, `created_at`
 
 #### `FloorManager` (not a login — a named confirmation credential)
@@ -51,8 +53,8 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 - `number` — sequential display number, unique
 - `started_at`, `ended_at` (null while open)
 - `status` — `OPEN` | `CLOSED`
-- `opened_by` — FK → StaffProfile (the operator whose session performed the action, typically Cashier)
-- `opened_by_floor_manager` — FK → FloorManager, null; **required unless `opened_by.role == OWNER`** — Cashier can't open a game-day solo
+- `opened_by` — FK → StaffProfile, **nullable** (revised 2026-09-13). Set to the resolved **Owner** when an Owner's PIN or login authorized the open; **null** when a Floor Manager's PIN authorized it instead (a Floor Manager has no `StaffProfile` row to point to). Never set to a Cashier, regardless of which staff device/session the request came through — a Cashier is never the authorizer, only (at most) the one physically tapping the screen.
+- `opened_by_floor_manager` — FK → FloorManager, null; set when a Floor Manager's PIN was the authorizer (mutually exclusive with `opened_by` being set to an Owner)
 - `closed_by` — FK → StaffProfile
 - `closed_by_floor_manager` — FK → FloorManager, null; optional — Cashier or Owner can close solo, or a Floor Manager PIN can authorize it instead
 
@@ -60,23 +62,24 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 - `currency` — `USD` | `GBP` | `EUR` | `OTHER` (NGN implicit = 1)
 - `rate_to_naira`
 - `game_day` — FK → GameDay, null = standing/default rate; set = override for that specific game-day
-- `set_by` — FK → StaffProfile (the operator)
-- `set_by_floor_manager` — FK → FloorManager, null; **required unless `set_by.role == OWNER`**
+- `set_by` — FK → StaffProfile, **nullable** (revised 2026-09-13, same reasoning as `GameDay.opened_by`) — the resolved Owner, or null if a Floor Manager's PIN authorized it
+- `set_by_floor_manager` — FK → FloorManager, null; set when a Floor Manager's PIN was the authorizer
 - `created_at` — immutable; a rate change is a new row, never an edit, per the brief's "past rates can't be changed"
 
 #### `Transaction` — the master ledger
 - `game_day` — FK → GameDay, **null** for between-game-day entries (these feed the Outstanding ledger only)
 - `player` — FK → Player, null only for `RAKE`/`TIP`
 - `type` — one of:
-  `CHIPS_OUT`, `CHIPS_IN`, `CHIPS_OFFSITE_OUT`, `CHIPS_OFFSITE_RETURN`,
+  `CHIPS_OUT`, `CHIPS_IN`,
   `PAYMENT_CASH`, `PAYMENT_TRANSFER`, `PAYMENT_POS`, `PAYMENT_DEAL`,
   `PAYOUT`, `WRITE_OFF`, `RAKE`, `TIP`
+  (`CHIPS_OFFSITE_OUT`/`CHIPS_OFFSITE_RETURN` **removed 2026-09-13** — off-site/excess chips are no longer a `Transaction` at all; see `GameDaySummary.chips_variance` below)
 - `amount` — always positive
 - `currency`, `conversion_rate` — relevant to `PAYMENT_CASH` only; `conversion_rate` is a snapshot value, not a live FK, so history never shifts
 - `channel` — `CASHIER` | `TRANSFER_DVA` | `CASH` | `POS` | `CHIPS` | `DEAL` | `WRITE_OFF` (drives the ledger's "icon" column)
 - `notes`
 - `recorded_by` — FK → StaffProfile, null for webhook-auto-captured rows
-- `floor_manager` — FK → FloorManager, set only for physical-count types (`CHIPS_*`, `PAYMENT_CASH`, `RAKE`, `TIP`)
+- `floor_manager` — FK → FloorManager, set only for physical-count types (`CHIPS_OUT`, `CHIPS_IN`, `PAYMENT_CASH`, `RAKE`, `TIP`) — never Owner-authorized, a dual-witness count is always a Floor Manager PIN specifically
 - `confirmed_at` — when the FM PIN was validated
 - `status` — `POSTED` | `PENDING_APPROVAL` | `APPROVED` | `REJECTED` (only `PAYOUT` uses the non-`POSTED` states, per "every payout needs Owner approval")
 - `approved_by`, `approved_at` — FK → StaffProfile (Owner)
@@ -87,7 +90,8 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 Note: `Deal` and write-off/credit are **not** separate tables — they're `Transaction` rows (`PAYMENT_DEAL`, `WRITE_OFF`) authored by an Owner. Their own approval is implicit: only an Owner can create them, so there's no separate approval workflow to model.
 
 #### `GameDaySummary` (snapshot, written once at close — not computed live)
-Captures "final position" fields the brief says only exist after a game-day closes: `num_players`, `chips_out_total`, `chips_in_total`, `rake_total`, `tips_total`, `chips_outstanding`, `total_payments`, `game_balance`. One row per `GameDay`, written at close time so historical game-days don't need recomputation.
+Captures "final position" fields the brief says only exist after a game-day closes: `num_players`, `chips_out_total`, `chips_in_total`, `rake_total`, `tips_total`, `chips_variance`, `total_payments`, `game_balance`. One row per `GameDay`, written at close time so historical game-days don't need recomputation.
+- `chips_variance` — `DecimalField`, signed (renamed from the original, never-implemented `chips_outstanding` placeholder — same slot, precise definition added 2026-09-13). Computed at close as `chips_out_total − chips_in_total − rake_total − tips_total`: **positive** = unreturned/off-site chips for this game-day; **negative** = excess chips returned this game-day (chips that went off-site on an earlier day coming back into play). The club-wide **Outstanding Chips** figure shown to Accountant/Owner is a live `SUM(chips_variance)` over every closed `GameDaySummary` row — not a stored running total, consistent with the "balances computed, not stored" principle above.
 
 ## The four ledgers, as queries over `Transaction`
 
@@ -95,7 +99,7 @@ Captures "final position" fields the brief says only exist after a game-day clos
 |---|---|
 | Game-day ledger | `game_day = X`, excluding `RAKE`/`TIP` |
 | Player game-day ledger | above + `player = Y` |
-| Outstanding ledger | `game_day IS NULL` (between-game-day payments/deals), per player |
+| Outstanding ledger | `game_day IS NULL` (between-game-day payments/deals), per player — **Owner/Accountant only** as of 2026-09-13 (`IsOwnerOrAccountant`, replacing the current `IsAuthenticated`); a Cashier never reaches this, consistent with no cross-game-day history being shown to that role |
 | Main account ledger | `channel = TRANSFER_DVA` (sweep-ins) OR `type = PAYOUT` (transfers out) — the only rows that actually touch the bank |
 
 ## ERD
@@ -110,9 +114,11 @@ erDiagram
     GameDay ||--o| GameDaySummary : "closes into"
     GameDay ||--o{ ConversionRate : "rate override for"
     StaffProfile ||--o{ Transaction : "recorded / approved / voided"
+    StaffProfile ||--o{ GameDay : "Owner PIN/login authorizes open"
+    StaffProfile ||--o{ ConversionRate : "Owner PIN/login authorizes"
     FloorManager ||--o{ Transaction : "confirms"
-    FloorManager ||--o{ GameDay : "authorizes open/close"
-    FloorManager ||--o{ ConversionRate : "authorizes"
+    FloorManager ||--o{ GameDay : "PIN authorizes open/close"
+    FloorManager ||--o{ ConversionRate : "PIN authorizes"
 ```
 
 ## Modeling calls made — flag if any should change
@@ -122,3 +128,6 @@ erDiagram
 - Balances (player, game-day, Main account) are always computed at query time — nothing is cached except the `GameDaySummary` snapshot taken at close.
 - `CreditRequest` (Owner "approve credit request") isn't modeled yet — it depends on the deferred Player app (phase 2), since there's no v1 path for a player to originate a request without a login.
 - Notification and general activity-log tables aren't modeled yet — pending the still-open notification matrix; most financial activity is already attributable via `recorded_by`/`approved_by`/`voided_by`/`floor_manager` on `Transaction`.
+- **Chips-limit enforcement lives in `record_transaction`, not the serializer alone.** ✅ Built 2026-09-13: on a `CHIPS_OUT` attempt, computes the player's current game-day debt via `selectors.player_game_day_balance` + the new amount; raises `InvalidStateError` before the Floor Manager PIN step runs if `player.chips_limit` is set and would be exceeded.
+- **Authorizer resolution generalizes from Floor-Manager-only to Floor-Manager-or-Owner.** ✅ Built 2026-09-13, shipped slightly differently than first sketched here: rather than renaming `_resolve_floor_manager(floor_manager_id, pin)` into one combined `_resolve_authorizer(authorizer_type, authorizer_id, pin)`, `_resolve_floor_manager` was kept as-is and a new `_resolve_owner_pin(owner_id, pin)` added alongside it, unified by a `_resolve_owner_or_floor_manager` wrapper — less churn on the existing FM-only call sites (physical-count confirmations), same effect. `GameDay.opened_by`/`ConversionRate.set_by` are now nullable (`limit_choices_to={'role': OWNER}`).
+- **Cashier-facing "today's balance" is a new selector, not a new field.** ✅ Built 2026-09-13: `player_game_day_balance(player, game_day)` — a signed `SUM()` over `Transaction` rows scoped to one `game_day`, mirroring the existing lifetime `player_balance(player)` but bounded. `PlayerSerializer.get_balance` returns it instead of the lifetime `balance` for a Cashier caller when the lifetime figure is negative; positive values still return the lifetime figure regardless of caller role.

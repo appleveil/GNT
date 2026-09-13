@@ -8,6 +8,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .models import FloorManager, Player, PlayerBankAccount, StaffUser
 from .permissions import IsCashierOrOwner, IsOwner
+
+PIN_MIN_LENGTH = 4
+PIN_MAX_LENGTH = 8
 from .serializers import (
     FloorManagerSerializer,
     PlayerBankAccountSerializer,
@@ -33,6 +36,27 @@ class LogoutView(APIView):
             RefreshToken(request.data['refresh']).blacklist()
         except (KeyError, TokenError):
             pass
+        return Response(status=204)
+
+
+class SetOwnPinView(APIView):
+    """
+    Owner sets/resets their own in-person authorization PIN — distinct from
+    their login password, used for Open Game-Day / Set FX Rate. See
+    CONCEPT.md's "Open Game-Day flow." Owner-only: a Cashier/Accountant has no
+    such PIN in v1.
+    """
+
+    permission_classes = [IsOwner]
+
+    def post(self, request):
+        pin = request.data.get('pin', '')
+        if not (PIN_MIN_LENGTH <= len(pin) <= PIN_MAX_LENGTH):
+            return Response(
+                {'pin': f'A PIN must be {PIN_MIN_LENGTH}-{PIN_MAX_LENGTH} characters.'}, status=400,
+            )
+        request.user.set_pin(pin)
+        request.user.save(update_fields=['pin_hash'])
         return Response(status=204)
 
 

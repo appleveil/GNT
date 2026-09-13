@@ -9,20 +9,18 @@ from decimal import Decimal
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce
 
-from .models import GameDay, Transaction
+from .models import GameDay, GameDaySummary, Transaction
 
 ZERO = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
 
-# Debits reduce a player's balance (chips issued, chips taken off-site, money paid out to them).
+# Debits reduce a player's balance (chips issued, money paid out to them).
 DEBIT_TYPES = {
     Transaction.Type.CHIPS_OUT,
-    Transaction.Type.CHIPS_OFFSITE_OUT,
     Transaction.Type.PAYOUT,
 }
 # Credits increase a player's balance (chips returned, any form of payment, write-offs).
 CREDIT_TYPES = {
     Transaction.Type.CHIPS_IN,
-    Transaction.Type.CHIPS_OFFSITE_RETURN,
     Transaction.Type.PAYMENT_CASH,
     Transaction.Type.PAYMENT_TRANSFER,
     Transaction.Type.PAYMENT_POS,
@@ -94,6 +92,17 @@ def player_balance(player):
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
 
 
+def player_game_day_balance(player, game_day):
+    """
+    A player's signed balance within a single game-day only — not lifetime.
+    Feeds both chips-limit enforcement (current game-day debt) and the
+    Cashier-facing "today's balance" view (see CONCEPT.md's "Chips limit" and
+    "Cashier player-history visibility").
+    """
+    qs = _with_signed_amount(Transaction.objects.filter(game_day=game_day, player=player, is_voided=False))
+    return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
+
+
 def main_account_balance():
     qs = _with_signed_amount(Transaction.objects.filter(MAIN_ACCOUNT_FILTER, is_voided=False))
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
@@ -102,6 +111,55 @@ def main_account_balance():
 def current_open_game_day():
     """The most recently opened game-day still in progress, or None if none is open."""
     return GameDay.objects.filter(status=GameDay.Status.OPEN).order_by('-started_at').first()
+
+
+PAYMENT_TYPES = {
+    Transaction.Type.PAYMENT_CASH,
+    Transaction.Type.PAYMENT_TRANSFER,
+    Transaction.Type.PAYMENT_POS,
+    Transaction.Type.PAYMENT_DEAL,
+}
+
+
+def _sum_amount(qs):
+    return qs.aggregate(total=Coalesce(Sum('amount'), ZERO))['total']
+
+
+def game_day_summary_data(game_day):
+    """
+    Everything GameDaySummary needs, computed fresh from Transaction — called once,
+    at close, by gaming.services.close_game_day. Never called live/read-only; a
+    closed game-day's summary is a frozen snapshot, not recomputed on each read.
+    """
+    txns = Transaction.objects.filter(game_day=game_day, is_voided=False)
+    chips_out_total = _sum_amount(txns.filter(type=Transaction.Type.CHIPS_OUT))
+    chips_in_total = _sum_amount(txns.filter(type=Transaction.Type.CHIPS_IN))
+    rake_total = _sum_amount(txns.filter(type=Transaction.Type.RAKE))
+    tips_total = _sum_amount(txns.filter(type=Transaction.Type.TIP))
+    total_payments = _sum_amount(txns.filter(type__in=PAYMENT_TYPES))
+    num_players = txns.filter(player__isnull=False).values('player').distinct().count()
+    game_balance = _with_signed_amount(txns.exclude(type__in=EXCLUDED_FROM_GAME_DAY_LEDGER)).aggregate(
+        total=Coalesce(Sum('signed_amount'), ZERO)
+    )['total']
+    return {
+        'num_players': num_players,
+        'chips_out_total': chips_out_total,
+        'chips_in_total': chips_in_total,
+        'rake_total': rake_total,
+        'tips_total': tips_total,
+        'chips_variance': chips_out_total - chips_in_total - rake_total - tips_total,
+        'total_payments': total_payments,
+        'game_balance': game_balance,
+    }
+
+
+def outstanding_chips_total():
+    """
+    Club-wide unreturned-chips liability — the live running sum of every closed
+    game-day's variance (positive days add to it, negative/excess days pay it
+    down). See CONCEPT.md's "Off-site chips."
+    """
+    return GameDaySummary.objects.aggregate(total=Coalesce(Sum('chips_variance'), ZERO))['total']
 
 
 def dashboard_totals():

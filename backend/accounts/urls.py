@@ -14,6 +14,7 @@ urlpatterns = [
     path('auth/login/', views.StaffLoginView.as_view(), name='staff-login'),
     path('auth/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('auth/logout/', views.LogoutView.as_view(), name='staff-logout'),
+    path('auth/set-pin/', views.SetOwnPinView.as_view(), name='staff-set-pin'),
     path(
         'players/<int:player_pk>/bank-accounts/',
         bank_accounts.as_view({'get': 'list', 'post': 'create'}),

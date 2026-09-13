@@ -4,12 +4,15 @@ rule is independently callable/testable. See CONCEPT.md's "Scope decisions"
 and "Floor Manager" sections for the rules encoded here.
 """
 
+from decimal import Decimal
+
 from django.utils import timezone
 
 from accounts.models import FloorManager, StaffUser
 
+from . import selectors
 from .exceptions import AuthorizationError, InvalidStateError
-from .models import ConversionRate, GameDay, Transaction
+from .models import ConversionRate, GameDay, GameDaySummary, Transaction
 
 
 def _require_open_game_day(game_day):
@@ -35,19 +38,65 @@ def _resolve_floor_manager(floor_manager_id, pin):
     return fm
 
 
-def open_game_day(number, started_at, operator, floor_manager_id=None, floor_manager_pin=None):
-    """Owner, or a Floor Manager PIN, can open a game-day. Cashier cannot do this alone."""
+def _resolve_owner_pin(owner_id, pin):
+    """
+    Returns the authorizing Owner (validated by their own PIN, not the operator's
+    session), or None if no PIN was offered at all. Mirrors _resolve_floor_manager.
+    """
+    if not owner_id or not pin:
+        return None
+    try:
+        owner = StaffUser.objects.get(pk=owner_id, role=StaffUser.Role.OWNER, is_active=True)
+    except StaffUser.DoesNotExist:
+        raise AuthorizationError('Unknown or inactive Owner.')
+    if not owner.check_pin(pin):
+        raise AuthorizationError('Incorrect Owner PIN.')
+    return owner
+
+
+def _resolve_owner_or_floor_manager(
+    operator, floor_manager_id=None, floor_manager_pin=None, owner_id=None, owner_pin=None, action='This',
+):
+    """
+    Shared by open_game_day and set_conversion_rate — both are Owner-or-Floor-
+    Manager-gated. A Cashier is never the authorizer, even as the session that
+    submits someone else's PIN: attribution comes from whichever PIN/login
+    resolves here, never from `operator` beyond the operator.role == OWNER
+    shortcut (a real Owner login needs no PIN). Returns (owner_or_None, fm_or_None).
+    """
     fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
-    if operator.role != StaffUser.Role.OWNER and fm is None:
-        raise AuthorizationError('Opening a game-day requires the Owner or a Floor Manager PIN.')
+    if operator.role == StaffUser.Role.OWNER:
+        return operator, fm if fm else None
+    owner = _resolve_owner_pin(owner_id, owner_pin) if fm is None else None
+    if owner is None and fm is None:
+        raise AuthorizationError(f'{action} requires the Owner (login or PIN) or a Floor Manager PIN.')
+    return owner, fm
+
+
+def open_game_day(
+    number, started_at, operator, floor_manager_id=None, floor_manager_pin=None,
+    owner_id=None, owner_pin=None,
+):
+    """
+    Owner (own login, or PIN) or a Floor Manager PIN authorizes this — a Cashier
+    is never the authorizer, under any circumstance. See CONCEPT.md's "Open
+    Game-Day flow."
+    """
+    owner, fm = _resolve_owner_or_floor_manager(
+        operator, floor_manager_id, floor_manager_pin, owner_id, owner_pin, action='Opening a game-day',
+    )
     return GameDay.objects.create(
         number=number, started_at=started_at, status=GameDay.Status.OPEN,
-        opened_by=operator, opened_by_floor_manager=fm,
+        opened_by=owner, opened_by_floor_manager=fm,
     )
 
 
 def close_game_day(game_day, operator, floor_manager_id=None, floor_manager_pin=None):
-    """Cashier, Owner, or a Floor Manager PIN can each close a game-day alone."""
+    """
+    Cashier, Owner, or a Floor Manager PIN can each close a game-day alone.
+    Writes the GameDaySummary snapshot (incl. the chips variance) once, here —
+    it's never recomputed after this.
+    """
     fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
     allowed_roles = {StaffUser.Role.CASHIER, StaffUser.Role.OWNER}
     if operator.role not in allowed_roles and fm is None:
@@ -57,19 +106,23 @@ def close_game_day(game_day, operator, floor_manager_id=None, floor_manager_pin=
     game_day.closed_by = operator
     game_day.closed_by_floor_manager = fm
     game_day.save(update_fields=['status', 'ended_at', 'closed_by', 'closed_by_floor_manager'])
+    GameDaySummary.objects.update_or_create(
+        game_day=game_day, defaults=selectors.game_day_summary_data(game_day),
+    )
     return game_day
 
 
 def set_conversion_rate(
     currency, rate_to_naira, operator, game_day=None, floor_manager_id=None, floor_manager_pin=None,
+    owner_id=None, owner_pin=None,
 ):
-    """Owner, or a Floor Manager PIN, can set/update an FX rate. Cashier/Accountant cannot."""
-    fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
-    if operator.role != StaffUser.Role.OWNER and fm is None:
-        raise AuthorizationError('Setting the FX rate requires the Owner or a Floor Manager PIN.')
+    """Owner (own login, or PIN) or a Floor Manager PIN. Cashier/Accountant cannot."""
+    owner, fm = _resolve_owner_or_floor_manager(
+        operator, floor_manager_id, floor_manager_pin, owner_id, owner_pin, action='Setting the FX rate',
+    )
     return ConversionRate.objects.create(
         currency=currency, rate_to_naira=rate_to_naira, game_day=game_day,
-        set_by=operator, set_by_floor_manager=fm,
+        set_by=owner, set_by_floor_manager=fm,
     )
 
 
@@ -115,8 +168,6 @@ def void_transaction(transaction_obj, actor, reason):
 PHYSICAL_COUNT_TYPES = {
     Transaction.Type.CHIPS_OUT,
     Transaction.Type.CHIPS_IN,
-    Transaction.Type.CHIPS_OFFSITE_OUT,
-    Transaction.Type.CHIPS_OFFSITE_RETURN,
     Transaction.Type.PAYMENT_CASH,
     Transaction.Type.RAKE,
     Transaction.Type.TIP,
@@ -124,9 +175,7 @@ PHYSICAL_COUNT_TYPES = {
 
 DEFAULT_CHANNEL_BY_TYPE = {
     Transaction.Type.CHIPS_OUT: Transaction.Channel.CASHIER,
-    Transaction.Type.CHIPS_OFFSITE_OUT: Transaction.Channel.CASHIER,
     Transaction.Type.CHIPS_IN: Transaction.Channel.CHIPS,
-    Transaction.Type.CHIPS_OFFSITE_RETURN: Transaction.Channel.CHIPS,
     Transaction.Type.PAYMENT_CASH: Transaction.Channel.CASH,
     Transaction.Type.PAYMENT_TRANSFER: Transaction.Channel.TRANSFER_DVA,
     Transaction.Type.PAYMENT_POS: Transaction.Channel.POS,
@@ -149,8 +198,20 @@ def record_transaction(
 
     Physical-count types require a valid Floor Manager PIN inline — the entry
     cannot be created without one.
+
+    A CHIPS_OUT that would push the player's current-game-day debt past their
+    chips_limit is rejected before the Floor Manager PIN step ever runs — see
+    CONCEPT.md's "Chips limit."
     """
     _require_open_game_day(game_day)
+    if type == Transaction.Type.CHIPS_OUT and player is not None and player.chips_limit is not None:
+        current_balance = selectors.player_game_day_balance(player, game_day) if game_day else Decimal('0')
+        debt_after = max(Decimal('0'), amount - current_balance)
+        if debt_after > player.chips_limit:
+            raise InvalidStateError(
+                f"This would exceed {player.display_name}'s chips limit for tonight "
+                f'(limit ₦{player.chips_limit:,}, debt after this issuance would be ₦{debt_after:,}).'
+            )
     fm = None
     if type in PHYSICAL_COUNT_TYPES:
         fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)

@@ -13,6 +13,17 @@ class StaffUser(AbstractUser):
 
     role = models.CharField(max_length=20, choices=Role.choices)
 
+    # In v1 only Owner-role rows set this — a quick in-person authorization PIN,
+    # distinct from their login password, used for Open Game-Day / Set FX Rate.
+    # Mirrors FloorManager.pin_hash. See CONCEPT.md's "Open Game-Day flow."
+    pin_hash = models.CharField(max_length=128, blank=True)
+
+    def set_pin(self, raw_pin: str) -> None:
+        self.pin_hash = make_password(raw_pin)
+
+    def check_pin(self, raw_pin: str) -> bool:
+        return bool(self.pin_hash) and check_password(raw_pin, self.pin_hash)
+
     def __str__(self):
         return f'{self.get_full_name() or self.username} ({self.get_role_display()})'
 
@@ -46,6 +57,10 @@ class FloorManager(models.Model):
 class Player(models.Model):
     account_code = models.CharField(max_length=20, unique=True)  # club-assigned short code, e.g. "WWI 7"
     display_name = models.CharField(max_length=150)
+    # Per-game-day credit ceiling, Owner-set-and-edited only; null = no cap. Checked
+    # against the player's *current game-day* debt, not a lifetime total — see
+    # CONCEPT.md's "Chips limit."
+    chips_limit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

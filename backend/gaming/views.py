@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Player, StaffUser
-from accounts.permissions import IsOwner
+from accounts.permissions import IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
 from .models import ConversionRate, GameDay, Transaction
@@ -45,6 +45,8 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
             operator=request.user,
             floor_manager_id=data.get('floor_manager_id'),
             floor_manager_pin=data.get('floor_manager_pin'),
+            owner_id=data.get('owner_id'),
+            owner_pin=data.get('owner_pin'),
         )
         return Response(GameDaySerializer(game_day).data, status=status.HTTP_201_CREATED)
 
@@ -91,6 +93,7 @@ class ConversionRateViewSet(viewsets.ReadOnlyModelViewSet):
             currency=data['currency'], rate_to_naira=data['rate_to_naira'], operator=request.user,
             game_day=data.get('game_day'), floor_manager_id=data.get('floor_manager_id'),
             floor_manager_pin=data.get('floor_manager_pin'),
+            owner_id=data.get('owner_id'), owner_pin=data.get('owner_pin'),
         )
         return Response(ConversionRateSerializer(rate).data, status=status.HTTP_201_CREATED)
 
@@ -158,7 +161,13 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
 
 
 class OutstandingLedgerView(APIView):
-    permission_classes = [IsAuthenticated]
+    """
+    Owner/Accountant only (as of 2026-09-13) — spans past game-days, and a
+    Cashier sees no cross-game-day history at all. See CONCEPT.md's "Cashier
+    player-history visibility."
+    """
+
+    permission_classes = [IsOwnerOrAccountant]
 
     def get(self, request):
         player_id = request.query_params.get('player')
@@ -190,6 +199,7 @@ class DashboardView(APIView):
             'total_outstanding_from_players': total_debt,
             'total_outstanding_to_players': total_credit,
             'debtor_count': debtor_count,
+            'outstanding_chips': selectors.outstanding_chips_total(),
         }
         if request.user.role == StaffUser.Role.OWNER:
             data['main_account_balance'] = selectors.main_account_balance()
