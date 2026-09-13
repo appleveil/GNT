@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from django.test import TestCase
 from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from accounts.models import FloorManager, Player, StaffUser
 
@@ -203,3 +205,113 @@ class AuthorizationTests(TestCase):
         services.approve_payout(payout, self.owner)
         payout.refresh_from_db()
         self.assertEqual(payout.status, Transaction.Status.APPROVED)
+
+
+class GameDayAndTransactionAPITests(APITestCase):
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.accountant = StaffUser.objects.create_user(
+            username='accountant', password='x', role=StaffUser.Role.ACCOUNTANT,
+        )
+        self.fm = FloorManager(name='Floor Boss', created_by=self.owner)
+        self.fm.set_pin('4321')
+        self.fm.save()
+        self.player = Player.objects.create(account_code='WWI 1', display_name='Test Player')
+
+    def test_cashier_cannot_open_game_day_via_api(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/game-days/open/', {'number': 1})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_open_and_cashier_can_close_via_api(self):
+        self.client.force_authenticate(self.owner)
+        open_response = self.client.post('/api/game-days/open/', {'number': 2})
+        self.assertEqual(open_response.status_code, status.HTTP_201_CREATED)
+        game_day_id = open_response.data['id']
+
+        self.client.force_authenticate(self.cashier)
+        close_response = self.client.post(f'/api/game-days/{game_day_id}/close/', {})
+        self.assertEqual(close_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(close_response.data['status'], GameDay.Status.CLOSED)
+
+    def test_recording_chips_out_requires_floor_manager_pin(self):
+        game_day = services.open_game_day(3, timezone.now(), self.owner)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/', {
+            'game_day': game_day.id, 'player': self.player.id, 'type': Transaction.Type.CHIPS_OUT,
+            'amount': '500000',
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        response = self.client.post('/api/transactions/', {
+            'game_day': game_day.id, 'player': self.player.id, 'type': Transaction.Type.CHIPS_OUT,
+            'amount': '500000', 'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['channel'], Transaction.Channel.CASHIER)
+
+    def test_cashier_cannot_record_write_off(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/', {
+            'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '100000',
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_record_write_off(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '100000',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_payout_flow_requires_owner_approval_via_api(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/payout/', {'player': self.player.id, 'amount': '50000'})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], Transaction.Status.PENDING_APPROVAL)
+        txn_id = response.data['id']
+
+        approve_response = self.client.post(f'/api/transactions/{txn_id}/approve/')
+        self.assertEqual(approve_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.owner)
+        approve_response = self.client.post(f'/api/transactions/{txn_id}/approve/')
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_response.data['status'], Transaction.Status.APPROVED)
+
+
+class DashboardAndMainAccountAPITests(APITestCase):
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.accountant = StaffUser.objects.create_user(
+            username='accountant', password='x', role=StaffUser.Role.ACCOUNTANT,
+        )
+
+    def test_cashier_cannot_view_dashboard(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_accountant_dashboard_excludes_main_account_balance(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('main_account_balance', response.data)
+
+    def test_owner_dashboard_includes_main_account_balance(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('main_account_balance', response.data)
+
+    def test_accountant_cannot_view_main_account_ledger(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.get('/api/main-account/ledger/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_view_main_account_ledger(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/main-account/ledger/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)

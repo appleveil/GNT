@@ -98,6 +98,7 @@ REST_FRAMEWORK = {
         'webhook': '600/hour',    # Paystack webhook intake
     },
     'NUM_PROXIES': 1,  # Railway
+    'EXCEPTION_HANDLER': 'lpc_backend.exception_handling.exception_handler',
 }
 
 # Paystack — Main account keys live here; each player's Gaming Account keys

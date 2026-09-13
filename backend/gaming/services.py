@@ -100,6 +100,60 @@ def void_transaction(transaction_obj, actor, reason):
     return transaction_obj
 
 
+# Physical-count types: a Floor Manager independently witnessed the same count, so
+# these can't save without their PIN — see CONCEPT.md's Floor Manager section.
+PHYSICAL_COUNT_TYPES = {
+    Transaction.Type.CHIPS_OUT,
+    Transaction.Type.CHIPS_IN,
+    Transaction.Type.CHIPS_OFFSITE_OUT,
+    Transaction.Type.CHIPS_OFFSITE_RETURN,
+    Transaction.Type.PAYMENT_CASH,
+    Transaction.Type.RAKE,
+    Transaction.Type.TIP,
+}
+
+DEFAULT_CHANNEL_BY_TYPE = {
+    Transaction.Type.CHIPS_OUT: Transaction.Channel.CASHIER,
+    Transaction.Type.CHIPS_OFFSITE_OUT: Transaction.Channel.CASHIER,
+    Transaction.Type.CHIPS_IN: Transaction.Channel.CHIPS,
+    Transaction.Type.CHIPS_OFFSITE_RETURN: Transaction.Channel.CHIPS,
+    Transaction.Type.PAYMENT_CASH: Transaction.Channel.CASH,
+    Transaction.Type.PAYMENT_TRANSFER: Transaction.Channel.TRANSFER_DVA,
+    Transaction.Type.PAYMENT_POS: Transaction.Channel.POS,
+    Transaction.Type.PAYMENT_DEAL: Transaction.Channel.DEAL,
+    Transaction.Type.WRITE_OFF: Transaction.Channel.WRITE_OFF,
+    Transaction.Type.PAYOUT: Transaction.Channel.CASHIER,
+    Transaction.Type.RAKE: Transaction.Channel.CASHIER,
+    Transaction.Type.TIP: Transaction.Channel.CASHIER,
+}
+
+
+def record_transaction(
+    *, type, amount, recorded_by, game_day=None, player=None, notes='', currency='NGN',
+    conversion_rate=None, channel=None, floor_manager_id=None, floor_manager_pin=None,
+):
+    """
+    The general entry point for recording a ledger-affecting event (chips, cash,
+    POS, transfer, deal, write-off, rake, tip — everything except PAYOUT, which
+    goes through initiate_payout/approve_payout instead).
+
+    Physical-count types require a valid Floor Manager PIN inline — the entry
+    cannot be created without one.
+    """
+    fm = None
+    if type in PHYSICAL_COUNT_TYPES:
+        fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
+        if fm is None:
+            raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
+    return Transaction.objects.create(
+        game_day=game_day, player=player, type=type, amount=amount,
+        currency=currency, conversion_rate=conversion_rate,
+        channel=channel or DEFAULT_CHANNEL_BY_TYPE[type], notes=notes,
+        recorded_by=recorded_by, floor_manager=fm,
+        confirmed_at=timezone.now() if fm else None,
+    )
+
+
 def initiate_payout(player, amount, operator, game_day=None):
     """Cashier initiates a cash-out transfer; it always lands PENDING_APPROVAL."""
     return Transaction.objects.create(

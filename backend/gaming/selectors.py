@@ -4,6 +4,8 @@ queries over Transaction" table. Nothing here is stored; every balance is
 computed at query time.
 """
 
+from decimal import Decimal
+
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce
 
@@ -95,3 +97,19 @@ def player_balance(player):
 def main_account_balance():
     qs = _with_signed_amount(Transaction.objects.filter(MAIN_ACCOUNT_FILTER, is_voided=False))
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
+
+
+def dashboard_totals():
+    """
+    (total owed BY players, total owed TO players, debtor count) across every
+    player, in a single grouped query — feeds the Accountant/Owner dashboard.
+    """
+    per_player = (
+        _with_signed_amount(Transaction.objects.filter(is_voided=False, player__isnull=False))
+        .values('player')
+        .annotate(balance=Sum('signed_amount'))
+    )
+    total_debt = sum((-row['balance'] for row in per_player if row['balance'] < 0), Decimal('0'))
+    total_credit = sum((row['balance'] for row in per_player if row['balance'] > 0), Decimal('0'))
+    debtor_count = sum(1 for row in per_player if row['balance'] < 0)
+    return total_debt, total_credit, debtor_count
