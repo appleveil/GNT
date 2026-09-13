@@ -9,7 +9,7 @@ from decimal import Decimal
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce
 
-from .models import Transaction
+from .models import GameDay, Transaction
 
 ZERO = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
 
@@ -97,6 +97,11 @@ def player_balance(player):
 def main_account_balance():
     qs = _with_signed_amount(Transaction.objects.filter(MAIN_ACCOUNT_FILTER, is_voided=False))
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
+
+
+def current_open_game_day():
+    """The most recently opened game-day still in progress, or None if none is open."""
+    return GameDay.objects.filter(status=GameDay.Status.OPEN).order_by('-started_at').first()
 
 
 def dashboard_totals():
