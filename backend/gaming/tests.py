@@ -9,7 +9,7 @@ from rest_framework.test import APITestCase
 from accounts.models import FloorManager, Player, StaffUser
 
 from . import selectors, services
-from .exceptions import AuthorizationError
+from .exceptions import AuthorizationError, InvalidStateError
 from .models import ConversionRate, GameDay, Transaction
 
 
@@ -194,6 +194,25 @@ class AuthorizationTests(TestCase):
             services.void_transaction(txn, self.cashier, 'too late')
         services.void_transaction(txn, self.owner, 'owner override')  # should not raise
 
+    # --- closed game-day guard (server-side, independent of any frontend) ---
+
+    def test_cannot_record_transaction_against_closed_game_day(self):
+        gd = services.open_game_day(9, timezone.now(), self.owner)
+        services.close_game_day(gd, self.cashier)
+        player = Player.objects.create(account_code='WWI 5', display_name='Test5')
+        with self.assertRaises(InvalidStateError):
+            services.record_transaction(
+                type=Transaction.Type.CHIPS_OUT, amount=Decimal(1000), recorded_by=self.cashier,
+                game_day=gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            )
+
+    def test_cannot_initiate_payout_against_closed_game_day(self):
+        gd = services.open_game_day(10, timezone.now(), self.owner)
+        services.close_game_day(gd, self.cashier)
+        player = Player.objects.create(account_code='WWI 6', display_name='Test6')
+        with self.assertRaises(InvalidStateError):
+            services.initiate_payout(player, Decimal(1000), self.cashier, game_day=gd)
+
     # --- payout approval ---
 
     def test_payout_requires_owner_approval(self):
@@ -250,6 +269,16 @@ class GameDayAndTransactionAPITests(APITestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['channel'], Transaction.Channel.CASHIER)
+
+    def test_recording_against_closed_game_day_returns_400(self):
+        game_day = services.open_game_day(4, timezone.now(), self.owner)
+        services.close_game_day(game_day, self.cashier)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/', {
+            'game_day': game_day.id, 'player': self.player.id, 'type': Transaction.Type.CHIPS_OUT,
+            'amount': '500000', 'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_cashier_cannot_record_write_off(self):
         self.client.force_authenticate(self.cashier)

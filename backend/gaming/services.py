@@ -8,8 +8,18 @@ from django.utils import timezone
 
 from accounts.models import FloorManager, StaffUser
 
-from .exceptions import AuthorizationError
+from .exceptions import AuthorizationError, InvalidStateError
 from .models import ConversionRate, GameDay, Transaction
+
+
+def _require_open_game_day(game_day):
+    """
+    Enforced server-side, not left to whichever frontend is calling in: a client
+    can go stale (another device closed this game-day moments ago) or simply not
+    be the sanctioned UI at all, so this can't be a client-side-only rule.
+    """
+    if game_day is not None and game_day.status != GameDay.Status.OPEN:
+        raise InvalidStateError(f'Game-day {game_day.number} is closed — it cannot accept new entries.')
 
 
 def _resolve_floor_manager(floor_manager_id, pin):
@@ -140,6 +150,7 @@ def record_transaction(
     Physical-count types require a valid Floor Manager PIN inline — the entry
     cannot be created without one.
     """
+    _require_open_game_day(game_day)
     fm = None
     if type in PHYSICAL_COUNT_TYPES:
         fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
@@ -156,6 +167,7 @@ def record_transaction(
 
 def initiate_payout(player, amount, operator, game_day=None):
     """Cashier initiates a cash-out transfer; it always lands PENDING_APPROVAL."""
+    _require_open_game_day(game_day)
     return Transaction.objects.create(
         game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=amount,
         channel=Transaction.Channel.CASHIER, recorded_by=operator,
