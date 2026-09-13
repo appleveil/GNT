@@ -418,7 +418,7 @@ There are four ledgers - which are served from a master ledger (or database)
     |  | WWI 5 | Mike | - | 1500000 | -4200000 | Transfer (DVA) | Player deposit |
     |  | WWI 6 | Mary | - | 700000 | -3500000 | Chips | Chips in |
     |  | WWI 9 | Martin | - | 500000 | -3,000,000 | Transfer (DVA) | Player deposit |
-    |  | WWI 7 | Marco | - | 1,000,000 | -2,900,000 | Deal | Deal |
+    |  | WWI 7 | Marco | - | 1,000,000 | -2,000,000 | Deal | Deal |
     
     The channel/mode should be an icon within the appropriate column, not an actual column
     
