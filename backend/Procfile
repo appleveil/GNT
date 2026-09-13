@@ -1,0 +1,4 @@
+web: gunicorn lpc_backend.wsgi --log-file -
+worker: celery -A lpc_backend worker --loglevel=info
+beat: celery -A lpc_backend beat --loglevel=info
+release: python manage.py migrate

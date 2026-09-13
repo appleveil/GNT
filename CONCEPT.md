@@ -155,7 +155,7 @@ The brief above used "Promoter," "Manager," and "Owner" interchangeably for the 
 - Notification matrix: which event notifies which role via which channel (partially specified in brief).
 - Failure handling: webhook/sweep failure, insufficient Main-account balance at payout time, failed transfer to a player.
 - Whether Cashier can see a player's full cross-game-day history at seating time, or only the current game-day.
-- Technical validation of the Paystack dedicated-virtual-account-per-player approach (fees, KYC/BVN, provisioning limits at expected player count).
+- ~~Technical validation of the Paystack dedicated-virtual-account-per-player approach~~ — confirmed feasible directly with Paystack support (2026-09-13); proceeding on that basis.
 
 ## Completeness pass (resolved 2026-09-13)
 
