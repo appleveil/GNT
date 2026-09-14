@@ -66,6 +66,13 @@ class GameDayPlayer(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name='players_seated',
     )
     added_at = models.DateTimeField(auto_now_add=True)
+    # Null = still active at the table. Set = "left the table" (see
+    # gaming.services.leave_table) — the row itself is NOT deleted, same
+    # never-delete rule as everything else here; a departed player just
+    # doesn't count toward MAX_ACTIVE_PLAYERS_PER_GAME_DAY any more and is
+    # shown differently in the Cashier UI. Re-seating them (seat_player /
+    # _ensure_seated) clears this back to null. Added 2026-09-14.
+    left_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [

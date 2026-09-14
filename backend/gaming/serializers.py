@@ -154,6 +154,9 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
     chips_used_today = serializers.SerializerMethodField()
     gaming_account = serializers.SerializerMethodField()
     added_at = serializers.DateTimeField()
+    # Null = still active at the table; set = "left the table" — see
+    # gaming.services.leave_table. Added 2026-09-14.
+    left_at = serializers.DateTimeField(allow_null=True)
 
     def get_balance(self, obj):
         from . import selectors

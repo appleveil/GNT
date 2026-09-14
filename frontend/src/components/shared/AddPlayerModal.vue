@@ -24,13 +24,18 @@ const accountCode = ref('')
 const displayName = ref('')
 const bank = ref({ bank_name: '', bank_code: '', account_number: '', account_name: '' })
 
-// Existing player — multi-select against the roster MINUS whoever's already
-// seated tonight (the old page let you re-pick someone already at the
-// table; this filters them out entirely instead).
+// Existing player — multi-select against the roster MINUS whoever's
+// ACTIVELY seated tonight (a departed player — left_at set — is meant to be
+// re-addable via "Return to Table", same as this modal; only currently-
+// active seats are excluded).
+const MAX_ACTIVE_PLAYERS = 9 // mirrors gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY
+
 const roster = ref([])
 const rosterLoading = ref(false)
 const search = ref('')
 const selectedIds = ref([])
+const activeCount = ref(0)
+const isFull = computed(() => activeCount.value >= MAX_ACTIVE_PLAYERS)
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return roster.value
@@ -47,11 +52,12 @@ async function loadRoster() {
       api.get('/players/'),
       api.get(`/game-days/${gameDay.current.id}/players/`),
     ])
-    const seatedIds = new Set(seatedRes.data.map(p => p.id))
-    roster.value = allRes.data.filter(p => !seatedIds.has(p.id))
+    const activeIds = new Set(seatedRes.data.filter(p => !p.left_at).map(p => p.id))
+    activeCount.value = activeIds.size
+    roster.value = allRes.data.filter(p => !activeIds.has(p.id))
     // Drop anyone from the current selection who got seated elsewhere
     // (another cashier device, or a retry after a partial failure below).
-    selectedIds.value = selectedIds.value.filter(id => !seatedIds.has(id))
+    selectedIds.value = selectedIds.value.filter(id => !activeIds.has(id))
   } catch {
     toast.error('Could not load the player roster.')
   } finally {
@@ -77,19 +83,25 @@ async function onSubmitExisting() {
   )
   submitting.value = false
 
-  const failedIds = ids.filter((_, i) => results[i].status === 'rejected')
-  if (!failedIds.length) {
+  const failures = ids
+    .map((id, i) => ({ id, result: results[i] }))
+    .filter(({ result }) => result.status === 'rejected')
+  if (!failures.length) {
     emit('added')
     emit('close')
     return
   }
 
   emit('added') // the ones that DID succeed are seated — parent's list needs them
-  const failedNames = failedIds
-    .map(id => roster.value.find(p => p.id === id)?.display_name || 'a player')
-    .join(', ')
-  error.value = `Added ${ids.length - failedIds.length} of ${ids.length}. Still need to retry: ${failedNames}.`
-  await loadRoster() // drops the succeeded ones from the list; failedIds stay selected for a retry
+  // Surface the real reason per player (table full vs. anything else) rather
+  // than a generic "still need to retry" for all of them.
+  const lines = failures.map(({ id, result }) => {
+    const name = roster.value.find(p => p.id === id)?.display_name || 'a player'
+    const reason = result.reason?.response?.data?.detail || 'could not be seated'
+    return `${name} — ${reason}`
+  })
+  error.value = `Added ${ids.length - failures.length} of ${ids.length}. ${lines.join(' ')}`
+  await loadRoster() // drops the succeeded ones from the list; failed ones stay selected for a retry
 }
 
 async function onSubmitNew() {
@@ -115,9 +127,19 @@ async function onSubmitNew() {
     emit('added')
     emit('close')
   } catch (err) {
-    error.value = Object.values(err.response?.data || {})[0]?.[0]
-      || err.response?.data?.detail
-      || 'Could not add player.'
+    if (err.response?.data?.registered_not_seated) {
+      // A real partial success, not a failure — the Player record was
+      // created, just not seated (table's full). Say so plainly rather than
+      // showing this in the same red error state as a validation failure.
+      toast.success(`${displayName.value} was registered but the table is full — seat them once a spot opens up.`)
+      accountCode.value = ''
+      displayName.value = ''
+      bank.value = { bank_name: '', bank_code: '', account_number: '', account_name: '' }
+    } else {
+      error.value = Object.values(err.response?.data || {})[0]?.[0]
+        || err.response?.data?.detail
+        || 'Could not add player.'
+    }
   } finally {
     submitting.value = false
   }
@@ -150,14 +172,20 @@ function onModeChange(next) {
       </div>
 
       <template v-if="mode === 'existing'">
-        <input v-model="search" type="text" placeholder="Search by name or account code…" class="search-input" />
+        <p v-if="isFull" class="dva-note">
+          Table is full ({{ activeCount }}/{{ MAX_ACTIVE_PLAYERS }} active) — seat a player once someone leaves the table.
+        </p>
+        <input
+          v-model="search" type="text" placeholder="Search by name or account code…" class="search-input"
+          :disabled="isFull"
+        />
         <div class="search-list">
           <p v-if="rosterLoading" class="muted">Loading…</p>
           <template v-else>
             <div
               v-for="p in filtered" :key="p.id" class="search-row"
-              :class="{ 'search-row--selected': selectedIds.includes(p.id) }"
-              @click="toggleSelect(p.id)"
+              :class="{ 'search-row--selected': selectedIds.includes(p.id), 'search-row--disabled': isFull }"
+              @click="!isFull && toggleSelect(p.id)"
             >
               <span class="check" :class="{ 'check--on': selectedIds.includes(p.id) }">
                 <span v-if="selectedIds.includes(p.id)">&#10003;</span>
@@ -171,7 +199,7 @@ function onModeChange(next) {
         <p v-if="error" class="form-error">{{ error }}</p>
 
         <button
-          class="btn btn--primary" type="button" :disabled="!selectedIds.length || submitting"
+          class="btn btn--primary" type="button" :disabled="isFull || !selectedIds.length || submitting"
           @click="onSubmitExisting"
         >
           {{ submitting ? 'Adding…' : `Add ${selectedIds.length || ''} Selected`.trim() }}
@@ -270,6 +298,7 @@ function onModeChange(next) {
 }
 .search-row:hover { background: var(--bg); }
 .search-row--selected { background: var(--accent-bg); color: var(--accent-text); font-weight: 600; }
+.search-row--disabled { opacity: 0.5; cursor: not-allowed; }
 .check {
   width: 20px;
   height: 20px;

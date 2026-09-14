@@ -11,8 +11,15 @@ from django.utils import timezone
 from accounts.models import FloorManager, Player, StaffUser
 
 from . import selectors
-from .exceptions import AuthorizationError, InvalidStateError
+from .exceptions import AuthorizationError, InvalidStateError, TableFullError
 from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, Transaction
+
+# A real table only has so many seats. Enforced in seat_player (the explicit
+# "add a player" action) only — _ensure_seated stays permissive, since any
+# real transaction recorded for a departed player should just revive them,
+# not get silently blocked by a cap meant for the explicit add flow. See
+# PLAN.md's "leave the table" entry.
+MAX_ACTIVE_PLAYERS_PER_GAME_DAY = 9
 
 
 def _require_open_game_day(game_day):
@@ -133,10 +140,18 @@ def _ensure_seated(game_day, player, operator=None):
     or rake/tip (player is None); called from both record_transaction and
     initiate_payout so a player can never have real activity tonight without
     also showing up in the Cashier's seated-players list.
+
+    Also revives a departed player (clears left_at) — deliberately permissive
+    here, unlike seat_player's cap check: any real transaction recorded
+    against someone who'd left just means they're evidently back at the
+    table, not something to silently block. See PLAN.md's "leave the table" entry.
     """
     if game_day is None or player is None:
         return
-    GameDayPlayer.objects.get_or_create(game_day=game_day, player=player, defaults={'added_by': operator})
+    seat, _ = GameDayPlayer.objects.get_or_create(game_day=game_day, player=player, defaults={'added_by': operator})
+    if seat.left_at is not None:
+        seat.left_at = None
+        seat.save(update_fields=['left_at'])
 
 
 def seat_player(game_day, operator, player=None, player_fields=None):
@@ -144,15 +159,48 @@ def seat_player(game_day, operator, player=None, player_fields=None):
     The explicit "add a player for tonight" action — see CONCEPT.md's Buy-in
     flow. Either pass an existing `player`, or `player_fields` to create a new
     club-wide Player record and seat it in one call. Idempotent: seating an
-    already-seated player is a no-op, not an error.
+    already-active player is a no-op, not an error.
+
+    Registering a brand-new player (player_fields) always succeeds, even if
+    the table is full — only seating them for tonight is capped at
+    MAX_ACTIVE_PLAYERS_PER_GAME_DAY active players (this includes reviving a
+    departed player via "Return to Table", which is exactly this same call
+    with an existing player_id). Raises TableFullError, carrying the player,
+    so the caller can report "registered but not seated" rather than a bare
+    failure — the Player row this call already created is NOT rolled back.
     """
     _require_open_game_day(game_day)
     if player is None:
         if not player_fields:
             raise ValueError('Either player or player_fields is required.')
         player = Player.objects.create(**player_fields)
+
+    already_active = GameDayPlayer.objects.filter(game_day=game_day, player=player, left_at__isnull=True).exists()
+    if not already_active and selectors.active_game_day_players_count(game_day) >= MAX_ACTIVE_PLAYERS_PER_GAME_DAY:
+        raise TableFullError(
+            f'The table is full ({MAX_ACTIVE_PLAYERS_PER_GAME_DAY} active players right now) — '
+            f"{player.display_name} wasn't seated. Try again once someone leaves the table.",
+            player=player,
+        )
     _ensure_seated(game_day, player, operator)
     return player
+
+
+def leave_table(game_day, player, operator=None):
+    """
+    Marks a seated player as having left tonight's table — frees their
+    active "slot" (see MAX_ACTIVE_PLAYERS_PER_GAME_DAY) without deleting
+    their GameDayPlayer row or touching any transaction history. Idempotent:
+    calling this again on an already-departed player just refreshes the
+    timestamp. Re-seating them (seat_player / _ensure_seated) clears left_at.
+    """
+    _require_open_game_day(game_day)
+    seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
+    if seat is None:
+        raise InvalidStateError(f"{player.display_name} isn't seated for tonight's game-day.")
+    seat.left_at = timezone.now()
+    seat.save(update_fields=['left_at'])
+    return seat
 
 
 def confirm_transaction(transaction_obj, floor_manager_id, floor_manager_pin):

@@ -137,6 +137,12 @@ watch(() => gameDay.current?.id, id => {
 
 const selectedPlayer = computed(() => players.value.find(p => p.id === selectedPlayerId.value) || null)
 
+// "Active" vs "total" seated — total is every GameDayPlayer row for tonight
+// (players.value, unchanged); active is those still at the table (left_at
+// null). Only active counts toward MAX_ACTIVE_PLAYERS (see AddPlayerModal).
+const activeCount = computed(() => players.value.filter(p => !p.left_at).length)
+const departedCount = computed(() => players.value.length - activeCount.value)
+
 function selectPlayer(p) {
   selectedPlayerId.value = p.id
 }
@@ -149,14 +155,78 @@ function onPlayerAdded() {
 
 // Entry sheet
 const entryModal = ref(null) // { type, player } | null
+// Set when the entry sheet was opened from the "Leave Table → Yes, return
+// chips" choice below — its CHIPS_IN save is what then marks them left,
+// chained here rather than in TransactionEntryModal itself.
+const pendingLeave = ref(null)
 
 function openEntry(type, player = selectedPlayer.value) {
   entryModal.value = { type, player }
 }
 
-function onEntrySaved() {
+function onEntryClosed() {
   entryModal.value = null
+  pendingLeave.value = null
+}
+
+async function onEntrySaved() {
+  const wasLeaving = pendingLeave.value
+  entryModal.value = null
+  pendingLeave.value = null
+  if (wasLeaving) {
+    try {
+      await api.post(`/game-days/${gameDay.current.id}/players/${wasLeaving.id}/leave/`)
+      toast.success(`${wasLeaving.display_name} returned their chips and left the table.`)
+    } catch {
+      toast.error(`Chips recorded, but couldn't mark ${wasLeaving.display_name} as left — try Leave Table again.`)
+    }
+    if (selectedPlayerId.value === wasLeaving.id) selectedPlayerId.value = null
+  }
   refreshAll()
+}
+
+// Leave Table / Return to Table — see PLAN.md's "leave the table" entry.
+// The 8th action-grid button is context-aware: an active player gets "Leave
+// Table" (opens the chips choice below); a departed one gets "Return to
+// Table" (straight back in, still subject to the active-seat cap).
+const leaveTarget = ref(null) // the player being asked "returning chips first?", or null
+
+function onLeaveOrReturnClick() {
+  if (selectedPlayer.value.left_at) {
+    onReturnToTable(selectedPlayer.value)
+  } else {
+    leaveTarget.value = selectedPlayer.value
+  }
+}
+
+async function onLeaveWithoutChips() {
+  const player = leaveTarget.value
+  leaveTarget.value = null
+  try {
+    await api.post(`/game-days/${gameDay.current.id}/players/${player.id}/leave/`)
+    toast.success(`${player.display_name} left the table.`)
+    if (selectedPlayerId.value === player.id) selectedPlayerId.value = null
+    refreshAll()
+  } catch (err) {
+    toast.error(err.response?.data?.detail || 'Could not mark this player as left.')
+  }
+}
+
+function onLeaveWithChips() {
+  const player = leaveTarget.value
+  leaveTarget.value = null
+  pendingLeave.value = player
+  openEntry('CHIPS_IN', player)
+}
+
+async function onReturnToTable(player) {
+  try {
+    await api.post(`/game-days/${gameDay.current.id}/players/`, { player_id: player.id })
+    toast.success(`${player.display_name} is back at the table.`)
+    refreshAll()
+  } catch (err) {
+    toast.error(err.response?.data?.detail || 'Could not return this player to the table.')
+  }
 }
 
 function playerName(playerId) {
@@ -213,7 +283,10 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
 
       <div class="picker-row">
-        <div class="lbl">Tonight's players</div>
+        <div>
+          <div class="lbl">Tonight's players</div>
+          <div v-if="departedCount" class="picker-sub">{{ activeCount }} active &middot; {{ departedCount }} left tonight</div>
+        </div>
         <button class="new-btn" type="button" @click="addPlayerOpen = true">+ Add Player</button>
       </div>
 
@@ -222,9 +295,11 @@ const N = n => `₦${Number(n).toLocaleString()}`
       <div v-else class="pills">
         <button
           v-for="p in players" :key="p.id" type="button" class="pill"
-          :class="{ 'pill--active': p.id === selectedPlayerId }" @click="selectPlayer(p)"
+          :class="{ 'pill--active': p.id === selectedPlayerId, 'pill--departed': p.left_at }"
+          @click="selectPlayer(p)"
         >
           {{ p.display_name }} &middot; {{ p.account_code }}
+          <span v-if="p.left_at" class="pill-tag">left</span>
         </button>
       </div>
 
@@ -234,7 +309,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
             Record for {{ selectedPlayer.display_name }} ({{ selectedPlayer.account_code }}) &middot; balance
             <span class="money" :class="{ 'money--positive': selectedPlayer.balance > 0 }">{{ N(selectedPlayer.balance) }}</span>
           </div>
-          <div v-if="selectedPlayer.chips_limit != null" class="chips-limit-badge">
+          <div v-if="selectedPlayer.left_at" class="left-badge">Left the table</div>
+          <div v-else-if="selectedPlayer.chips_limit != null" class="chips-limit-badge">
             Chips limit: {{ N(selectedPlayer.chips_used_today) }} of {{ N(selectedPlayer.chips_limit) }} used
           </div>
         </div>
@@ -246,6 +322,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <button class="action-btn" type="button" @click="openEntry('PAYMENT_POS')">POS Payment</button>
           <button class="action-btn" type="button" @click="openEntry('PAYMENT_TRANSFER')">Transfer<br>(manual)</button>
           <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">Payout</button>
+          <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">View Player</button>
+          <button
+            class="action-btn" type="button"
+            :class="selectedPlayer.left_at ? 'action-btn--accent' : 'action-btn--warn'"
+            @click="onLeaveOrReturnClick"
+          >{{ selectedPlayer.left_at ? 'Return to Table' : 'Leave Table' }}</button>
         </div>
       </div>
       <div v-else class="card section player-panel player-panel--empty">
@@ -325,8 +407,21 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
     <TransactionEntryModal
       v-if="entryModal" :type="entryModal.type" :player="entryModal.player" :game-day-id="gameDay.current.id"
-      @close="entryModal = null" @saved="onEntrySaved"
+      @close="onEntryClosed" @saved="onEntrySaved"
     />
+
+    <!-- Leave Table: the confirmation IS the chips question, not a separate step. -->
+    <div v-if="leaveTarget" class="overlay">
+      <div class="dialog card leave-dialog">
+        <div class="eyebrow">{{ leaveTarget.display_name }} is leaving the table</div>
+        <p class="muted">Are they returning any chips first?</p>
+        <div class="leave-actions">
+          <button class="btn btn--secondary" type="button" @click="onLeaveWithChips">Yes &mdash; return chips</button>
+          <button class="btn btn--secondary" type="button" @click="onLeaveWithoutChips">No &mdash; just leaving</button>
+        </div>
+        <button class="link-btn leave-cancel" type="button" @click="leaveTarget = null">Cancel</button>
+      </div>
+    </div>
 
     <!-- recorded-by-name assumes the voider is also the recorder (canVoid's own
          non-Owner rule guarantees this) — will need a real lookup once an
@@ -380,7 +475,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .general-btn-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
 .general-btn-sub { font-size: 11px; color: var(--text-tertiary); }
 
-.picker-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.picker-row { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; }
+.picker-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
 .new-btn {
   height: 40px;
   padding: 0 16px;
@@ -415,6 +511,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
   cursor: pointer;
 }
 .pill--active { border-color: var(--accent); background: var(--accent); color: #fff; }
+.pill--departed { background: var(--status-voided-bg); color: var(--status-voided-text); border-color: transparent; }
+.pill-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; margin-left: 4px; opacity: 0.8; }
 
 .player-panel--empty { text-align: center; }
 .player-panel--empty .muted { margin: 4px 0; }
@@ -432,8 +530,18 @@ const N = n => `₦${Number(n).toLocaleString()}`
   padding: 3px 10px;
   white-space: nowrap;
 }
+.left-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--status-voided-text);
+  border: 1px solid var(--border-strong);
+  background: var(--status-voided-bg);
+  border-radius: 12px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
 
-.action-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.action-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .action-btn {
   border: 1px solid var(--border-strong);
   background: var(--surface);
@@ -449,6 +557,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
   line-height: 1.3;
 }
 .action-btn--accent { border-color: var(--accent); border-width: 1.5px; color: var(--accent-text); }
+.action-btn--warn { border-color: var(--warning); color: var(--warning-text); }
 
 .ledger-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; margin-top: 4px; }
 .ledger-head-links { display: flex; gap: 16px; }
@@ -513,4 +622,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .money.warn { color: var(--warning-text); }
 .actions { display: flex; gap: 14px; margin-top: 16px; }
 .actions .btn { flex: 1; }
+
+.leave-dialog .muted { margin: 6px 0 20px; }
+.leave-actions { display: flex; flex-direction: column; gap: 10px; }
+.leave-cancel { display: block; margin: 16px auto 0; }
 </style>

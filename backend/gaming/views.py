@@ -10,6 +10,7 @@ from accounts.models import Player, StaffUser
 from accounts.permissions import IsCashierOrOwner, IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
+from .exceptions import TableFullError
 from .models import ConversionRate, GameDay, Transaction
 from .serializers import (
     CloseGameDaySerializer,
@@ -136,13 +137,23 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = SeatPlayerSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        player = services.seat_player(
-            game_day, request.user, player=data.get('player'),
-            player_fields=(
-                {'account_code': data['account_code'], 'display_name': data['display_name']}
-                if 'player' not in data else None
-            ),
-        )
+        try:
+            player = services.seat_player(
+                game_day, request.user, player=data.get('player'),
+                player_fields=(
+                    {'account_code': data['account_code'], 'display_name': data['display_name']}
+                    if 'player' not in data else None
+                ),
+            )
+        except TableFullError as exc:
+            # Caught here (not left to the global handler) so the response can
+            # carry registered_not_seated/player_id — the frontend needs to
+            # tell "seat capacity full" apart from any other 400 without
+            # string-matching the message. The Player row (if newly created)
+            # is NOT rolled back — see seat_player's own docstring.
+            return Response(
+                {'detail': str(exc), 'registered_not_seated': True, 'player_id': exc.player.id}, status=400,
+            )
         seat = selectors.game_day_players(game_day).get(player=player)
         return Response(GameDaySeatedPlayerSerializer(seat).data, status=status.HTTP_201_CREATED)
 
@@ -155,6 +166,21 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         """
         game_day = self.get_object()
         seat = get_object_or_404(selectors.game_day_players(game_day), player_id=player_pk)
+        return Response(GameDaySeatedPlayerSerializer(seat).data)
+
+    @action(detail=True, methods=['post'], url_path=r'players/(?P<player_pk>\d+)/leave')
+    def player_leave(self, request, pk=None, player_pk=None):
+        """
+        Marks a seated player as having left tonight's table — see
+        gaming.services.leave_table. Cashier or Owner only, same as seating
+        them; no PIN (leaving isn't a physical count or a financial action —
+        see PLAN.md's "leave the table" entry).
+        """
+        if not IsCashierOrOwner().has_permission(request, self):
+            return Response({'detail': 'Only a Cashier or the Owner can do this.'}, status=403)
+        game_day = self.get_object()
+        player = get_object_or_404(Player, pk=player_pk)
+        seat = services.leave_table(game_day, player, operator=request.user)
         return Response(GameDaySeatedPlayerSerializer(seat).data)
 
 

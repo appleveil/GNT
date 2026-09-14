@@ -169,9 +169,16 @@ def game_day_players(game_day):
     Players seated at a given game-day (see GameDayPlayer) — the Cashier-facing
     Players list, added 2026-09-13. Distinct from the full club roster
     (accounts.PlayerSerializer's plain queryset), which is still what a
-    "seat an existing player" search should use.
+    "seat an existing player" search should use. Includes departed players
+    (left_at set) — "total" seated, not "active"; see active_game_day_players_count.
     """
     return GameDayPlayer.objects.filter(game_day=game_day).select_related('player').order_by('added_at')
+
+
+def active_game_day_players_count(game_day):
+    """Seated AND still at the table (left_at is null) — what
+    gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY caps. Added 2026-09-14."""
+    return GameDayPlayer.objects.filter(game_day=game_day, left_at__isnull=True).count()
 
 
 PAYMENT_TYPES = {

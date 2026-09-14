@@ -10,7 +10,7 @@ from rest_framework.test import APITestCase
 from accounts.models import FloorManager, Player, PlayerBankAccount, StaffUser
 
 from . import selectors, services
-from .exceptions import AuthorizationError, InvalidStateError
+from .exceptions import AuthorizationError, InvalidStateError, TableFullError
 from .models import ConversionRate, GameDay, GameDayPlayer, Transaction
 
 
@@ -619,3 +619,110 @@ class GameDaySeatingTests(APITestCase):
         self.client.force_authenticate(self.cashier)
         response = self.client.get(f'/api/game-days/{self.game_day.id}/players/{player.id}/')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def _fill_table(self, count):
+        players = [Player.objects.create(account_code=f'WWI FULL{i}', display_name=f'Filler {i}') for i in range(count)]
+        for p in players:
+            services.seat_player(self.game_day, self.owner, player=p)
+        return players
+
+    def test_active_seat_cap_blocks_the_tenth_active_player(self):
+        self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
+        overflow = Player.objects.create(account_code='WWI OVER', display_name='Overflow')
+        with self.assertRaises(TableFullError) as ctx:
+            services.seat_player(self.game_day, self.owner, player=overflow)
+        self.assertEqual(ctx.exception.player, overflow)
+        self.assertFalse(GameDayPlayer.objects.filter(game_day=self.game_day, player=overflow).exists())
+
+    def test_reseating_an_already_active_player_is_unaffected_by_the_cap(self):
+        players = self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
+        services.seat_player(self.game_day, self.owner, player=players[0])  # should not raise
+        self.assertEqual(
+            GameDayPlayer.objects.filter(game_day=self.game_day, player=players[0]).count(), 1,
+        )
+
+    def test_new_player_registration_succeeds_even_when_table_is_full(self):
+        self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
+        with self.assertRaises(TableFullError):
+            services.seat_player(
+                self.game_day, self.owner, player_fields={'account_code': 'WWI NEWFULL', 'display_name': 'Hopeful'},
+            )
+        self.assertTrue(Player.objects.filter(account_code='WWI NEWFULL').exists())  # registered anyway
+        self.assertFalse(
+            GameDayPlayer.objects.filter(game_day=self.game_day, player__account_code='WWI NEWFULL').exists(),
+        )
+
+    def test_table_full_api_response_carries_registered_not_seated(self):
+        self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(
+            f'/api/game-days/{self.game_day.id}/players/',
+            {'account_code': 'WWI APIFULL', 'display_name': 'Via API'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(response.data['registered_not_seated'])
+        self.assertTrue(Player.objects.filter(account_code='WWI APIFULL').exists())
+        self.assertEqual(response.data['player_id'], Player.objects.get(account_code='WWI APIFULL').id)
+
+
+class LeaveTableTests(APITestCase):
+    """gaming.services.leave_table — see PLAN.md's "leave the table" entry."""
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.accountant = StaffUser.objects.create_user(
+            username='acct3', password='x', role=StaffUser.Role.ACCOUNTANT,
+        )
+        self.game_day = services.open_game_day(50, timezone.now(), self.owner)
+        self.player = Player.objects.create(account_code='WWI 50', display_name='Leaver')
+        services.seat_player(self.game_day, self.owner, player=self.player)
+
+    def test_leave_table_sets_left_at_without_touching_history(self):
+        services.record_transaction(
+            type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(100000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+        )
+        seat = services.leave_table(self.game_day, self.player, operator=self.cashier)
+        self.assertIsNotNone(seat.left_at)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(100000))
+
+    def test_leaving_someone_never_seated_raises(self):
+        stranger = Player.objects.create(account_code='WWI 51', display_name='Stranger')
+        with self.assertRaises(InvalidStateError):
+            services.leave_table(self.game_day, stranger, operator=self.cashier)
+
+    def test_reseating_a_departed_player_clears_left_at(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
+        self.assertIsNone(seat.left_at)
+
+    def test_recording_a_transaction_for_a_departed_player_revives_them(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        services.record_transaction(
+            type=Transaction.Type.PAYMENT_POS, amount=Decimal(5000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+        )
+        seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
+        self.assertIsNone(seat.left_at)
+
+    def test_returning_to_table_is_subject_to_the_active_cap(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        fillers = [Player.objects.create(account_code=f'WWI RET{i}', display_name=f'Filler {i}')
+                   for i in range(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)]
+        for p in fillers:
+            services.seat_player(self.game_day, self.owner, player=p)
+        with self.assertRaises(TableFullError):
+            services.seat_player(self.game_day, self.owner, player=self.player)
+
+    def test_cashier_can_mark_a_player_as_left_via_api(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(f'/api/game-days/{self.game_day.id}/players/{self.player.id}/leave/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(response.data['left_at'])
+
+    def test_accountant_cannot_mark_a_player_as_left(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(f'/api/game-days/{self.game_day.id}/players/{self.player.id}/leave/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

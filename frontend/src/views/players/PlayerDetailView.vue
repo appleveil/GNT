@@ -163,6 +163,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
     <p v-else-if="error" class="muted">{{ error }}</p>
 
     <div v-else class="card detail">
+      <div v-if="player.left_at" class="left-note">Left the table at {{ formatTime(player.left_at) }}</div>
+
       <div class="balance-block">
         <div class="eyebrow">
           Today's balance <span class="scope">(Game-Day #{{ gameDay.current.number }}, {{ gameDayDate }}, only)</span>
@@ -303,6 +305,16 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .muted { color: var(--text-secondary); font-size: 13px; }
 
 .detail { padding: 24px; max-width: 560px; }
+.left-note {
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--status-voided-text);
+  background: var(--status-voided-bg);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 16px;
+}
 .balance-block { text-align: center; margin-bottom: 10px; }
 .scope { text-transform: none; color: var(--text-tertiary); }
 .balance {
