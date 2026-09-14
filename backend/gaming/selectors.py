@@ -35,6 +35,16 @@ MAIN_ACCOUNT_FILTER = Q(channel=Transaction.Channel.TRANSFER_DVA) | Q(type=Trans
 
 
 def _with_signed_amount(queryset):
+    """
+    signed_amount is a row's TRUE value regardless of is_voided — the ledger
+    LISTING functions below (_with_running_balance's callers) want a voided
+    row's real original amount to display struck through, not zeroed out. The
+    BALANCE/aggregate functions (player_balance, player_game_day_balance,
+    game_day_summary_data, dashboard_totals, ...) call this directly on a
+    queryset they've already filtered to is_voided=False themselves, so a
+    voided row never actually reaches Sum() in those — this annotation being
+    voided-agnostic is safe there too.
+    """
     return queryset.annotate(
         signed_amount=Case(
             When(type__in=DEBIT_TYPES, then=-F('amount')),
@@ -46,10 +56,29 @@ def _with_signed_amount(queryset):
 
 
 def _with_running_balance(queryset, partition_by=None):
+    """
+    Found live 2026-09-14: a voided row was being filtered out of every
+    ledger listing entirely, contradicting HiFiVoidEntry.dc.html's own text
+    ("This stays visible in the ledger... for audit — it isn't deleted") and
+    this file's own frozen hi-fi mockups (HiFiGameDayLedger.dc.html shows a
+    voided row inline, struck through, "VOIDED" in place of a balance).
+    Callers must stop filtering is_voided=False out of their queryset — a
+    voided row still needs to be a row here. Its real amount stays visible
+    via signed_amount (see _with_signed_amount), but it must contribute
+    ZERO to the running balance, via this separate `contribution` annotation
+    the window function sums over instead of summing signed_amount directly.
+    """
     queryset = _with_signed_amount(queryset).order_by('created_at')
+    queryset = queryset.annotate(
+        contribution=Case(
+            When(is_voided=True, then=ZERO),
+            default=F('signed_amount'),
+            output_field=DecimalField(max_digits=14, decimal_places=2),
+        )
+    )
     return queryset.annotate(
         running_balance=Window(
-            expression=Sum('signed_amount'),
+            expression=Sum('contribution'),
             partition_by=partition_by,
             order_by=F('created_at').asc(),
         )
@@ -64,9 +93,8 @@ def game_day_ledger(game_day):
     example exactly (see LedgerMathTests). This is NOT any individual
     player's balance — see game_day_activity_feed below for that.
     """
-    qs = Transaction.objects.filter(game_day=game_day, is_voided=False).exclude(
-        type__in=EXCLUDED_FROM_GAME_DAY_LEDGER
-    )
+    # Voided rows stay in (see _with_running_balance) — not filtered here.
+    qs = Transaction.objects.filter(game_day=game_day).exclude(type__in=EXCLUDED_FROM_GAME_DAY_LEDGER)
     return _with_running_balance(qs)
 
 
@@ -80,31 +108,32 @@ def game_day_activity_feed(game_day):
     was a real bug: game_day_ledger's unpartitioned running_balance is
     correct for (and only for) the separate, spec'd Game-Day Ledger view.
     """
-    qs = Transaction.objects.filter(game_day=game_day, is_voided=False).exclude(
-        type__in=EXCLUDED_FROM_GAME_DAY_LEDGER
-    )
+    # Voided rows stay in (see _with_running_balance) — not filtered here.
+    qs = Transaction.objects.filter(game_day=game_day).exclude(type__in=EXCLUDED_FROM_GAME_DAY_LEDGER)
     return _with_running_balance(qs, partition_by=[F('player')])
 
 
 def player_game_day_ledger(game_day, player):
-    """One player's activity within a single game-day."""
-    qs = Transaction.objects.filter(game_day=game_day, player=player, is_voided=False).exclude(
+    """One player's activity within a single game-day. Voided rows stay in — see _with_running_balance."""
+    qs = Transaction.objects.filter(game_day=game_day, player=player).exclude(
         type__in=EXCLUDED_FROM_GAME_DAY_LEDGER
     )
     return _with_running_balance(qs)
 
 
 def outstanding_ledger(player=None):
-    """Between-game-day activity (payments/deals) — running balance kept per player."""
-    qs = Transaction.objects.filter(game_day__isnull=True, is_voided=False)
+    """Between-game-day activity (payments/deals) — running balance kept per player.
+    Voided rows stay in — see _with_running_balance."""
+    qs = Transaction.objects.filter(game_day__isnull=True)
     if player is not None:
         qs = qs.filter(player=player)
     return _with_running_balance(qs, partition_by=[F('player')])
 
 
 def main_account_ledger():
-    """Only DVA sweep-ins and payouts — the rows that actually touch the bank."""
-    qs = Transaction.objects.filter(MAIN_ACCOUNT_FILTER, is_voided=False)
+    """Only DVA sweep-ins and payouts — the rows that actually touch the bank.
+    Voided rows stay in — see _with_running_balance."""
+    qs = Transaction.objects.filter(MAIN_ACCOUNT_FILTER)
     return _with_running_balance(qs)
 
 

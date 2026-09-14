@@ -5,13 +5,17 @@ import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
 import TransactionEntryModal from '@/components/shared/TransactionEntryModal.vue'
+import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import { canVoidTransaction } from '@/utils/canVoid'
+import { useToast } from '@/composables/useToast'
 import api from '@/api/axios'
 
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
 const router = useRouter()
 const { confirm } = useAuthorizerConfirm()
+const toast = useToast()
 
 const opening = ref(false)
 const openError = ref('')
@@ -170,6 +174,19 @@ function playerName(playerId) {
   return players.value.find(p => p.id === playerId)?.display_name || ''
 }
 
+// Void
+const voidTarget = ref(null) // the ledger row being voided, or null
+
+function canVoid(row) {
+  return canVoidTransaction(row, auth.user, gameDay.current?.status)
+}
+
+function onVoided() {
+  voidTarget.value = null
+  toast.success('Entry voided.')
+  refreshAll()
+}
+
 function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
@@ -284,8 +301,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
           </div>
           <div class="ledger-amounts">
             <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-            <div class="ledger-balance">bal {{ N(row.running_balance) }}</div>
+            <div v-if="row.is_voided" class="ledger-balance ledger-balance--voided">VOIDED</div>
+            <div v-else class="ledger-balance">bal {{ N(row.running_balance) }}</div>
           </div>
+          <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
+            &#8942;
+          </button>
         </div>
       </div>
     </template>
@@ -327,6 +348,14 @@ const N = n => `₦${Number(n).toLocaleString()}`
     <TransactionEntryModal
       v-if="entryModal" :type="entryModal.type" :player="entryModal.player" :game-day-id="gameDay.current.id"
       @close="entryModal = null" @saved="onEntrySaved"
+    />
+
+    <!-- recorded-by-name assumes the voider is also the recorder (canVoid's own
+         non-Owner rule guarantees this) — will need a real lookup once an
+         Owner-role frontend can void someone else's entry. -->
+    <VoidEntryModal
+      v-if="voidTarget" :transaction="voidTarget" :player-name="playerName(voidTarget.player)"
+      :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
     />
   </div>
 </template>
@@ -474,6 +503,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
   border-bottom: 1px solid var(--border);
 }
 .ledger-row--voided { opacity: 0.5; text-decoration: line-through; }
+.ledger-row--voided .ledger-dot { background: var(--status-voided-bg) !important; }
 .ledger-dot { width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
 .ledger-dot.lane-chips { background: var(--lane-chips-bg); }
 .ledger-dot.lane-payments { background: var(--lane-payments-bg); }
@@ -483,6 +513,20 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .ledger-amounts { text-align: right; flex-shrink: 0; }
 .ledger-amounts .money { display: block; font-size: 13px; font-weight: 700; color: var(--text-primary); }
 .ledger-balance { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+.ledger-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
+.void-trigger {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .overlay {
   position: fixed;

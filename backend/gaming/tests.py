@@ -83,6 +83,31 @@ class LedgerMathTests(TestCase):
         ledger = list(selectors.game_day_ledger(self.game_day))
         self.assertEqual(len(ledger), 1)
 
+    def test_voided_row_stays_in_the_ledger_but_not_the_running_balance(self):
+        """
+        Found live 2026-09-14: a voided row was silently dropped from every
+        ledger listing, contradicting HiFiVoidEntry.dc.html's own text
+        ("stays visible in the ledger... for audit — it isn't deleted") and
+        HiFiGameDayLedger.dc.html's own mockup (a voided row shown inline,
+        struck through). Fixed via _with_running_balance's `contribution`
+        annotation — voided rows list, but contribute nothing to the sum.
+        """
+        self._txn(self.marco, Transaction.Type.CHIPS_OUT, 500000, Transaction.Channel.CASHIER)
+        second = self._txn(self.marco, Transaction.Type.PAYMENT_CASH, 100000, Transaction.Channel.CASH)
+        second.is_voided = True
+        second.save(update_fields=['is_voided'])
+        self._txn(self.marco, Transaction.Type.PAYMENT_CASH, 200000, Transaction.Channel.CASH)
+
+        ledger = list(selectors.game_day_ledger(self.game_day))
+        self.assertEqual(len(ledger), 3)  # the voided row is still a row
+
+        voided_row = next(row for row in ledger if row.id == second.id)
+        self.assertEqual(voided_row.signed_amount, Decimal(100000))  # true amount, for display
+        self.assertEqual(voided_row.running_balance, Decimal(-500000))  # unchanged by the voided row
+
+        last_row = ledger[-1]
+        self.assertEqual(last_row.running_balance, Decimal(-300000))  # -500000 + 0 (voided) + 200000
+
     def test_player_balance_is_lifetime_across_game_days(self):
         self._txn(self.marco, Transaction.Type.CHIPS_OUT, 500000, Transaction.Channel.CASHIER)
         Transaction.objects.create(
