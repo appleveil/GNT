@@ -13,10 +13,16 @@ onMounted(() => gameDay.fetchCurrent())
 
 const initial = computed(() => (auth.user?.fullName || '?').trim().charAt(0).toUpperCase())
 
-const tabs = [
-  { name: 'game-day', label: 'Game Day', path: '/game-day' },
-  { name: 'players', label: 'Players', path: '/players' },
-]
+// Cashier has exactly one screen (Game Day) as of 2026-09-14 — no tab bar
+// needed to navigate between one thing. Role-conditional (not a flat
+// constant) so Owner/Accountant can get their own tabs here later without
+// redoing this — see PLAN.md's Phase B/C.
+const tabs = computed(() => {
+  if (auth.user?.role === 'CASHIER') return []
+  return [
+    { name: 'game-day', label: 'Game Day', path: '/game-day' },
+  ]
+})
 
 function isActive(tab) {
   return route.path === tab.path || route.path.startsWith(tab.path + '/')
@@ -48,7 +54,7 @@ async function onLogout() {
       <router-view />
     </main>
 
-    <nav class="tabbar">
+    <nav v-if="tabs.length" class="tabbar">
       <RouterLink
         v-for="tab in tabs" :key="tab.name" :to="tab.path"
         class="tab" :class="{ 'tab--active': isActive(tab) }"

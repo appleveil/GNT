@@ -15,7 +15,11 @@ const { toasts, dismiss } = useToast()
 <style scoped>
 .toast-stack {
   position: fixed;
-  bottom: 108px; /* clears AppShell's bottom tab bar */
+  /* No tab bar for Cashier as of 2026-09-14 (AppShell.vue's `tabs` is empty
+     for that role) — this offset just clears the screen edge. Once Owner/
+     Accountant tabs land, this'll need to become role-aware again (108px
+     to clear the bar) rather than one constant for every role. */
+  bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 200;

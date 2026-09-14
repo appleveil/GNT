@@ -6,6 +6,7 @@ import { useGameDayStore } from '@/stores/gameDay'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
 import TransactionEntryModal from '@/components/shared/TransactionEntryModal.vue'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
+import AddPlayerModal from '@/components/shared/AddPlayerModal.vue'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
@@ -118,19 +119,15 @@ function refreshAll() {
   return Promise.all([loadPlayers(), loadLedger()])
 }
 
-// Player picker — type-to-filter combobox, same pattern as BankAccountFields.
-const playerQuery = ref('')
-const pickerOpen = ref(false)
+// Player picker — pills only (2026-09-14): every seated player is shown at
+// once, no search. A real game-day never has more than ~10 people at the
+// table, so browsing beats typing. Tapping a pill just selects it directly.
 const selectedPlayerId = ref(null)
-const recentPlayerIds = ref([]) // most-recently-picked first, for the quick-switch pills
 
 // Refetch whenever the open game-day changes (open, close, or the very first
 // time AppShell's own fetchCurrent() resolves after this view has mounted).
-// Must come after the refs above — immediate:true runs this synchronously,
-// before any later `const` in this scope has initialized.
 watch(() => gameDay.current?.id, id => {
   selectedPlayerId.value = null
-  recentPlayerIds.value = []
   if (id) refreshAll()
   else {
     players.value = []
@@ -138,23 +135,16 @@ watch(() => gameDay.current?.id, id => {
   }
 }, { immediate: true })
 
-const filteredPlayers = computed(() => {
-  const q = playerQuery.value.trim().toLowerCase()
-  if (!q) return players.value
-  return players.value.filter(
-    p => p.display_name.toLowerCase().includes(q) || p.account_code.toLowerCase().includes(q),
-  )
-})
 const selectedPlayer = computed(() => players.value.find(p => p.id === selectedPlayerId.value) || null)
-const recentPlayers = computed(() =>
-  recentPlayerIds.value.map(id => players.value.find(p => p.id === id)).filter(Boolean),
-)
 
 function selectPlayer(p) {
   selectedPlayerId.value = p.id
-  playerQuery.value = ''
-  pickerOpen.value = false
-  recentPlayerIds.value = [p.id, ...recentPlayerIds.value.filter(id => id !== p.id)].slice(0, 4)
+}
+
+// Add-player modal
+const addPlayerOpen = ref(false)
+function onPlayerAdded() {
+  refreshAll()
 }
 
 // Entry sheet
@@ -223,30 +213,15 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
 
       <div class="picker-row">
-        <div class="combobox">
-          <input
-            v-model="playerQuery" type="text" placeholder="Search or select a player…" autocomplete="off"
-            @focus="pickerOpen = true" @blur="pickerOpen = false"
-            @keydown.esc="pickerOpen = false"
-          />
-          <ul v-if="pickerOpen" class="combobox-list">
-            <li
-              v-for="p in filteredPlayers" :key="p.id" class="combobox-option"
-              @mousedown.prevent="selectPlayer(p)"
-            >
-              {{ p.display_name }} &middot; {{ p.account_code }}
-            </li>
-            <li v-if="!filteredPlayers.length" class="combobox-empty">
-              {{ playersLoading ? 'Loading…' : 'No matching players seated tonight' }}
-            </li>
-          </ul>
-        </div>
-        <button class="new-btn" type="button" @click="router.push('/players/new')">+ New</button>
+        <div class="lbl">Tonight's players</div>
+        <button class="new-btn" type="button" @click="addPlayerOpen = true">+ Add Player</button>
       </div>
 
-      <div v-if="recentPlayers.length" class="pills">
+      <p v-if="playersLoading && !players.length" class="muted">Loading…</p>
+      <p v-else-if="!players.length" class="muted empty-players">No players yet tonight — add one to get started.</p>
+      <div v-else class="pills">
         <button
-          v-for="p in recentPlayers" :key="p.id" type="button" class="pill"
+          v-for="p in players" :key="p.id" type="button" class="pill"
           :class="{ 'pill--active': p.id === selectedPlayerId }" @click="selectPlayer(p)"
         >
           {{ p.display_name }} &middot; {{ p.account_code }}
@@ -360,6 +335,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
       v-if="voidTarget" :transaction="voidTarget" :player-name="playerName(voidTarget.player)"
       :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
     />
+
+    <AddPlayerModal v-if="addPlayerOpen" @close="addPlayerOpen = false" @added="onPlayerAdded" />
   </div>
 </template>
 
@@ -403,39 +380,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .general-btn-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
 .general-btn-sub { font-size: 11px; color: var(--text-tertiary); }
 
-.picker-row { display: flex; gap: 10px; margin-bottom: 12px; }
-.combobox { position: relative; flex-grow: 1; }
-.combobox input {
-  width: 100%;
-  height: 48px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 0 14px;
-  font-family: var(--font-sans);
-  font-size: 14px;
-  color: var(--text-primary);
-  background: var(--surface);
-}
-.combobox-list {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 20;
-  max-height: 240px;
-  overflow-y: auto;
-  list-style: none;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-md);
-}
-.combobox-option { padding: 10px 14px; font-size: 13.5px; color: var(--text-primary); cursor: pointer; border-bottom: 1px solid var(--border); }
-.combobox-option:last-child { border-bottom: none; }
-.combobox-option:hover { background: var(--accent-bg); color: var(--accent-text); }
-.combobox-empty { padding: 10px 14px; font-size: 13px; color: var(--text-tertiary); }
+.picker-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .new-btn {
-  height: 48px;
+  height: 40px;
   padding: 0 16px;
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
@@ -446,10 +393,18 @@ const N = n => `₦${Number(n).toLocaleString()}`
   cursor: pointer;
   white-space: nowrap;
 }
+.empty-players {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  text-align: center;
+  margin-bottom: 14px;
+}
 
-.pills { display: flex; gap: 8px; margin-bottom: 14px; overflow-x: auto; }
+/* flex-wrap (not overflow-x scroll) — up to ~10 seated players should all
+   stay visible across a couple of rows, not require a side-scroll. */
+.pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .pill {
-  flex-shrink: 0;
   border: 1px solid var(--border);
   background: var(--surface);
   border-radius: 18px;

@@ -155,7 +155,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 <template>
   <div>
     <div class="header-row">
-      <button class="back-btn" type="button" @click="router.push('/players')">&larr;</button>
+      <button class="back-btn" type="button" @click="router.push('/game-day')">&larr;</button>
       <div v-if="player" class="header-title">{{ player.display_name }} &middot; {{ player.account_code }}</div>
     </div>
 

@@ -20,8 +20,10 @@ const AppShell = () => import('@/components/layout/AppShell.vue')
 const ActiveGameDayView = () => import('@/views/game-day/ActiveGameDayView.vue')
 const GameDayLedgerView = () => import('@/views/game-day/GameDayLedgerView.vue')
 
-const PlayersListView = () => import('@/views/players/PlayersListView.vue')
-const PlayerFormView = () => import('@/views/players/PlayerFormView.vue')
+// The Players list + "add player" page are gone (2026-09-14) — a Cashier's
+// only screen is Game Day now; players are picked as pills there and added
+// via AddPlayerModal (a bottom sheet, not a route). PlayerDetailView stays
+// routed since the Payout action-grid button still navigates to it.
 const PlayerDetailView = () => import('@/views/players/PlayerDetailView.vue')
 
 const routes = [
@@ -34,8 +36,6 @@ const routes = [
     children: [
       { path: 'game-day', name: 'game-day', component: ActiveGameDayView },
       { path: 'game-day/:id/ledger', name: 'game-day-ledger', component: GameDayLedgerView },
-      { path: 'players', name: 'players', component: PlayersListView },
-      { path: 'players/new', name: 'player-new', component: PlayerFormView },
       { path: 'players/:id', name: 'player-detail', component: PlayerDetailView },
     ],
   },
