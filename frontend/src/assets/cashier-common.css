@@ -1,0 +1,97 @@
+/* ─────────────────────────────────────────────────────
+   Cashier App — shared component classes
+   Built directly off the tokens in tokens.css and the button/badge markup
+   in the frozen StyleGuide.dc.html — keep these two in sync.
+───────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: var(--control-height-primary);
+  padding: 0 28px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.btn:disabled {
+  cursor: not-allowed;
+  background: var(--disabled-surface) !important;
+  border-color: var(--disabled-border) !important;
+  color: var(--text-tertiary) !important;
+}
+.btn:not(:disabled):active { opacity: 0.85; }
+
+.btn--primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn--secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.btn--danger {
+  background: var(--surface);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+  padding: 4px 12px;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.badge--open      { background: var(--status-open-bg);      color: var(--status-open-text); }
+.badge--closed     { background: var(--status-closed-bg);    color: var(--status-closed-text); }
+.badge--pending    { background: var(--status-pending-bg);   color: var(--status-pending-text); }
+.badge--approved   { background: var(--status-approved-bg);  color: var(--status-approved-text); }
+.badge--rejected   { background: var(--status-rejected-bg);  color: var(--status-rejected-text); }
+.badge--voided     { background: var(--status-voided-bg);    color: var(--status-voided-text); text-decoration: line-through; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.money {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+input[type="text"],
+input[type="number"],
+input[type="password"] {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  height: 48px;
+  padding: 0 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

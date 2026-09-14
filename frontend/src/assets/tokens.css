@@ -1,0 +1,87 @@
+/* ─────────────────────────────────────────────────────
+   Cashier App — Design tokens
+   "Ledger Slate" — frozen 2026-09-13, extracted verbatim from the design
+   canvas's StyleGuide.dc.html (Direction A). Do not hand-tune a value here
+   without updating that source of truth too.
+───────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* Core palette */
+  --bg:             #F4F6F8;
+  --surface:        #FFFFFF;
+  --text-primary:   #1C222B;
+  --text-secondary: #5B6572;
+  --text-tertiary:  #8B95A1;
+  --border:         #D7DEE5;
+  --border-strong:  #C6D0DA;
+  --accent:         oklch(0.52 0.14 250);
+  --accent-bg:      oklch(0.94 0.03 250);
+  --accent-text:    oklch(0.4  0.14 250);
+
+  /* Semantic / status */
+  --success:      oklch(0.55 0.12 145);
+  --success-bg:   oklch(0.94 0.04 145);
+  --success-text: oklch(0.4  0.12 145);
+  --warning:      oklch(0.72 0.14 80);
+  --warning-bg:   oklch(0.95 0.05 80);
+  --warning-text: oklch(0.45 0.13 80);
+  --danger:       oklch(0.55 0.18 25);
+  --danger-bg:    oklch(0.95 0.05 25);
+  --danger-text:  oklch(0.4  0.18 25);
+  --muted:        #C6D0DA; /* voided */
+
+  /* Disabled state — fainter tints of Surface/Border, never a new hue */
+  --disabled-surface: #FAFBFC;
+  --disabled-border:  #E7EBEE;
+
+  /* Game-day / entry status badges */
+  --status-open-bg:      oklch(0.94 0.03 250);
+  --status-open-text:    oklch(0.4  0.14 250);
+  --status-closed-bg:    #EDF0F2;
+  --status-closed-text:  #5B6572;
+  --status-pending-bg:   oklch(0.95 0.05 80);
+  --status-pending-text: oklch(0.45 0.13 80);
+  --status-approved-bg:  oklch(0.94 0.04 145);
+  --status-approved-text: oklch(0.4  0.12 145);
+  --status-rejected-bg:  oklch(0.95 0.05 25);
+  --status-rejected-text: oklch(0.4  0.18 25);
+  --status-voided-bg:    #EDF0F2;
+  --status-voided-text:  #B0B8C0;
+
+  /* Transaction icon lanes */
+  --lane-chips-bg:      oklch(0.94 0.03 250);
+  --lane-chips-icon:    oklch(0.52 0.14 250);
+  --lane-payments-bg:   oklch(0.94 0.04 145);
+  --lane-payments-icon: oklch(0.55 0.12 145);
+  --lane-other-bg:      oklch(0.97 0.02 80);
+  --lane-other-icon:    oklch(0.55 0.13 80);
+
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 10px;
+
+  /* Typography */
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace; /* all money, PINs, codes */
+
+  /* Touch targets (tablet-first) */
+  --control-height-primary: 56px;   /* primary/secondary buttons */
+  --control-height-keypad:  72px;   /* entry-grid & PIN keypad keys */
+  --control-row-min:        44px;   /* list/table rows — denser, still >=44px */
+  --control-row-max:        64px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(28,34,43,0.06), 0 1px 2px rgba(28,34,43,0.04);
+  --shadow-md: 0 4px 12px rgba(28,34,43,0.08), 0 2px 4px rgba(28,34,43,0.04);
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+#app { height: 100%; }
