@@ -279,7 +279,10 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
       <div class="ledger-head">
         <div class="lbl">Today's activity</div>
-        <button class="link-btn" type="button" @click="onOpenCloseConfirm">Close Game-Day &rarr;</button>
+        <div class="ledger-head-links">
+          <button class="link-btn" type="button" @click="router.push(`/game-day/${gameDay.current.id}/ledger`)">Full Ledger &rarr;</button>
+          <button class="link-btn" type="button" @click="onOpenCloseConfirm">Close Game-Day &rarr;</button>
+        </div>
       </div>
       <div class="ledger-feed">
         <p v-if="ledgerLoading" class="muted">Loading…</p>
@@ -493,6 +496,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .action-btn--accent { border-color: var(--accent); border-width: 1.5px; color: var(--accent-text); }
 
 .ledger-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; margin-top: 4px; }
+.ledger-head-links { display: flex; gap: 16px; }
 .link-btn { border: none; background: none; font-size: 11.5px; font-weight: 700; color: var(--accent); cursor: pointer; }
 .ledger-feed { border-top: 1px solid var(--border); }
 .ledger-row {
