@@ -1,17 +1,25 @@
 /**
  * src/router/index.js
  *
- * Cashier app routes. Auth guard: unauthenticated -> /login; already-logged-in
- * users hitting /login -> the main working screen.
+ * Auth guard: unauthenticated -> /login; already-logged-in users hitting
+ * /login -> their role's home. Role homes: CASHIER -> /game-day (the live
+ * working screen), ACCOUNTANT/OWNER -> /dashboard (the read-only back-office
+ * reporting surface, Phase B — 2026-09-14).
  *
- * meta.roles is a defense-in-depth check for routes the API itself would
- * 403 for the wrong role (e.g. a future Outstanding Ledger view, Owner/
- * Accountant-only per CONCEPT.md) — omit it for anything all three staff
- * roles can reach. Nothing needs it yet since every route below is Cashier
- * territory, but the mechanism is here for when Owner/Accountant views land.
+ * meta.roles is a defense-in-depth check mirroring what the API itself would
+ * 403 for the wrong role. It's only set on the new /dashboard, /game-days,
+ * /outstanding, /roster routes below (ACCOUNTANT + OWNER — the "back office"
+ * surface Cashier has no use for). The original Cashier routes (/game-day,
+ * /game-day/:id/ledger, /players/:id) are deliberately left unrestricted:
+ * Owner has no dedicated operational UI yet (that's Phase C), so Owner must
+ * keep reaching them unblocked until then.
  */
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+
+function homeRouteFor(role) {
+  return role === 'CASHIER' ? '/game-day' : '/dashboard'
+}
 
 const LoginView = () => import('@/views/auth/LoginView.vue')
 
@@ -26,21 +34,43 @@ const GameDayLedgerView = () => import('@/views/game-day/GameDayLedgerView.vue')
 // routed since the Payout action-grid button still navigates to it.
 const PlayerDetailView = () => import('@/views/players/PlayerDetailView.vue')
 
+// Accountant/Owner back-office surface (Phase B, 2026-09-14) — a distinct,
+// read-only reporting nav namespaced under its own paths so it never
+// collides with Cashier's live-view routes above.
+const DashboardView = () => import('@/views/accountant/DashboardView.vue')
+const GameDaysListView = () => import('@/views/accountant/GameDaysListView.vue')
+const GameDayDetailView = () => import('@/views/accountant/GameDayDetailView.vue')
+const OutstandingView = () => import('@/views/accountant/OutstandingView.vue')
+const RosterListView = () => import('@/views/accountant/RosterListView.vue')
+const RosterDetailView = () => import('@/views/accountant/RosterDetailView.vue')
+
+const BACK_OFFICE_ROLES = ['ACCOUNTANT', 'OWNER']
+
 const routes = [
   { path: '/login', component: LoginView, meta: { public: true } },
 
   {
     path: '/',
     component: AppShell,
-    redirect: '/game-day',
+    redirect: to => {
+      const auth = useAuthStore()
+      return homeRouteFor(auth.user?.role)
+    },
     children: [
       { path: 'game-day', name: 'game-day', component: ActiveGameDayView },
       { path: 'game-day/:id/ledger', name: 'game-day-ledger', component: GameDayLedgerView },
       { path: 'players/:id', name: 'player-detail', component: PlayerDetailView },
+
+      { path: 'dashboard', name: 'dashboard', component: DashboardView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'game-days', name: 'game-days', component: GameDaysListView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'game-days/:id', name: 'game-day-detail', component: GameDayDetailView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'outstanding', name: 'outstanding', component: OutstandingView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'roster', name: 'roster', component: RosterListView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'roster/:id', name: 'roster-detail', component: RosterDetailView, meta: { roles: BACK_OFFICE_ROLES } },
     ],
   },
 
-  { path: '/:pathMatch(.*)*', redirect: '/game-day' },
+  { path: '/:pathMatch(.*)*', redirect: to => homeRouteFor(useAuthStore().user?.role) },
 ]
 
 const router = createRouter({
@@ -58,14 +88,14 @@ router.beforeEach(to => {
   }
 
   if (to.meta.public) {
-    if (auth.isAuthenticated) return '/game-day'
+    if (auth.isAuthenticated) return homeRouteFor(auth.user?.role)
     return true
   }
 
   if (!auth.isAuthenticated) return '/login'
 
   if (to.meta.roles && !to.meta.roles.includes(auth.user.role)) {
-    return '/game-day'
+    return homeRouteFor(auth.user?.role)
   }
 
   return true

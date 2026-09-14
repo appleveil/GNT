@@ -1,7 +1,12 @@
 /* ─────────────────────────────────────────────────────
-   Cashier App — shared component classes
-   Built directly off the tokens in tokens.css and the button/badge markup
-   in the frozen StyleGuide.dc.html — keep these two in sync.
+   Shared component classes — generic utility classes (.btn, .badge,
+   .card, .money, .eyebrow, form inputs), styled purely off CSS custom
+   properties. Originally built directly off Cashier's tokens.css and
+   the button/badge markup in the frozen StyleGuide.dc.html (keep
+   those in sync); reused as-is by the Accountant/Owner surface, whose
+   accountant-tokens.css redefines the same variable names under
+   .theme-accountant — nothing here is Cashier-specific despite the
+   old filename (renamed 2026-09-14).
 ───────────────────────────────────────────────────── */
 
 .btn {

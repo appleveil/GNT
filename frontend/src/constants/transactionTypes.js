@@ -31,7 +31,7 @@ export const TRANSACTION_TYPES = {
 }
 
 // Status colors reuse the same badge--* classes as GameDay/Payout status
-// elsewhere (see cashier-common.css) — this maps a Transaction.status value
+// elsewhere (see common.css) — this maps a Transaction.status value
 // to that suffix.
 export const TRANSACTION_STATUS_BADGE = {
   POSTED: null, // the default/expected state — no badge needed

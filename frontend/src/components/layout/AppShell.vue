@@ -14,14 +14,29 @@ onMounted(() => gameDay.fetchCurrent())
 const initial = computed(() => (auth.user?.fullName || '?').trim().charAt(0).toUpperCase())
 
 // Cashier has exactly one screen (Game Day) as of 2026-09-14 — no tab bar
-// needed to navigate between one thing. Role-conditional (not a flat
-// constant) so Owner/Accountant can get their own tabs here later without
-// redoing this — see PLAN.md's Phase B/C.
+// needed to navigate between one thing. Accountant/Owner get the Phase B
+// back-office nav (2026-09-14) — Owner will likely grow more of its own
+// tabs in Phase C without touching this branch structure.
 const tabs = computed(() => {
   if (auth.user?.role === 'CASHIER') return []
   return [
-    { name: 'game-day', label: 'Game Day', path: '/game-day' },
+    { name: 'dashboard', label: 'Dashboard', path: '/dashboard' },
+    { name: 'game-days', label: 'Game Days', path: '/game-days' },
+    { name: 'outstanding', label: 'Outstanding', path: '/outstanding' },
+    { name: 'roster', label: 'Players', path: '/roster' },
   ]
+})
+
+// Theming — Cashier keeps the global "Ledger Slate" :root tokens;
+// Accountant/Owner get the distinct back-office palette scoped under this
+// class (accountant-tokens.css redefines the same variable names, so every
+// shared component re-themes for free — see that file's header comment).
+const isBackOffice = computed(() => auth.user?.role !== 'CASHIER')
+
+const brand = computed(() => {
+  if (auth.user?.role === 'ACCOUNTANT') return 'LPC Accountant'
+  if (auth.user?.role === 'OWNER') return 'LPC Owner'
+  return 'LPC Cashier'
 })
 
 function isActive(tab) {
@@ -35,9 +50,9 @@ async function onLogout() {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'theme-accountant': isBackOffice }">
     <header class="topbar">
-      <div class="brand">LPC Cashier</div>
+      <div class="brand">{{ brand }}</div>
       <div class="spacer" />
       <div v-if="gameDay.isOpen" class="status-pill">
         <span class="status-dot" />

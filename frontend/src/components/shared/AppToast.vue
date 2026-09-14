@@ -1,11 +1,13 @@
 <script setup>
 import { useToast } from '@/composables/useToast'
+import { useAuthStore } from '@/stores/auth'
 
 const { toasts, dismiss } = useToast()
+const auth = useAuthStore()
 </script>
 
 <template>
-  <div class="toast-stack">
+  <div class="toast-stack" :class="{ 'toast-stack--tabbed': auth.user?.role !== 'CASHIER' }">
     <div v-for="t in toasts" :key="t.id" class="toast" :class="`toast--${t.variant}`" @click="dismiss(t.id)">
       {{ t.message }}
     </div>
@@ -15,10 +17,9 @@ const { toasts, dismiss } = useToast()
 <style scoped>
 .toast-stack {
   position: fixed;
-  /* No tab bar for Cashier as of 2026-09-14 (AppShell.vue's `tabs` is empty
-     for that role) — this offset just clears the screen edge. Once Owner/
-     Accountant tabs land, this'll need to become role-aware again (108px
-     to clear the bar) rather than one constant for every role. */
+  /* Cashier has no tab bar (AppShell.vue's `tabs` is empty for that role) —
+     this offset just clears the screen edge. Accountant/Owner have a real
+     tab bar (Phase B, 2026-09-14), so their toasts sit above it instead. */
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
@@ -31,6 +32,7 @@ const { toasts, dismiss } = useToast()
   max-width: 480px;
   padding: 0 20px;
 }
+.toast-stack--tabbed { bottom: 108px; }
 .toast {
   width: 100%;
   border-radius: var(--radius-sm);

@@ -1,0 +1,88 @@
+/* ─────────────────────────────────────────────────────
+   Accountant / Owner back-office surface — Design tokens
+   Distinct from Cashier's "Ledger Slate" (tokens.css): same variable
+   vocabulary and type family (IBM Plex Sans/Mono), new desktop-first
+   palette/density. Extracted verbatim from the design canvas —
+   https://claude.ai/code/artifact/4abda5dc-bbf5-486b-8745-e6ac14293695
+   (Main.dc.html). Do not hand-tune a value here without updating that
+   source of truth too.
+
+   Scoped under .theme-accountant rather than :root — AppShell.vue
+   applies this class to its root element for any non-Cashier role, so
+   the SAME component classes (common.css) and every shared component
+   (AppToast, badges, buttons, cards) re-theme automatically for any
+   view nested inside it. Cashier's :root tokens (tokens.css) stay the
+   global default outside this scope.
+───────────────────────────────────────────────────── */
+
+.theme-accountant {
+  /* Core palette */
+  --bg:             #F6F5F1;
+  --surface:        #FFFFFF;
+  --text-primary:   #23241F;
+  --text-secondary: #5A5C52;
+  --text-tertiary:  #8A8C80;
+  --border:         #E3E1D8;
+  --border-strong:  #D0CDC0;
+  --accent:         oklch(0.42 0.09 255);
+  --accent-bg:      oklch(0.95 0.02 255);
+  --accent-text:    oklch(0.35 0.09 255);
+
+  /* Semantic / status */
+  --success:      oklch(0.53 0.12 150);
+  --success-bg:   oklch(0.95 0.035 150);
+  --success-text: oklch(0.38 0.12 150);
+  --warning:      oklch(0.70 0.14 75);
+  --warning-bg:   oklch(0.95 0.045 75);
+  --warning-text: oklch(0.44 0.13 75);
+  --danger:       oklch(0.53 0.17 22);
+  --danger-bg:    oklch(0.95 0.045 22);
+  --danger-text:  oklch(0.38 0.17 22);
+  --muted:        #D0CDC0; /* voided */
+
+  /* Disabled state */
+  --disabled-surface: #FBFAF8;
+  --disabled-border:  #ECEAE3;
+
+  /* Game-day / entry status badges */
+  --status-open-bg:       oklch(0.95 0.02 255);
+  --status-open-text:     oklch(0.35 0.09 255);
+  --status-closed-bg:     #EFEDE6;
+  --status-closed-text:   #5A5C52;
+  --status-pending-bg:    oklch(0.95 0.045 75);
+  --status-pending-text:  oklch(0.44 0.13 75);
+  --status-approved-bg:   oklch(0.95 0.035 150);
+  --status-approved-text: oklch(0.38 0.12 150);
+  --status-rejected-bg:   oklch(0.95 0.045 22);
+  --status-rejected-text: oklch(0.38 0.17 22);
+  --status-voided-bg:     #EFEDE6;
+  --status-voided-text:   #A8A79A;
+
+  /* Transaction icon lanes (carried through unchanged from Cashier —
+     only used if a shared component that references them is ever
+     rendered in this scope; kept for parity, same hues re-mapped) */
+  --lane-chips-bg:      oklch(0.95 0.02 255);
+  --lane-chips-icon:    oklch(0.42 0.09 255);
+  --lane-payments-bg:   oklch(0.95 0.035 150);
+  --lane-payments-icon: oklch(0.53 0.12 150);
+  --lane-other-bg:      oklch(0.95 0.045 75);
+  --lane-other-icon:    oklch(0.70 0.14 75);
+
+  /* Radii — tighter than Cashier's touch-first 8/10px */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+
+  /* Typography — same family as Cashier, by design */
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  /* Desktop-sized controls — no touch-target minimum needed here */
+  --control-height-primary: 40px;
+  --control-row-min: 40px;
+  --control-row-max: 52px;
+
+  /* Shadows — more subtle than Cashier's; this surface shows many
+     cards/rows at once rather than a few large touch targets */
+  --shadow-sm: 0 1px 2px rgba(35,36,31,0.05), 0 1px 1px rgba(35,36,31,0.03);
+  --shadow-md: 0 4px 10px rgba(35,36,31,0.07), 0 2px 4px rgba(35,36,31,0.04);
+}

@@ -14,7 +14,11 @@ async function onSubmit() {
   error.value = ''
   const result = await auth.login(username.value, password.value)
   if (result.ok) {
-    router.push('/game-day')
+    // Role-aware landing — CASHIER -> the live working screen, ACCOUNTANT/
+    // OWNER -> the read-only back-office dashboard (mirrors router's
+    // homeRouteFor; kept inline here since this is the only other spot
+    // that needs it).
+    router.push(auth.user?.role === 'CASHIER' ? '/game-day' : '/dashboard')
   } else {
     error.value = result.error
   }
