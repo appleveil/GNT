@@ -111,8 +111,16 @@ function refreshAll() {
   return Promise.all([loadPlayers(), loadLedger()])
 }
 
+// Player picker — type-to-filter combobox, same pattern as BankAccountFields.
+const playerQuery = ref('')
+const pickerOpen = ref(false)
+const selectedPlayerId = ref(null)
+const recentPlayerIds = ref([]) // most-recently-picked first, for the quick-switch pills
+
 // Refetch whenever the open game-day changes (open, close, or the very first
 // time AppShell's own fetchCurrent() resolves after this view has mounted).
+// Must come after the refs above — immediate:true runs this synchronously,
+// before any later `const` in this scope has initialized.
 watch(() => gameDay.current?.id, id => {
   selectedPlayerId.value = null
   recentPlayerIds.value = []
@@ -122,12 +130,6 @@ watch(() => gameDay.current?.id, id => {
     ledger.value = []
   }
 }, { immediate: true })
-
-// Player picker — type-to-filter combobox, same pattern as BankAccountFields.
-const playerQuery = ref('')
-const pickerOpen = ref(false)
-const selectedPlayerId = ref(null)
-const recentPlayerIds = ref([]) // most-recently-picked first, for the quick-switch pills
 
 const filteredPlayers = computed(() => {
   const q = playerQuery.value.trim().toLowerCase()
