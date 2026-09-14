@@ -29,7 +29,7 @@ class PaystackNotConfiguredError(PaystackAPIError):
     """No PAYSTACK_SECRET_KEY is set — nothing safe to call yet (e.g. local dev)."""
 
 
-def _request(method: str, path: str, json: dict | None = None) -> dict:
+def _request(method: str, path: str, json: dict | None = None) -> dict | list:
     if not settings.PAYSTACK_SECRET_KEY:
         raise PaystackNotConfiguredError('PAYSTACK_SECRET_KEY is not configured.')
 
@@ -54,6 +54,29 @@ def _request(method: str, path: str, json: dict | None = None) -> dict:
         raise PaystackAPIError(message)
 
     return body.get('data') or {}
+
+
+def list_banks(country: str = 'nigeria') -> list[dict]:
+    """
+    GET /bank — every bank Paystack knows for `country`, each carrying the
+    `code` used by transferrecipient/dedicated_account/bank_resolve. Backs the
+    bank picker on the "Add bank account" form — the cashier picks a bank by
+    name, never types a code. The caller (payments.views) caches this; it
+    barely ever changes and is otherwise one extra Paystack round-trip per
+    form open.
+    """
+    return _request('GET', f'/bank?country={country}&currency=NGN')
+
+
+def resolve_account_number(account_number: str, bank_code: str) -> dict:
+    """
+    GET /bank/resolve — confirms the account name for an account number +
+    bank code before it's saved, so the cashier can show the player "is this
+    you?" instead of finding out a typo'd digit or wrong bank only when a
+    payout later fails to resolve. Raises PaystackAPIError if Paystack can't
+    resolve it (bad number, wrong bank, account doesn't exist, ...).
+    """
+    return _request('GET', f'/bank/resolve?account_number={account_number}&bank_code={bank_code}')
 
 
 def create_customer(email: str, first_name: str, last_name: str, phone: str = '') -> dict:

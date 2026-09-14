@@ -262,3 +262,69 @@ class ProvisionGamingAccountAPITests(APITestCase):
         with override_settings(PAYSTACK_SECRET_KEY=''):
             response = self.client.post(f'/api/players/{self.player.id}/provision-gaming-account/')
         self.assertEqual(response.status_code, 502)
+
+
+class BankListAndResolveAccountAPITests(APITestCase):
+    """
+    Backs the "Add bank account" form's bank picker + account-number lookup,
+    added 2026-09-14: the cashier picks a bank by name (bank_code travels
+    invisibly) and gets the resolved account name back to confirm with the
+    player before saving.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.delete('paystack_banks_ng')  # the view's process-wide cache would otherwise leak between tests
+        self.cashier = StaffUser.objects.create_user(username='cashier4', password='x', role=StaffUser.Role.CASHIER)
+        self.accountant = StaffUser.objects.create_user(
+            username='accountant4', password='x', role=StaffUser.Role.ACCOUNTANT,
+        )
+
+    @patch('payments.paystack_client.list_banks')
+    def test_cashier_can_list_banks(self, mock_list_banks):
+        mock_list_banks.return_value = [{'name': 'GTBank', 'code': '058'}]
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/payments/banks/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [{'name': 'GTBank', 'code': '058'}])
+
+    @patch('payments.paystack_client.list_banks')
+    def test_bank_list_is_cached_across_requests(self, mock_list_banks):
+        mock_list_banks.return_value = [{'name': 'GTBank', 'code': '058'}]
+        self.client.force_authenticate(self.cashier)
+        self.client.get('/api/payments/banks/')
+        self.client.get('/api/payments/banks/')
+        mock_list_banks.assert_called_once()
+
+    def test_accountant_cannot_list_banks(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.get('/api/payments/banks/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('payments.paystack_client.resolve_account_number')
+    def test_cashier_can_resolve_account(self, mock_resolve):
+        mock_resolve.return_value = {'account_number': '0123456789', 'account_name': 'MARCO PLAYER'}
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(
+            '/api/payments/resolve-account/', {'account_number': '0123456789', 'bank_code': '058'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['account_name'], 'MARCO PLAYER')
+        mock_resolve.assert_called_once_with('0123456789', '058')
+
+    def test_resolve_rejects_non_ten_digit_number(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(
+            '/api/payments/resolve-account/', {'account_number': '123', 'bank_code': '058'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch('payments.paystack_client.resolve_account_number')
+    def test_unresolvable_account_surfaces_as_502(self, mock_resolve):
+        mock_resolve.side_effect = PaystackAPIError('Could not resolve account name.')
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(
+            '/api/payments/resolve-account/', {'account_number': '0123456789', 'bank_code': '058'},
+        )
+        self.assertEqual(response.status_code, 502)

@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useGameDayStore } from '@/stores/gameDay'
+import BankAccountFields from '@/components/shared/BankAccountFields.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -13,9 +14,9 @@ const loading = ref(true)
 const error = ref('')
 
 const addingBank = ref(false)
-const bankName = ref('')
-const bankCode = ref('')
-const accountNumber = ref('')
+// Named distinctly from the `bank` loop var used below (v-for over
+// player.bank_accounts) and onSetDefault's param, to avoid shadowing confusion.
+const newBank = ref({ bank_name: '', bank_code: '', account_number: '', account_name: '' })
 const bankError = ref('')
 const bankSubmitting = ref(false)
 
@@ -56,16 +57,16 @@ async function onAddBank() {
   bankSubmitting.value = true
   try {
     await api.post(`/players/${player.value.id}/bank-accounts/`, {
-      bank_name: bankName.value,
-      bank_code: bankCode.value,
-      account_number: accountNumber.value,
-      account_name: player.value.display_name,
+      bank_name: newBank.value.bank_name,
+      bank_code: newBank.value.bank_code,
+      account_number: newBank.value.account_number,
+      // Prefer the Paystack-resolved name; fall back to the player's own name
+      // if resolution didn't complete (e.g. Paystack unreachable).
+      account_name: newBank.value.account_name || player.value.display_name,
       is_default: player.value.bank_accounts.length === 0,
     })
     addingBank.value = false
-    bankName.value = ''
-    bankCode.value = ''
-    accountNumber.value = ''
+    newBank.value = { bank_name: '', bank_code: '', account_number: '', account_name: '' }
     await load()
   } catch (err) {
     bankError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add bank account.'
@@ -153,13 +154,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <p v-if="!player.bank_accounts.length" class="muted">No bank accounts on file.</p>
 
         <form v-if="addingBank" class="bank-form" @submit.prevent="onAddBank">
-          <input v-model="bankName" type="text" placeholder="Bank name" required />
-          <div class="field-row">
-            <input v-model="bankCode" type="text" placeholder="Bank code" required />
-            <input v-model="accountNumber" type="text" placeholder="Account number" required />
-          </div>
+          <BankAccountFields v-model="newBank" />
           <p v-if="bankError" class="form-error">{{ bankError }}</p>
-          <button class="btn btn--secondary" type="submit" :disabled="bankSubmitting">
+          <button
+            class="btn btn--secondary" type="submit"
+            :disabled="bankSubmitting || newBank.account_number.length !== 10 || !newBank.bank_code"
+          >
             {{ bankSubmitting ? 'Adding…' : 'Save bank account' }}
           </button>
         </form>
@@ -268,8 +268,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 
 .bank-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
-.field-row { display: flex; gap: 10px; }
-.field-row input { flex: 1; }
 .form-error {
   font-size: 13px;
   color: var(--danger);

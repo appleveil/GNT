@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useGameDayStore } from '@/stores/gameDay'
+import BankAccountFields from '@/components/shared/BankAccountFields.vue'
 
 const router = useRouter()
 const gameDay = useGameDayStore()
@@ -14,9 +15,7 @@ const error = ref('')
 // New player
 const accountCode = ref('')
 const displayName = ref('')
-const bankName = ref('')
-const bankCode = ref('')
-const accountNumber = ref('')
+const bank = ref({ bank_name: '', bank_code: '', account_number: '', account_name: '' })
 
 // Existing player search
 const allPlayers = ref([])
@@ -50,12 +49,14 @@ async function onSubmit() {
         display_name: displayName.value,
       })
       seated = data
-      if (accountNumber.value && bankCode.value) {
+      if (bank.value.account_number.length === 10 && bank.value.bank_code) {
         await api.post(`/players/${seated.id}/bank-accounts/`, {
-          bank_name: bankName.value,
-          bank_code: bankCode.value,
-          account_number: accountNumber.value,
-          account_name: displayName.value,
+          bank_name: bank.value.bank_name,
+          bank_code: bank.value.bank_code,
+          account_number: bank.value.account_number,
+          // Prefer the Paystack-resolved name; fall back to the typed player
+          // name if resolution didn't complete (e.g. Paystack unreachable).
+          account_name: bank.value.account_name || displayName.value,
           is_default: true,
         })
       }
@@ -111,20 +112,7 @@ async function onSubmit() {
             <input v-model="displayName" type="text" required />
           </label>
           <p class="section-note">Bank account (optional — for future winnings)</p>
-          <label class="field">
-            <span class="eyebrow">Bank name</span>
-            <input v-model="bankName" type="text" />
-          </label>
-          <div class="field-row">
-            <label class="field">
-              <span class="eyebrow">Bank code</span>
-              <input v-model="bankCode" type="text" />
-            </label>
-            <label class="field">
-              <span class="eyebrow">Account number</span>
-              <input v-model="accountNumber" type="text" />
-            </label>
-          </div>
+          <BankAccountFields v-model="bank" />
           <p class="dva-note">
             Gaming Account / Dedicated Virtual Account isn't available yet — Paystack's
             Dedicated NUBAN approval is still pending. The player can still be added and issued chips.
@@ -182,8 +170,6 @@ async function onSubmit() {
 .tab--active { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent); }
 .form { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
-.field-row { display: flex; gap: 12px; }
-.field-row .field { flex: 1; }
 .section-note {
   font-size: 12px;
   color: var(--text-tertiary);
