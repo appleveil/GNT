@@ -143,8 +143,12 @@ def provision_gaming_account(player: Player) -> PaystackAccount:
     last_name = last_name or player.account_code
     # Paystack customers are keyed by email; players don't have one, so a
     # stable, unique placeholder is synthesized from the account code.
+    # NOTE: must be a real-looking TLD — confirmed live 2026-09-14 that
+    # Paystack's own validation rejects reserved/pseudo-TLDs like .local
+    # ("email" must be a valid email), even though this address is never
+    # used for actual delivery.
     slug = player.account_code.lower().replace(' ', '-')
-    email = f'{slug}@players.lpc.local'
+    email = f'{slug}@players.lpc-app.com'
 
     customer = paystack_client.create_customer(email=email, first_name=first_name, last_name=last_name)
     dva = paystack_client.create_dedicated_account(customer_code=customer['customer_code'])
