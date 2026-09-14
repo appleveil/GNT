@@ -89,8 +89,25 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['get'])
     def ledger(self, request, pk=None):
+        """The club-wide Game-Day Ledger (CONCEPT.md's spec'd worked example) —
+        one cumulative running_balance across every player's interleaved
+        transactions. NOT any individual player's balance — see `activity`."""
         game_day = self.get_object()
         rows = selectors.game_day_ledger(game_day)
+        return Response(LedgerEntrySerializer(rows, many=True).data)
+
+    @action(detail=True, methods=['get'])
+    def activity(self, request, pk=None):
+        """
+        The Cashier's live 'today's activity' feed on the Active Game-Day
+        working screen — same rows as `ledger`, but running_balance is scoped
+        per-player (see gaming.selectors.game_day_activity_feed). Added
+        2026-09-14 after `ledger`'s club-wide total was found displayed next
+        to individual players' names, reading as their own balance when it
+        wasn't.
+        """
+        game_day = self.get_object()
+        rows = selectors.game_day_activity_feed(game_day)
         return Response(LedgerEntrySerializer(rows, many=True).data)
 
     @action(detail=True, methods=['get'], url_path=r'players/(?P<player_pk>\d+)/ledger')

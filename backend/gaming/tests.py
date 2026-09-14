@@ -104,6 +104,30 @@ class LedgerMathTests(TestCase):
         self.assertEqual(len(moses_rows), 1)
         self.assertEqual(moses_rows[0].running_balance, Decimal(500000))
 
+    def test_activity_feed_partitions_running_balance_by_player_unlike_ledger(self):
+        """
+        Found live 2026-09-14: the Cashier's 'today's activity' feed showed
+        game_day_ledger's CLUB-WIDE running_balance next to an individual
+        player's name — reading as their own balance when it wasn't (two
+        players' interleaved transactions bleed into each other's total).
+        game_day_activity_feed fixes this by partitioning the same window
+        function per player, same rows game_day_ledger would return.
+        """
+        T, C = Transaction.Type, Transaction.Channel
+        self._txn(self.marco, T.CHIPS_OUT, 400000, C.CASHIER)
+        self._txn(self.moses, T.CHIPS_OUT, 100000, C.CASHIER)
+        self._txn(self.marco, T.PAYMENT_CASH, 100000, C.CASH)
+
+        ledger_balances = [row.running_balance for row in selectors.game_day_ledger(self.game_day)]
+        # Club-wide cumulative: Moses's chips-out bleeds into what looks like Marco's total.
+        self.assertEqual(ledger_balances, [Decimal(-400000), Decimal(-500000), Decimal(-400000)])
+
+        activity = list(selectors.game_day_activity_feed(self.game_day))
+        by_player = {(row.player_id, row.type): row.running_balance for row in activity}
+        self.assertEqual(by_player[(self.marco.id, T.CHIPS_OUT)], Decimal(-400000))
+        self.assertEqual(by_player[(self.moses.id, T.CHIPS_OUT)], Decimal(-100000))  # unaffected by Marco's rows
+        self.assertEqual(by_player[(self.marco.id, T.PAYMENT_CASH)], Decimal(-300000))  # Marco's own balance only
+
 
 class AuthorizationTests(TestCase):
     def setUp(self):
@@ -329,6 +353,35 @@ class GameDayAndTransactionAPITests(APITestCase):
         self.client.force_authenticate(self.cashier)
         current = self.client.get('/api/game-days/current/').data
         self.assertEqual(current['id'], opened['id'])
+
+    def test_activity_endpoint_returns_per_player_running_balance(self):
+        """GET /activity/ (not /ledger/) is what the Cashier's live feed uses —
+        see the 2026-09-14 fix in gaming.selectors.game_day_activity_feed."""
+        game_day = services.open_game_day(50, timezone.now(), self.owner)
+        other_player = Player.objects.create(account_code='WWI 2', display_name='Other Player')
+        self.client.force_authenticate(self.cashier)
+        self.client.post('/api/transactions/', {
+            'game_day': game_day.id, 'player': self.player.id, 'type': Transaction.Type.CHIPS_OUT,
+            'amount': '400000', 'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+        self.client.post('/api/transactions/', {
+            'game_day': game_day.id, 'player': other_player.id, 'type': Transaction.Type.CHIPS_OUT,
+            'amount': '100000', 'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+        self.client.post('/api/transactions/', {
+            'game_day': game_day.id, 'player': self.player.id, 'type': Transaction.Type.PAYMENT_CASH,
+            'amount': '100000', 'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+
+        response = self.client.get(f'/api/game-days/{game_day.id}/activity/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows_by_type = {(row['player'], row['type']): row for row in response.data}
+        self.assertEqual(
+            Decimal(rows_by_type[(other_player.id, 'CHIPS_OUT')]['running_balance']), Decimal(-100000),
+        )
+        self.assertEqual(
+            Decimal(rows_by_type[(self.player.id, 'PAYMENT_CASH')]['running_balance']), Decimal(-300000),
+        )
 
     def test_recording_chips_out_requires_floor_manager_pin(self):
         game_day = services.open_game_day(3, timezone.now(), self.owner)

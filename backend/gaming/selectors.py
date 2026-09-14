@@ -57,11 +57,33 @@ def _with_running_balance(queryset, partition_by=None):
 
 
 def game_day_ledger(game_day):
-    """All chip/payment activity for one game-day, in order, with the club's running balance."""
+    """
+    All chip/payment activity for one game-day, in order, with the CLUB'S
+    running balance — a single cumulative total across every player's
+    interleaved transactions, matching CONCEPT.md's "Game-day ledger" worked
+    example exactly (see LedgerMathTests). This is NOT any individual
+    player's balance — see game_day_activity_feed below for that.
+    """
     qs = Transaction.objects.filter(game_day=game_day, is_voided=False).exclude(
         type__in=EXCLUDED_FROM_GAME_DAY_LEDGER
     )
     return _with_running_balance(qs)
+
+
+def game_day_activity_feed(game_day):
+    """
+    Same rows as game_day_ledger (all players, ordered by time), but each
+    row's running_balance is scoped to THAT ROW'S PLAYER only — added
+    2026-09-14 for the Cashier's live "today's activity" feed on the Active
+    Game-Day working screen, where "bal" next to a player's name means their
+    own balance, not the club's aggregate net position. Conflating the two
+    was a real bug: game_day_ledger's unpartitioned running_balance is
+    correct for (and only for) the separate, spec'd Game-Day Ledger view.
+    """
+    qs = Transaction.objects.filter(game_day=game_day, is_voided=False).exclude(
+        type__in=EXCLUDED_FROM_GAME_DAY_LEDGER
+    )
+    return _with_running_balance(qs, partition_by=[F('player')])
 
 
 def player_game_day_ledger(game_day, player):

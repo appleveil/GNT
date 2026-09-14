@@ -100,7 +100,10 @@ async function loadLedger() {
   }
   ledgerLoading.value = true
   try {
-    const { data } = await api.get(`/game-days/${gameDay.current.id}/ledger/`)
+    // `activity` (not `ledger`) — running_balance here is scoped per-player,
+    // not the club-wide cumulative total `ledger` returns. See
+    // gaming.selectors.game_day_activity_feed's docstring.
+    const { data } = await api.get(`/game-days/${gameDay.current.id}/activity/`)
     ledger.value = data.slice().reverse() // most recent first
   } finally {
     ledgerLoading.value = false
