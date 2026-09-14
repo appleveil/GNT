@@ -2,7 +2,7 @@
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
 
 const {
-  isOpen, step, title, subtitle, people, peopleLoading, selected, pin, error, submitting,
+  isOpen, step, title, subtitle, mode, people, peopleLoading, selected, pin, error, submitting,
   selectPerson, backToSelect, appendDigit, backspace, cancel, submit,
 } = useAuthorizerConfirm()
 
@@ -20,7 +20,11 @@ const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
         <div v-if="subtitle" class="sheet-subtitle">{{ subtitle }}</div>
 
         <div class="notice">
-          Only the Owner or a Floor Manager can authorize this — a Cashier cannot.
+          {{
+            mode === 'fm-only'
+              ? 'A Floor Manager must confirm this physical count — they already witnessed it, this just records who.'
+              : "Only the Owner or a Floor Manager can authorize this — a Cashier cannot."
+          }}
         </div>
 
         <div class="lbl">Who's authorizing?</div>
@@ -37,7 +41,9 @@ const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
               <div class="person-role">{{ p.roleLabel }}</div>
             </div>
           </button>
-          <p v-if="!people.length" class="muted">No Owner or Floor Manager available.</p>
+          <p v-if="!people.length" class="muted">
+            {{ mode === 'fm-only' ? 'No Floor Manager available.' : 'No Owner or Floor Manager available.' }}
+          </p>
         </div>
 
         <div class="spacer" />

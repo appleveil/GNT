@@ -20,6 +20,7 @@ export const isOpen = ref(false)
 export const step = ref('select') // 'select' | 'pin'
 export const title = ref('')
 export const subtitle = ref('')
+export const mode = ref('owner-or-fm') // 'owner-or-fm' | 'fm-only'
 export const people = ref([]) // [{ type: 'owner'|'floor_manager', id, name, roleLabel }]
 export const peopleLoading = ref(false)
 export const selected = ref(null)
@@ -32,6 +33,15 @@ let onSubmitCallback = null
 async function loadPeople() {
   peopleLoading.value = true
   try {
+    if (mode.value === 'fm-only') {
+      // Physical-count entries (chips, cash, rake, tips) require a real Floor
+      // Manager — gaming.services.record_transaction has no Owner-PIN bypass
+      // branch the way open_game_day/set_conversion_rate do, so an Owner
+      // can't stand in here; don't even offer the option.
+      const { data } = await api.get('/floor-managers/')
+      people.value = data.map(f => ({ type: 'floor_manager', id: f.id, name: f.name, roleLabel: 'Floor Manager' }))
+      return
+    }
     const [ownersRes, fmsRes] = await Promise.all([
       api.get('/staff-users/owners/'),
       api.get('/floor-managers/'),
@@ -53,14 +63,18 @@ export function useAuthorizerConfirm() {
   /**
    * @param {string} opts.title - e.g. "Open Game-Day #14"
    * @param {string} opts.subtitle - e.g. "Will start now"
+   * @param {'owner-or-fm'|'fm-only'} [opts.mode] - 'fm-only' for physical-count
+   *   entries (Chips Out/In, Cash, Rake, Tip): only Floor Managers are offered,
+   *   never Owners. Defaults to 'owner-or-fm' (Open Game-Day, Set FX Rate).
    * @param {(payload: object) => Promise<void>} opts.onSubmit - performs the
    *   actual API call with the resolved {owner_id/owner_pin} or
    *   {floor_manager_id/floor_manager_pin}. Throw to show an inline error
    *   and let the user retry; resolve to close the modal.
    */
-  function confirm({ title: t, subtitle: s, onSubmit }) {
+  function confirm({ title: t, subtitle: s, mode: m = 'owner-or-fm', onSubmit }) {
     title.value = t
     subtitle.value = s
+    mode.value = m
     step.value = 'select'
     selected.value = null
     pin.value = ''
@@ -119,7 +133,7 @@ export function useAuthorizerConfirm() {
   }
 
   return {
-    isOpen, step, title, subtitle, people, peopleLoading, selected, pin, error, submitting,
+    isOpen, step, title, subtitle, mode, people, peopleLoading, selected, pin, error, submitting,
     confirm, selectPerson, backToSelect, appendDigit, backspace, cancel, submit,
   }
 }
