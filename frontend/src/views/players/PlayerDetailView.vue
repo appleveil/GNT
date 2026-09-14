@@ -121,8 +121,12 @@ async function onAddBank() {
 }
 
 async function onSetDefault(bank) {
-  await api.patch(`/players/${player.value.id}/bank-accounts/${bank.id}/`, { is_default: true })
-  await refreshPlayer()
+  try {
+    await api.patch(`/players/${player.value.id}/bank-accounts/${bank.id}/`, { is_default: true })
+    await refreshPlayer()
+  } catch {
+    toast.error('Could not set this as the default bank account.')
+  }
 }
 
 async function onPayOut() {

@@ -62,9 +62,11 @@ async function onSubmit() {
   align-items: center;
   justify-content: center;
   background: var(--bg);
+  padding: 20px;
 }
 .login-card {
   width: 480px;
+  max-width: 100%;
   padding: 48px;
   display: flex;
   flex-direction: column;

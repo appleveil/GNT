@@ -4,9 +4,11 @@ import { useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useGameDayStore } from '@/stores/gameDay'
 import BankAccountFields from '@/components/shared/BankAccountFields.vue'
+import { useToast } from '@/composables/useToast'
 
 const router = useRouter()
 const gameDay = useGameDayStore()
+const toast = useToast()
 
 const mode = ref('new') // 'new' | 'existing'
 const submitting = ref(false)
@@ -31,10 +33,14 @@ const filtered = computed(() => {
 
 onMounted(async () => {
   if (!gameDay.current) await gameDay.fetchCurrent()
-  // The full club roster — deliberately NOT the game-day-scoped endpoint,
-  // since the point here is finding someone not yet seated tonight.
-  const { data } = await api.get('/players/')
-  allPlayers.value = data
+  try {
+    // The full club roster — deliberately NOT the game-day-scoped endpoint,
+    // since the point here is finding someone not yet seated tonight.
+    const { data } = await api.get('/players/')
+    allPlayers.value = data
+  } catch {
+    toast.error('Could not load the player roster — the search below may be incomplete.')
+  }
 })
 
 async function onSubmit() {
