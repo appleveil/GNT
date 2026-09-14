@@ -8,6 +8,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 AUTH_USER_MODEL = 'accounts.StaffUser'
 
+# Case-insensitive username lookup at login — see accounts/backends.py.
+AUTHENTICATION_BACKENDS = ['accounts.backends.CaseInsensitiveModelBackend']
+
 SECRET_KEY = config('SECRET_KEY')
 
 INSTALLED_APPS = [

@@ -31,6 +31,14 @@ class StaffUserCreateSerializer(serializers.ModelSerializer):
         model = StaffUser
         fields = ['id', 'username', 'first_name', 'last_name', 'role', 'password']
 
+    def validate_username(self, value):
+        # Login itself is case-insensitive (accounts/backends.py) — reject a
+        # case-variant duplicate here so there's never more than one account
+        # a case-insensitive lookup could ambiguously match.
+        if StaffUser.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError('A user with that username already exists.')
+        return value
+
     def create(self, validated_data):
         password = validated_data.pop('password')
         user = StaffUser(**validated_data)

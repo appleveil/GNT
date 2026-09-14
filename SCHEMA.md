@@ -61,6 +61,16 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 - `closed_by` — FK → StaffProfile
 - `closed_by_floor_manager` — FK → FloorManager, null; optional — Cashier or Owner can close solo, or a Floor Manager PIN can authorize it instead
 
+#### `GameDayPlayer` — "seated at tonight's table" (added 2026-09-14)
+Not one of the four computed ledgers — a genuine new stored fact, because a player's presence in a game-day can't always be derived from `Transaction` rows alone (the Buy-in flow has a real gap: added → given DVA details → *then* issued chips; during that gap there's no transaction yet to derive presence from).
+- `game_day` — FK → GameDay
+- `player` — FK → Player
+- `added_by` — FK → StaffProfile, nullable (a Cashier or Owner explicitly seated them, or it was inferred — see below)
+- `added_at`
+- Unique on (`game_day`, `player`). Rows are never deleted — historical record of who was part of a given game-day, same principle as everything else here.
+- Created two ways: explicitly (the "add a player for tonight" action) or implicitly, as a side effect of recording any transaction/payout for that player+game_day pair that hasn't been seated yet (`get_or_create` — a player can't have real activity tonight without also appearing seated).
+- Backs the Cashier-facing Players screen, which is scoped to the current game-day only — **not** a query over `Player` directly.
+
 #### `ConversionRate`
 - `currency` — `USD` | `GBP` | `EUR` | `OTHER` (NGN implicit = 1)
 - `rate_to_naira`
@@ -112,8 +122,10 @@ erDiagram
     Player ||--o| PaystackAccount : "has a Gaming Account"
     Player ||--o{ PlayerBankAccount : "receiving accounts"
     Player ||--o{ Transaction : "party to"
+    Player ||--o{ GameDayPlayer : "seated at"
     PaystackAccount ||--o{ DedicatedVirtualAccount : "DVAs"
     GameDay ||--o{ Transaction : "contains"
+    GameDay ||--o{ GameDayPlayer : "seats"
     GameDay ||--o| GameDaySummary : "closes into"
     GameDay ||--o{ ConversionRate : "rate override for"
     StaffProfile ||--o{ Transaction : "recorded / approved / voided"
@@ -135,3 +147,5 @@ erDiagram
 - **Authorizer resolution generalizes from Floor-Manager-only to Floor-Manager-or-Owner.** ✅ Built 2026-09-13, shipped slightly differently than first sketched here: rather than renaming `_resolve_floor_manager(floor_manager_id, pin)` into one combined `_resolve_authorizer(authorizer_type, authorizer_id, pin)`, `_resolve_floor_manager` was kept as-is and a new `_resolve_owner_pin(owner_id, pin)` added alongside it, unified by a `_resolve_owner_or_floor_manager` wrapper — less churn on the existing FM-only call sites (physical-count confirmations), same effect. `GameDay.opened_by`/`ConversionRate.set_by` are now nullable (`limit_choices_to={'role': OWNER}`).
 - **Cashier-facing "today's balance" is a new selector, not a new field.** ✅ Built 2026-09-13: `player_game_day_balance(player, game_day)` — a signed `SUM()` over `Transaction` rows scoped to one `game_day`, mirroring the existing lifetime `player_balance(player)` but bounded. `PlayerSerializer.get_balance` returns it instead of the lifetime `balance` for a Cashier caller when the lifetime figure is negative; positive values still return the lifetime figure regardless of caller role.
 - **A "Gaming Account" is a Paystack Customer + Dedicated Virtual Account, not a separate Paystack integration.** ✅ Built 2026-09-13: the original brief modeled each GA with its own key pair and webhook (mirrored in `PaystackAccount`'s original `public_key`/`secret_key`/`webhook_secret` fields), which isn't a real Paystack primitive — there is one integration, one key pair, one webhook, club-wide. `payments/paystack_client.py` wraps the real endpoints (`/customer`, `/dedicated_account`, `/transferrecipient`, `/transfer`); `payments/services.provision_gaming_account(player)` creates a Customer+DVA on demand (no "next available GA" pool — see `CONCEPT.md`). One consequence: there's no real "sweep to Main account" money movement (only one Paystack balance exists), so `sweep_to_main_account` was retired; a payout's approval now calls the real Transfer API instead, landing in the new `TRANSFER_FAILED` status if it can't complete.
+- **A player's presence in a game-day needed a real stored fact, not just a derived query.** ✅ Built 2026-09-14: `GameDayPlayer` (see above) — the four ledgers are all *views* over `Transaction`, but "who's seated tonight" can't be, because a player can be added before their first transaction exists. This is the one genuinely new stored concept added since the original design; everything else added this session (`chips_variance`, `pin_hash`, `chips_limit`, `TRANSFER_FAILED`, Paystack fields) was either a rename, a nullable relaxation, or an enum addition to an existing table.
+- **Payout amount validated against game-day winnings, not left unbounded.** ✅ Built 2026-09-14: `gaming.services.initiate_payout` didn't validate the amount against anything before this — any figure was accepted and relied on Owner approval as the only check. It now hard-caps at the player's positive `player_game_day_balance` for the (now-defaulted-if-omitted) current game-day, the same enforcement posture as `chips_limit` on `CHIPS_OUT`. The Cashier-facing `balance` for this game-day's players list is this same figure, always — the earlier "positive lifetime, negative today-only" split (2026-09-13) is retired in favor of always-today's-figure (2026-09-14), since showing a lifetime positive number implied a payout up to that amount was possible when it no longer is.

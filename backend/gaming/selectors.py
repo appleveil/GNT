@@ -9,7 +9,7 @@ from decimal import Decimal
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce
 
-from .models import GameDay, GameDaySummary, Transaction
+from .models import GameDay, GameDayPlayer, GameDaySummary, Transaction
 
 ZERO = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
 
@@ -111,6 +111,16 @@ def main_account_balance():
 def current_open_game_day():
     """The most recently opened game-day still in progress, or None if none is open."""
     return GameDay.objects.filter(status=GameDay.Status.OPEN).order_by('-started_at').first()
+
+
+def game_day_players(game_day):
+    """
+    Players seated at a given game-day (see GameDayPlayer) — the Cashier-facing
+    Players list, added 2026-09-13. Distinct from the full club roster
+    (accounts.PlayerSerializer's plain queryset), which is still what a
+    "seat an existing player" search should use.
+    """
+    return GameDayPlayer.objects.filter(game_day=game_day).select_related('player').order_by('added_at')
 
 
 PAYMENT_TYPES = {

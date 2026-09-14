@@ -11,7 +11,7 @@ from accounts.models import FloorManager, Player, PlayerBankAccount, StaffUser
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError
-from .models import ConversionRate, GameDay, Transaction
+from .models import ConversionRate, GameDay, GameDayPlayer, Transaction
 
 
 class LedgerMathTests(TestCase):
@@ -219,12 +219,19 @@ class AuthorizationTests(TestCase):
     @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_test'})
     @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_test'})
     def test_payout_requires_owner_approval(self, mock_create_recipient, mock_initiate_transfer):
+        gd = services.open_game_day(20, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 4', display_name='Test4')
         PlayerBankAccount.objects.create(
             player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
             account_name='Test4', is_default=True,
         )
-        payout = services.initiate_payout(player, Decimal(50000), self.cashier)
+        # Gives the player 50,000 in winnings this game-day — a payout is now
+        # capped at what's actually been won tonight, not unlimited.
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
         self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
         with self.assertRaises(AuthorizationError):
             services.approve_payout(payout, self.cashier)
@@ -235,11 +242,32 @@ class AuthorizationTests(TestCase):
 
     def test_payout_approval_fails_without_bank_account(self):
         """No bank account on file — Paystack transfer can't proceed, lands TRANSFER_FAILED, not silently APPROVED."""
+        gd = services.open_game_day(21, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 8', display_name='Test8')
-        payout = services.initiate_payout(player, Decimal(50000), self.cashier)
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
         services.approve_payout(payout, self.owner)
         payout.refresh_from_db()
         self.assertEqual(payout.status, Transaction.Status.TRANSFER_FAILED)
+
+    def test_payout_capped_at_game_day_winnings(self):
+        """A payout can't exceed what the player has actually won this game-day."""
+        gd = services.open_game_day(22, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 9', display_name='Test9')
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(10000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        with self.assertRaises(InvalidStateError):
+            services.initiate_payout(player, Decimal(10001), self.cashier, game_day=gd)
+
+    def test_payout_requires_an_open_game_day(self):
+        player = Player.objects.create(account_code='WWI 10', display_name='Test10')
+        with self.assertRaises(InvalidStateError):
+            services.initiate_payout(player, Decimal(1000), self.cashier)
 
 
 class GameDayAndTransactionAPITests(APITestCase):
@@ -269,6 +297,38 @@ class GameDayAndTransactionAPITests(APITestCase):
         close_response = self.client.post(f'/api/game-days/{game_day_id}/close/', {})
         self.assertEqual(close_response.status_code, status.HTTP_200_OK)
         self.assertEqual(close_response.data['status'], GameDay.Status.CLOSED)
+
+    def test_close_preview_does_not_close_and_matches_the_real_close(self):
+        gd = services.open_game_day(41, timezone.now(), self.owner)
+        Transaction.objects.create(
+            game_day=gd, player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(200000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.client.force_authenticate(self.cashier)
+
+        preview = self.client.get(f'/api/game-days/{gd.id}/close-preview/')
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(str(preview.data['chips_out_total'])), Decimal(200000))
+        self.assertIn('num_players_seated', preview.data)
+        self.assertIn('outstanding_chips_after_close', preview.data)
+
+        gd.refresh_from_db()
+        self.assertEqual(gd.status, GameDay.Status.OPEN)  # preview must not close it
+        self.assertFalse(hasattr(gd, 'summary'))
+
+        close_response = self.client.post(f'/api/game-days/{gd.id}/close/', {})
+        self.assertEqual(close_response.data['summary']['chips_out_total'], preview.data['chips_out_total'])
+
+    def test_current_game_day_endpoint(self):
+        self.client.force_authenticate(self.cashier)
+        self.assertIsNone(self.client.get('/api/game-days/current/').data)
+
+        self.client.force_authenticate(self.owner)
+        opened = self.client.post('/api/game-days/open/', {'number': 40}).data
+
+        self.client.force_authenticate(self.cashier)
+        current = self.client.get('/api/game-days/current/').data
+        self.assertEqual(current['id'], opened['id'])
 
     def test_recording_chips_out_requires_floor_manager_pin(self):
         game_day = services.open_game_day(3, timezone.now(), self.owner)
@@ -317,7 +377,13 @@ class GameDayAndTransactionAPITests(APITestCase):
             player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
             account_name='Test Player', is_default=True,
         )
+        gd = services.open_game_day(23, timezone.now(), self.owner)
+        Transaction.objects.create(
+            game_day=gd, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
         self.client.force_authenticate(self.cashier)
+        # game_day omitted deliberately — initiate_payout defaults to whichever is currently open.
         response = self.client.post('/api/transactions/payout/', {'player': self.player.id, 'amount': '50000'})
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['status'], Transaction.Status.PENDING_APPROVAL)
@@ -329,7 +395,6 @@ class GameDayAndTransactionAPITests(APITestCase):
         self.client.force_authenticate(self.owner)
         approve_response = self.client.post(f'/api/transactions/{txn_id}/approve/')
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(approve_response.data['status'], Transaction.Status.APPROVED)
         self.assertEqual(approve_response.data['status'], Transaction.Status.APPROVED)
 
 
@@ -367,3 +432,97 @@ class DashboardAndMainAccountAPITests(APITestCase):
         self.client.force_authenticate(self.owner)
         response = self.client.get('/api/main-account/ledger/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class GameDaySeatingTests(APITestCase):
+    """
+    GameDayPlayer — "seated at tonight's table," independent of any
+    Transaction. See gaming.services.seat_player/_ensure_seated and
+    CONCEPT.md's Buy-in flow.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.game_day = services.open_game_day(30, timezone.now(), self.owner)
+
+    def test_seating_new_player_creates_and_seats(self):
+        player = services.seat_player(
+            self.game_day, self.owner, player_fields={'account_code': 'WWI 30', 'display_name': 'New Guy'},
+        )
+        self.assertEqual(Player.objects.filter(account_code='WWI 30').count(), 1)
+        self.assertTrue(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).exists())
+
+    def test_seating_is_idempotent(self):
+        player = Player.objects.create(account_code='WWI 31', display_name='Existing')
+        services.seat_player(self.game_day, self.owner, player=player)
+        services.seat_player(self.game_day, self.owner, player=player)  # should not raise / duplicate
+        self.assertEqual(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).count(), 1)
+
+    def test_recording_a_transaction_auto_seats(self):
+        """A player with real activity tonight shows up seated even without the explicit add-player step."""
+        player = Player.objects.create(account_code='WWI 32', display_name='Auto Seated')
+        self.assertFalse(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).exists())
+        services.record_transaction(
+            type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(1000), recorded_by=self.cashier,
+            game_day=self.game_day, player=player,
+        )
+        self.assertTrue(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).exists())
+
+    def test_cannot_seat_a_player_against_a_closed_game_day(self):
+        services.close_game_day(self.game_day, self.owner)
+        player = Player.objects.create(account_code='WWI 33', display_name='Too Late')
+        with self.assertRaises(InvalidStateError):
+            services.seat_player(self.game_day, self.owner, player=player)
+
+    def test_seated_players_endpoint_scopes_to_that_game_day(self):
+        seated = Player.objects.create(account_code='WWI 34', display_name='Seated')
+        not_seated = Player.objects.create(account_code='WWI 35', display_name='Not Seated')
+        services.seat_player(self.game_day, self.owner, player=seated)
+
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        codes = [row['account_code'] for row in response.data]
+        self.assertIn('WWI 34', codes)
+        self.assertNotIn('WWI 35', codes)
+
+    def test_balance_on_seated_endpoint_is_game_day_scoped_not_lifetime(self):
+        player = Player.objects.create(account_code='WWI 36', display_name='Scoped Balance')
+        # A closed, older game-day debt that must NOT leak into today's figure.
+        old_gd = services.open_game_day(31, timezone.now(), self.owner)
+        Transaction.objects.create(
+            game_day=old_gd, player=player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(200000),
+            channel=Transaction.Channel.CASHIER,
+        )
+        services.close_game_day(old_gd, self.owner)
+        services.seat_player(self.game_day, self.owner, player=player)
+
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/')
+        row = next(r for r in response.data if r['account_code'] == 'WWI 36')
+        self.assertEqual(Decimal(str(row['balance'])), Decimal('0'))  # nothing tonight, old debt hidden
+
+    def test_cashier_can_seat_existing_player_via_api(self):
+        player = Player.objects.create(account_code='WWI 37', display_name='Seat Me')
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(f'/api/game-days/{self.game_day.id}/players/', {'player_id': player.id})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['account_code'], 'WWI 37')
+
+    def test_cashier_can_seat_new_player_via_api(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(
+            f'/api/game-days/{self.game_day.id}/players/',
+            {'account_code': 'WWI 38', 'display_name': 'Brand New'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Player.objects.filter(account_code='WWI 38').exists())
+
+    def test_accountant_cannot_seat_a_player(self):
+        accountant = StaffUser.objects.create_user(username='acct2', password='x', role=StaffUser.Role.ACCOUNTANT)
+        self.client.force_authenticate(accountant)
+        response = self.client.post(
+            f'/api/game-days/{self.game_day.id}/players/', {'account_code': 'WWI 39', 'display_name': 'Blocked'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

@@ -1,6 +1,9 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from accounts.models import Player
+from accounts.serializers import PlayerBankAccountSerializer
 
 from .models import ConversionRate, GameDay, GameDaySummary, Transaction
 
@@ -31,6 +34,28 @@ class GameDaySerializer(serializers.ModelSerializer):
             return GameDaySummarySerializer(obj.summary).data
         except GameDaySummary.DoesNotExist:
             return None
+
+
+class GameDaySummaryPreviewSerializer(serializers.Serializer):
+    """
+    What close() would write to GameDaySummary, computed live — see
+    gaming.selectors.game_day_summary_data. A plain Serializer (not
+    ModelSerializer) since there's no model instance yet to serialize, only
+    a dict; DRF's field/attribute resolution works the same way for both.
+    Mirrors GameDaySummarySerializer's DecimalField string-coercion so a
+    preview and the eventual real summary look identical over the wire.
+    """
+
+    num_players = serializers.IntegerField()
+    num_players_seated = serializers.IntegerField()
+    chips_out_total = serializers.DecimalField(max_digits=14, decimal_places=2)
+    chips_in_total = serializers.DecimalField(max_digits=14, decimal_places=2)
+    rake_total = serializers.DecimalField(max_digits=14, decimal_places=2)
+    tips_total = serializers.DecimalField(max_digits=14, decimal_places=2)
+    chips_variance = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_payments = serializers.DecimalField(max_digits=14, decimal_places=2)
+    game_balance = serializers.DecimalField(max_digits=14, decimal_places=2)
+    outstanding_chips_after_close = serializers.DecimalField(max_digits=14, decimal_places=2)
 
 
 class OpenGameDaySerializer(serializers.Serializer):
@@ -108,3 +133,58 @@ class InitiatePayoutSerializer(serializers.Serializer):
     player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
     amount = serializers.DecimalField(max_digits=14, decimal_places=2)
     game_day = serializers.PrimaryKeyRelatedField(queryset=GameDay.objects.all(), required=False, allow_null=True)
+
+
+class GameDaySeatedPlayerSerializer(serializers.Serializer):
+    """
+    One row of gaming.selectors.game_day_players(game_day) — a GameDayPlayer
+    (see that model) flattened with THIS specific game-day's balance, never
+    lifetime. Added 2026-09-13 for the Cashier's "current game-day players
+    only" list — see CONCEPT.md's "Cashier player-history visibility."
+    """
+
+    id = serializers.IntegerField(source='player.id')
+    account_code = serializers.CharField(source='player.account_code')
+    display_name = serializers.CharField(source='player.display_name')
+    chips_limit = serializers.DecimalField(
+        source='player.chips_limit', max_digits=14, decimal_places=2, allow_null=True,
+    )
+    bank_accounts = PlayerBankAccountSerializer(source='player.bank_accounts', many=True)
+    balance = serializers.SerializerMethodField()
+    chips_used_today = serializers.SerializerMethodField()
+    added_at = serializers.DateTimeField()
+
+    def get_balance(self, obj):
+        from . import selectors
+        return selectors.player_game_day_balance(obj.player, obj.game_day)
+
+    def get_chips_used_today(self, obj):
+        if obj.player.chips_limit is None:
+            return None
+        balance = self.get_balance(obj)
+        return -balance if balance < 0 else Decimal('0')
+
+
+class SeatPlayerSerializer(serializers.Serializer):
+    """
+    Input for "add a player for tonight" — either `player_id` (seat an
+    existing club player) or `account_code` + `display_name` (create a new
+    one and seat it in the same call). See CONCEPT.md's Buy-in flow.
+    """
+
+    player_id = serializers.PrimaryKeyRelatedField(source='player', queryset=Player.objects.all(), required=False)
+    account_code = serializers.CharField(required=False)
+    display_name = serializers.CharField(required=False)
+
+    def validate(self, data):
+        has_existing = 'player' in data
+        has_new_fields = 'account_code' in data or 'display_name' in data
+        if not has_existing and not has_new_fields:
+            raise serializers.ValidationError(
+                'Provide either player_id (existing player) or account_code + display_name (new player).'
+            )
+        if has_existing and has_new_fields:
+            raise serializers.ValidationError('Provide player_id OR new-player fields, not both.')
+        if has_new_fields and not ('account_code' in data and 'display_name' in data):
+            raise serializers.ValidationError('A new player needs both account_code and display_name.')
+        return data

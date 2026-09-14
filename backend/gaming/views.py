@@ -7,18 +7,21 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Player, StaffUser
-from accounts.permissions import IsOwner, IsOwnerOrAccountant
+from accounts.permissions import IsCashierOrOwner, IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
 from .models import ConversionRate, GameDay, Transaction
 from .serializers import (
     CloseGameDaySerializer,
     ConversionRateSerializer,
+    GameDaySeatedPlayerSerializer,
     GameDaySerializer,
+    GameDaySummaryPreviewSerializer,
     InitiatePayoutSerializer,
     LedgerEntrySerializer,
     OpenGameDaySerializer,
     RecordTransactionSerializer,
+    SeatPlayerSerializer,
     SetConversionRateSerializer,
     TransactionSerializer,
     VoidTransactionSerializer,
@@ -32,6 +35,13 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = GameDay.objects.all().order_by('-number')
     serializer_class = GameDaySerializer
     permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['get'])
+    def current(self, request):
+        """The currently open game-day, or null — added 2026-09-14 so the frontend
+        doesn't have to fetch the whole history just to find today's."""
+        game_day = selectors.current_open_game_day()
+        return Response(GameDaySerializer(game_day).data if game_day else None)
 
     @action(detail=False, methods=['post'])
     def open(self, request):
@@ -49,6 +59,19 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
             owner_pin=data.get('owner_pin'),
         )
         return Response(GameDaySerializer(game_day).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='close-preview')
+    def close_preview(self, request, pk=None):
+        """
+        What close() would write to GameDaySummary, computed live (read-only —
+        game_day_summary_data has no side effects) so the Cashier's close
+        confirmation can show real numbers before committing. Added 2026-09-14.
+        """
+        game_day = self.get_object()
+        data = selectors.game_day_summary_data(game_day)
+        data['num_players_seated'] = selectors.game_day_players(game_day).count()
+        data['outstanding_chips_after_close'] = selectors.outstanding_chips_total() + data['chips_variance']
+        return Response(GameDaySummaryPreviewSerializer(data).data)
 
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
@@ -76,6 +99,35 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         player = get_object_or_404(Player, pk=player_pk)
         rows = selectors.player_game_day_ledger(game_day, player)
         return Response(LedgerEntrySerializer(rows, many=True).data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='players')
+    def players(self, request, pk=None):
+        """
+        GET: players seated at this game-day (see GameDayPlayer) — the
+        Cashier-facing Players list, scoped to the current game-day only.
+        POST: seat a player for this game-day — either an existing player
+        (player_id) or a brand-new one (account_code + display_name), per
+        CONCEPT.md's Buy-in flow. Cashier or Owner only, same as PlayerViewSet.
+        """
+        game_day = self.get_object()
+        if request.method == 'GET':
+            rows = selectors.game_day_players(game_day)
+            return Response(GameDaySeatedPlayerSerializer(rows, many=True).data)
+
+        if not IsCashierOrOwner().has_permission(request, self):
+            return Response({'detail': 'Only a Cashier or the Owner can add a player.'}, status=403)
+        serializer = SeatPlayerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        player = services.seat_player(
+            game_day, request.user, player=data.get('player'),
+            player_fields=(
+                {'account_code': data['account_code'], 'display_name': data['display_name']}
+                if 'player' not in data else None
+            ),
+        )
+        seat = selectors.game_day_players(game_day).get(player=player)
+        return Response(GameDaySeatedPlayerSerializer(seat).data, status=status.HTTP_201_CREATED)
 
 
 class ConversionRateViewSet(viewsets.ReadOnlyModelViewSet):

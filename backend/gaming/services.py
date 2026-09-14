@@ -8,11 +8,11 @@ from decimal import Decimal
 
 from django.utils import timezone
 
-from accounts.models import FloorManager, StaffUser
+from accounts.models import FloorManager, Player, StaffUser
 
 from . import selectors
 from .exceptions import AuthorizationError, InvalidStateError
-from .models import ConversionRate, GameDay, GameDaySummary, Transaction
+from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, Transaction
 
 
 def _require_open_game_day(game_day):
@@ -126,6 +126,35 @@ def set_conversion_rate(
     )
 
 
+def _ensure_seated(game_day, player, operator=None):
+    """
+    Idempotently records that `player` is part of `game_day` — see
+    GameDayPlayer. A no-op for the between-game-day case (game_day is None)
+    or rake/tip (player is None); called from both record_transaction and
+    initiate_payout so a player can never have real activity tonight without
+    also showing up in the Cashier's seated-players list.
+    """
+    if game_day is None or player is None:
+        return
+    GameDayPlayer.objects.get_or_create(game_day=game_day, player=player, defaults={'added_by': operator})
+
+
+def seat_player(game_day, operator, player=None, player_fields=None):
+    """
+    The explicit "add a player for tonight" action — see CONCEPT.md's Buy-in
+    flow. Either pass an existing `player`, or `player_fields` to create a new
+    club-wide Player record and seat it in one call. Idempotent: seating an
+    already-seated player is a no-op, not an error.
+    """
+    _require_open_game_day(game_day)
+    if player is None:
+        if not player_fields:
+            raise ValueError('Either player or player_fields is required.')
+        player = Player.objects.create(**player_fields)
+    _ensure_seated(game_day, player, operator)
+    return player
+
+
 def confirm_transaction(transaction_obj, floor_manager_id, floor_manager_pin):
     """A Floor Manager co-signs a physical-count entry they independently witnessed."""
     fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
@@ -217,6 +246,7 @@ def record_transaction(
         fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
         if fm is None:
             raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
+    _ensure_seated(game_day, player, recorded_by)
     return Transaction.objects.create(
         game_day=game_day, player=player, type=type, amount=amount,
         currency=currency, conversion_rate=conversion_rate,
@@ -227,8 +257,31 @@ def record_transaction(
 
 
 def initiate_payout(player, amount, operator, game_day=None):
-    """Cashier initiates a cash-out transfer; it always lands PENDING_APPROVAL."""
+    """
+    Cashier initiates a cash-out transfer; it always lands PENDING_APPROVAL.
+
+    Revised 2026-09-13: a payout is now always scoped to a game-day — it
+    defaults to whichever one is currently open when the caller doesn't pass
+    one — and is hard-capped at what the player has actually won *this*
+    game-day (their positive player_game_day_balance), mirroring how
+    chips_limit hard-blocks CHIPS_OUT rather than relying on Owner approval
+    as the only guard. A pending payout already reduces this figure for any
+    payout requested after it (balance selectors don't filter by status), so
+    two payouts can't double-spend the same winnings.
+    """
+    game_day = game_day or selectors.current_open_game_day()
+    if game_day is None:
+        raise InvalidStateError('A game-day must be open to initiate a payout.')
     _require_open_game_day(game_day)
+
+    available = max(selectors.player_game_day_balance(player, game_day), Decimal('0'))
+    if amount > available:
+        raise InvalidStateError(
+            f"This exceeds what {player.display_name} has won this game-day "
+            f'(available: ₦{available:,}).'
+        )
+
+    _ensure_seated(game_day, player, operator)
     return Transaction.objects.create(
         game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=amount,
         channel=Transaction.Channel.CASHIER, recorded_by=operator,

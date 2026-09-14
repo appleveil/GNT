@@ -39,6 +39,43 @@ class GameDay(models.Model):
         return f'Game-day {self.number}'
 
 
+class GameDayPlayer(models.Model):
+    """
+    "Seated at tonight's table" — a player's presence in a game-day, tracked
+    independently of whether any Transaction has been recorded for them yet.
+
+    Added 2026-09-13, surfaced while building the Cashier frontend: the brief's
+    own Buy-in flow has a real gap between "Cashier adds player, gives them
+    DVA details" and "player receives chips" — a player who's been added for
+    tonight but hasn't been issued anything yet still needs to show up
+    somewhere. There's no way to derive that from Transaction rows alone, so
+    this is a genuine new concept, not a computed view like the four ledgers.
+
+    Rows are never deleted — they're the historical record of who was part of
+    a given game-day, same as everything else in this schema. A row is
+    created explicitly (the "add player" screen — see
+    gaming.services.seat_player) or implicitly, as a side effect of recording
+    a transaction or a payout for a player+game_day pair that hasn't been
+    seated yet (get_or_create in gaming.services._ensure_seated) — so a
+    player can never have activity tonight without also appearing seated.
+    """
+
+    game_day = models.ForeignKey(GameDay, on_delete=models.CASCADE, related_name='seated_players')
+    player = models.ForeignKey(Player, on_delete=models.PROTECT, related_name='game_day_seats')
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name='players_seated',
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['game_day', 'player'], name='unique_player_per_game_day_seat'),
+        ]
+
+    def __str__(self):
+        return f'{self.player} @ game-day {self.game_day.number}'
+
+
 class ConversionRate(models.Model):
     class Currency(models.TextChoices):
         USD = 'USD', 'US Dollar'

@@ -70,13 +70,39 @@ class StaffUserViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         return StaffUserCreateSerializer if self.action == 'create' else StaffUserSerializer
 
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def owners(self, request):
+        """
+        Active Owners only — not the full staff list. Added 2026-09-14: the
+        Open Game-Day flow needs a Cashier to pick "who's authorizing" from
+        Owner-or-Floor-Manager, without exposing every Cashier/Accountant
+        username to a Cashier session.
+        """
+        owners = StaffUser.objects.filter(role=StaffUser.Role.OWNER, is_active=True).order_by('username')
+        return Response(StaffUserSerializer(owners, many=True).data)
+
 
 class FloorManagerViewSet(viewsets.ModelViewSet):
-    """Owner-only: manage Floor Manager staff records (name + PIN, no login of their own)."""
+    """
+    Read (list/retrieve): any authenticated staff — needed to pick "who's
+    authorizing" on the Open Game-Day flow (relaxed 2026-09-14; was Owner-only).
+    Write (create/update/delete): Owner-only, unchanged.
+    """
 
-    queryset = FloorManager.objects.all().order_by('name')
     serializer_class = FloorManagerSerializer
-    permission_classes = [IsOwner]
+
+    def get_queryset(self):
+        qs = FloorManager.objects.all().order_by('name')
+        # Non-Owners only see active FMs — an inactive one can't authorize
+        # anything anyway, so listing them would just be a confusing dead end.
+        if getattr(self.request.user, 'role', None) != StaffUser.Role.OWNER:
+            qs = qs.filter(is_active=True)
+        return qs
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsOwner()]
 
 
 class PlayerViewSet(viewsets.ModelViewSet):
