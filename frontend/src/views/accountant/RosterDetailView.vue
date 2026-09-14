@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
+import { useAuthStore } from '@/stores/auth'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
 import { useToast } from '@/composables/useToast'
 
@@ -13,12 +14,31 @@ import { useToast } from '@/composables/useToast'
 // returns an empty list for a game-day this player wasn't part of — no 404,
 // confirmed by reading that selector directly. The picker can therefore
 // offer every game-day, not just ones this player attended.
+//
+// Phase C (2026-09-14) adds two Owner-only pieces: chips-limit becomes
+// inline-editable (PATCH /api/players/{id}/ {chips_limit} — already
+// Owner-gated server-side in PlayerSerializer.validate_chips_limit, no
+// backend change needed) and a Deal/Write-off mini-form (POST
+// /api/transactions/ with game_day omitted, so the new row lands in the
+// Outstanding section on this same page — matches CONCEPT.md's framing of
+// "Owner credit/write-offs" as a player-detail/outstanding-style view).
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const toast = useToast()
 
 const player = ref(null)
 const loading = ref(true)
+
+const editingLimit = ref(false)
+const limitInput = ref('')
+const savingLimit = ref(false)
+
+const dealType = ref('PAYMENT_DEAL')
+const dealAmount = ref('')
+const dealReason = ref('')
+const dealSubmitting = ref(false)
+const dealError = ref('')
 
 const outstanding = ref([])
 const outstandingLoading = ref(false)
@@ -52,6 +72,48 @@ async function loadOutstanding() {
     outstanding.value = data.slice().reverse()
   } finally {
     outstandingLoading.value = false
+  }
+}
+
+function onStartEditLimit() {
+  limitInput.value = player.value.chips_limit ?? ''
+  editingLimit.value = true
+}
+
+async function onSaveLimit() {
+  savingLimit.value = true
+  try {
+    const { data } = await api.patch(`/players/${player.value.id}/`, {
+      chips_limit: limitInput.value === '' ? null : limitInput.value,
+    })
+    player.value = data
+    editingLimit.value = false
+    toast.success('Chips limit updated.')
+  } catch (err) {
+    toast.error(err.response?.data?.chips_limit?.[0] || 'Could not update the chips limit.')
+  } finally {
+    savingLimit.value = false
+  }
+}
+
+async function onSubmitDeal() {
+  dealError.value = ''
+  dealSubmitting.value = true
+  try {
+    await api.post('/transactions/', {
+      player: player.value.id,
+      type: dealType.value,
+      amount: dealAmount.value,
+      notes: dealReason.value,
+    })
+    dealAmount.value = ''
+    dealReason.value = ''
+    toast.success(`${dealType.value === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'} recorded.`)
+    loadOutstanding() // the new row shows up in the section above
+  } catch (err) {
+    dealError.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not record this.'
+  } finally {
+    dealSubmitting.value = false
   }
 }
 
@@ -102,7 +164,15 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </div>
         <div class="card stat-card">
           <div class="stat-label">Chips limit</div>
-          <div class="stat-value">{{ N(player.chips_limit) }}</div>
+          <div v-if="!auth.isOwner || !editingLimit" class="limit-row">
+            <div class="stat-value">{{ player.chips_limit != null ? N(player.chips_limit) : 'No cap' }}</div>
+            <button v-if="auth.isOwner" class="link-btn" type="button" @click="onStartEditLimit">Edit</button>
+          </div>
+          <div v-else class="limit-edit">
+            <input v-model="limitInput" type="number" min="0" step="0.01" placeholder="No cap" class="limit-input" />
+            <button class="link-btn" type="button" :disabled="savingLimit" @click="onSaveLimit">{{ savingLimit ? 'Saving…' : 'Save' }}</button>
+            <button class="link-btn link-btn--muted" type="button" @click="editingLimit = false">Cancel</button>
+          </div>
         </div>
         <div class="card stat-card">
           <div class="stat-label">Chips used today</div>
@@ -151,6 +221,28 @@ const N = n => `₦${Number(n).toLocaleString()}`
                 <div v-else class="feed-balance">{{ N(row.running_balance) }}</div>
               </div>
             </div>
+          </div>
+
+          <div v-if="auth.isOwner" class="card section-card">
+            <div class="section-title">Record Deal / Write-off</div>
+            <form class="deal-form" @submit.prevent="onSubmitDeal">
+              <div class="deal-type-row">
+                <label class="deal-type">
+                  <input v-model="dealType" type="radio" value="PAYMENT_DEAL" />
+                  Deal
+                </label>
+                <label class="deal-type">
+                  <input v-model="dealType" type="radio" value="WRITE_OFF" />
+                  Write-off
+                </label>
+              </div>
+              <input v-model="dealAmount" type="number" min="0.01" step="0.01" placeholder="Amount" required class="deal-input" />
+              <input v-model="dealReason" type="text" placeholder="Reason" required class="deal-input" />
+              <p v-if="dealError" class="form-error">{{ dealError }}</p>
+              <button class="btn btn--primary" type="submit" :disabled="dealSubmitting">
+                {{ dealSubmitting ? 'Recording…' : `Record ${dealType === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'}` }}
+              </button>
+            </form>
           </div>
         </div>
 
@@ -208,6 +300,46 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .stat-value { font-family: var(--font-mono); font-weight: 600; font-size: 20px; font-variant-numeric: tabular-nums; color: var(--text-primary); }
 .money--pos { color: var(--success-text); }
 .money--neg { color: var(--danger-text); }
+
+.limit-row { display: flex; align-items: baseline; gap: 10px; }
+.limit-edit { display: flex; align-items: center; gap: 8px; }
+.limit-input {
+  width: 100px;
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--surface);
+}
+.limit-input:focus { outline: none; border-color: var(--accent); }
+.link-btn { border: none; background: none; font-size: 12px; font-weight: 700; color: var(--accent-text); cursor: pointer; padding: 0; }
+.link-btn--muted { color: var(--text-tertiary); font-weight: 500; }
+.link-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.deal-form { display: flex; flex-direction: column; gap: 10px; }
+.deal-type-row { display: flex; gap: 16px; }
+.deal-type { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
+.deal-input {
+  height: var(--control-row-min);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--surface);
+}
+.deal-input:focus { outline: none; border-color: var(--accent); }
+.form-error {
+  font-size: 12.5px;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
 
 .grid-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
 .col { display: flex; flex-direction: column; gap: 16px; }

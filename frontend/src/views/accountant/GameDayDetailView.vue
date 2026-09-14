@@ -2,16 +2,25 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
+import { useAuthStore } from '@/stores/auth'
+import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 
 // Read-only game-day detail (Phase B, 2026-09-14) — same data sources as
 // Cashier's GameDayLedgerView.vue (close-preview while OPEN, frozen
-// GameDaySummary while CLOSED, the club-wide /ledger/ feed), but with no
-// void action and a seated-players list added, since an Accountant is here
-// to review, not to record or correct anything.
+// GameDaySummary while CLOSED, the club-wide /ledger/ feed), plus a
+// seated-players list, since an Accountant is here to review, not to record
+// or correct anything. Phase C (2026-09-14) adds one exception: a void
+// trigger, shown only for OWNER (canVoidTransaction already returns true
+// unconditionally for that role, including on a CLOSED game-day — this is
+// the real, already-built mechanism behind PLAN.md's "post-close
+// corrections/amendments," see PLAN.md's Phase C entry for why nothing more
+// than void exists to build on).
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const toast = useToast()
 
 const gameDayId = route.params.id
@@ -21,6 +30,7 @@ const players = ref([])
 const ledger = ref([])
 const stats = ref(null)
 const loading = ref(true)
+const voidTarget = ref(null)
 
 const displayStats = computed(() => {
   if (gameDay.value?.status === 'CLOSED' && gameDay.value.summary) return gameDay.value.summary
@@ -61,6 +71,15 @@ function formatTime(iso) {
 }
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function canVoid(row) {
+  return canVoidTransaction(row, auth.user, gameDay.value?.status)
+}
+function onVoided() {
+  voidTarget.value = null
+  toast.success('Entry voided.')
+  load()
 }
 
 const N = n => `₦${Number(n).toLocaleString()}`
@@ -128,6 +147,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
                 <div v-if="row.is_voided" class="ledger-balance ledger-balance--voided">VOIDED</div>
                 <div v-else class="ledger-balance">{{ N(row.running_balance) }}</div>
               </div>
+              <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
+                &#8942;
+              </button>
             </div>
           </div>
         </div>
@@ -145,6 +167,11 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </div>
       </div>
     </template>
+
+    <VoidEntryModal
+      v-if="voidTarget" :transaction="voidTarget" :player-name="playerName(voidTarget.player)"
+      :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
+    />
   </div>
 </template>
 
@@ -188,6 +215,19 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .ledger-amounts .money { display: block; font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); }
 .ledger-balance { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
 .ledger-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
+.void-trigger {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .player-row {
   display: flex;

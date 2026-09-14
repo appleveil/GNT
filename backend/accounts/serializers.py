@@ -47,6 +47,19 @@ class StaffUserCreateSerializer(serializers.ModelSerializer):
         return user
 
 
+class StaffPasswordResetSerializer(serializers.Serializer):
+    """
+    Owner-privileged reset of an EXISTING staff user's login password — a real
+    gap StaffUserSerializer (used for update/partial_update) never covered,
+    since it has no password field at all; password was only ever settable at
+    create time before this. See StaffUserViewSet.reset_password. Not a
+    ModelSerializer since it doesn't map 1:1 onto the model (write-only,
+    no other field touched).
+    """
+
+    password = serializers.CharField(write_only=True, min_length=8)
+
+
 class FloorManagerSerializer(serializers.ModelSerializer):
     pin = serializers.CharField(write_only=True, required=False, min_length=4, max_length=8)
 

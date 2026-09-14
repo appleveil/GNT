@@ -14,17 +14,25 @@ onMounted(() => gameDay.fetchCurrent())
 const initial = computed(() => (auth.user?.fullName || '?').trim().charAt(0).toUpperCase())
 
 // Cashier has exactly one screen (Game Day) as of 2026-09-14 — no tab bar
-// needed to navigate between one thing. Accountant/Owner get the Phase B
-// back-office nav (2026-09-14) — Owner will likely grow more of its own
-// tabs in Phase C without touching this branch structure.
+// needed to navigate between one thing. Accountant gets the Phase B
+// back-office nav (2026-09-14); Owner gets those same 4 plus two more of its
+// own (Phase C, 2026-09-14) — "everything Accountant has, plus."
 const tabs = computed(() => {
-  if (auth.user?.role === 'CASHIER') return []
-  return [
+  const role = auth.user?.role
+  if (role === 'CASHIER') return []
+  const base = [
     { name: 'dashboard', label: 'Dashboard', path: '/dashboard' },
     { name: 'game-days', label: 'Game Days', path: '/game-days' },
     { name: 'outstanding', label: 'Outstanding', path: '/outstanding' },
     { name: 'roster', label: 'Players', path: '/roster' },
   ]
+  if (role === 'OWNER') {
+    base.push(
+      { name: 'payouts', label: 'Payouts', path: '/payouts' },
+      { name: 'admin', label: 'Admin', path: '/admin' },
+    )
+  }
+  return base
 })
 
 // Theming — Cashier keeps the global "Ledger Slate" :root tokens;

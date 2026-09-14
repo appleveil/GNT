@@ -18,6 +18,7 @@ from .serializers import (
     PlayerBankAccountSerializer,
     PlayerSerializer,
     StaffLoginSerializer,
+    StaffPasswordResetSerializer,
     StaffUserCreateSerializer,
     StaffUserSerializer,
 )
@@ -81,6 +82,20 @@ class StaffUserViewSet(viewsets.ModelViewSet):
         """
         owners = StaffUser.objects.filter(role=StaffUser.Role.OWNER, is_active=True).order_by('username')
         return Response(StaffUserSerializer(owners, many=True).data)
+
+    @action(detail=True, methods=['post'], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        """
+        Owner-privileged reset of another staff user's login password — see
+        StaffPasswordResetSerializer. Permission inherited from the viewset's
+        class-level IsOwner; no extra check needed here.
+        """
+        user = self.get_object()
+        serializer = StaffPasswordResetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user.set_password(serializer.validated_data['password'])
+        user.save(update_fields=['password'])
+        return Response(status=204)
 
 
 class FloorManagerViewSet(viewsets.ModelViewSet):

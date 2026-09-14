@@ -133,6 +133,27 @@ class StaffAndFloorManagerAPITests(APITestCase):
         response = self.client.get('/api/staff-users/')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_owner_can_reset_a_staff_users_password(self):
+        """Phase C gap: StaffUserSerializer (used for update) has no password
+        field at all — this dedicated action is the only way to change an
+        existing user's password. Confirms the new password actually
+        authenticates, not just that the call succeeds."""
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(f'/api/staff-users/{self.cashier.id}/reset-password/', {'password': 'new-pass-123'})
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.cashier.refresh_from_db()
+        self.assertTrue(self.cashier.check_password('new-pass-123'))
+
+    def test_cashier_cannot_reset_a_staff_users_password(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(f'/api/staff-users/{self.owner.id}/reset-password/', {'password': 'new-pass-123'})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_reset_password_rejects_a_short_password(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(f'/api/staff-users/{self.cashier.id}/reset-password/', {'password': 'short'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 class PlayerBankAccountAPITests(APITestCase):
     """

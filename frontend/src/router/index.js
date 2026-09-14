@@ -7,12 +7,14 @@
  * reporting surface, Phase B — 2026-09-14).
  *
  * meta.roles is a defense-in-depth check mirroring what the API itself would
- * 403 for the wrong role. It's only set on the new /dashboard, /game-days,
- * /outstanding, /roster routes below (ACCOUNTANT + OWNER — the "back office"
- * surface Cashier has no use for). The original Cashier routes (/game-day,
- * /game-day/:id/ledger, /players/:id) are deliberately left unrestricted:
- * Owner has no dedicated operational UI yet (that's Phase C), so Owner must
- * keep reaching them unblocked until then.
+ * 403 for the wrong role. It's set on /dashboard, /game-days, /outstanding,
+ * /roster (ACCOUNTANT + OWNER — the "back office" surface Cashier has no use
+ * for) and, OWNER-only, on /admin and /payouts (Phase C, 2026-09-14). The
+ * original Cashier routes (/game-day, /game-day/:id/ledger, /players/:id)
+ * are deliberately left unrestricted: Owner still has no dedicated
+ * operational UI of its own for opening/recording (Phase C gave Owner a
+ * direct Open-Game-Day trigger on Dashboard, but not a full working screen),
+ * so Owner must keep reaching them unblocked.
  */
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
@@ -44,7 +46,12 @@ const OutstandingView = () => import('@/views/accountant/OutstandingView.vue')
 const RosterListView = () => import('@/views/accountant/RosterListView.vue')
 const RosterDetailView = () => import('@/views/accountant/RosterDetailView.vue')
 
+// Owner-only additions (Phase C, 2026-09-14).
+const AdminView = () => import('@/views/owner/AdminView.vue')
+const PayoutsView = () => import('@/views/owner/PayoutsView.vue')
+
 const BACK_OFFICE_ROLES = ['ACCOUNTANT', 'OWNER']
+const OWNER_ONLY_ROLES = ['OWNER']
 
 const routes = [
   { path: '/login', component: LoginView, meta: { public: true } },
@@ -67,6 +74,9 @@ const routes = [
       { path: 'outstanding', name: 'outstanding', component: OutstandingView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'roster', name: 'roster', component: RosterListView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'roster/:id', name: 'roster-detail', component: RosterDetailView, meta: { roles: BACK_OFFICE_ROLES } },
+
+      { path: 'admin', name: 'admin', component: AdminView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
     ],
   },
 

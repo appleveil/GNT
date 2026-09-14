@@ -1,7 +1,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
+import { useAuthStore } from '@/stores/auth'
+import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 
 // Outstanding (between-game-day) ledger (Phase B, 2026-09-14) — GET
@@ -10,11 +13,16 @@ import { useToast } from '@/composables/useToast'
 // direct payments outside any game-day), running_balance partitioned per
 // player (gaming.selectors.outstanding_ledger). Ordered oldest-first by the
 // API; reversed here for display, same convention as the other ledger views.
+// Phase C (2026-09-14) adds a void trigger, OWNER-only (canVoidTransaction
+// returns true unconditionally for that role — no gameDayStatus argument
+// needed here since these rows have no game-day at all).
+const auth = useAuthStore()
 const toast = useToast()
 
 const players = ref([])
 const rows = ref([])
 const loading = ref(true)
+const voidTarget = ref(null)
 
 async function load() {
   loading.value = true
@@ -36,6 +44,15 @@ onMounted(load)
 
 function playerName(playerId) {
   return players.value.find(p => p.id === playerId)?.display_name || ''
+}
+
+function canVoid(row) {
+  return canVoidTransaction(row, auth.user)
+}
+function onVoided() {
+  voidTarget.value = null
+  toast.success('Entry voided.')
+  load()
 }
 
 // One summary row per player — their current outstanding balance is the
@@ -96,6 +113,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
               <div v-if="row.is_voided" class="feed-balance feed-balance--voided">VOIDED</div>
               <div v-else class="feed-balance">{{ N(row.running_balance) }}</div>
             </div>
+            <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
+              &#8942;
+            </button>
           </div>
         </div>
       </div>
@@ -108,6 +128,11 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </RouterLink>
       </div>
     </div>
+
+    <VoidEntryModal
+      v-if="voidTarget" :transaction="voidTarget" :player-name="playerName(voidTarget.player)"
+      :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
+    />
   </div>
 </template>
 
@@ -138,6 +163,19 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .feed-amounts .money { display: block; font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); }
 .feed-balance { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
 .feed-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
+.void-trigger {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .summary-row {
   display: flex;
