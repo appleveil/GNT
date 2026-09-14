@@ -3,11 +3,18 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useGameDayStore } from '@/stores/gameDay'
+import { useAuthStore } from '@/stores/auth'
 import BankAccountFields from '@/components/shared/BankAccountFields.vue'
+import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
+import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import { canVoidTransaction } from '@/utils/canVoid'
+import { useToast } from '@/composables/useToast'
 
 const route = useRoute()
 const router = useRouter()
 const gameDay = useGameDayStore()
+const auth = useAuthStore()
+const toast = useToast()
 
 const player = ref(null)
 const loading = ref(true)
@@ -20,8 +27,28 @@ const newBank = ref({ bank_name: '', bank_code: '', account_number: '', account_
 const bankError = ref('')
 const bankSubmitting = ref(false)
 
-const payoutState = ref(null) // null | 'submitting' | { amount, status }
+// Tonight's activity — this player's own transactions for the CURRENT
+// game-day only, not lifetime (see gaming.selectors.player_game_day_ledger).
+// Also feeds "Payouts this game-day" below — both read the same fetch, just
+// filtered differently. Most-recent-first, same convention as the Active
+// Game-Day feed.
+const ledger = ref([])
+const ledgerLoading = ref(false)
+const activity = computed(() => ledger.value.slice().reverse())
+const payouts = computed(() => ledger.value.filter(r => r.type === 'PAYOUT').slice().reverse())
+
+const payoutSubmitting = ref(false)
 const payoutError = ref('')
+
+const voidTarget = ref(null)
+function canVoid(row) {
+  return canVoidTransaction(row, auth.user, gameDay.current?.status)
+}
+function onVoided() {
+  voidTarget.value = null
+  toast.success('Entry voided.')
+  refreshPlayer()
+}
 
 const gameDayDate = computed(() => {
   if (!gameDay.current) return ''
@@ -39,14 +66,32 @@ async function load() {
       error.value = 'No game-day is open.'
       return
     }
-    const { data } = await api.get(`/game-days/${gameDay.current.id}/players/${route.params.id}/`)
-    player.value = data
+    await refreshPlayer()
+    loadLedger() // don't block the rest of the page on this
   } catch (err) {
     error.value = err.response?.status === 404
       ? "This player isn't seated for tonight's game-day."
       : 'Could not load player.'
   } finally {
     loading.value = false
+  }
+}
+
+// Refetches player + ledger WITHOUT toggling `loading` — used after a write
+// (add bank, set default, payout, void) so the card updates in place instead
+// of flashing back to the full loading state.
+async function refreshPlayer() {
+  const { data } = await api.get(`/game-days/${gameDay.current.id}/players/${route.params.id}/`)
+  player.value = data
+}
+
+async function loadLedger() {
+  ledgerLoading.value = true
+  try {
+    const { data } = await api.get(`/game-days/${gameDay.current.id}/players/${route.params.id}/ledger/`)
+    ledger.value = data
+  } finally {
+    ledgerLoading.value = false
   }
 }
 
@@ -67,7 +112,7 @@ async function onAddBank() {
     })
     addingBank.value = false
     newBank.value = { bank_name: '', bank_code: '', account_number: '', account_name: '' }
-    await load()
+    await refreshPlayer()
   } catch (err) {
     bankError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add bank account.'
   } finally {
@@ -77,21 +122,27 @@ async function onAddBank() {
 
 async function onSetDefault(bank) {
   await api.patch(`/players/${player.value.id}/bank-accounts/${bank.id}/`, { is_default: true })
-  await load()
+  await refreshPlayer()
 }
 
 async function onPayOut() {
   payoutError.value = ''
-  payoutState.value = 'submitting'
+  payoutSubmitting.value = true
   try {
-    const { data } = await api.post('/transactions/payout/', {
+    await api.post('/transactions/payout/', {
       player: player.value.id, amount: player.value.balance,
     })
-    payoutState.value = { amount: data.amount, status: data.status }
+    await refreshPlayer()
+    await loadLedger() // the new PENDING_APPROVAL row shows up in the list below, not a separate banner
   } catch (err) {
     payoutError.value = err.response?.data?.detail || 'Could not initiate the payout.'
-    payoutState.value = null
+  } finally {
+    payoutSubmitting.value = false
   }
+}
+
+function formatTime(iso) {
+  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
 const N = n => `₦${Number(n).toLocaleString()}`
@@ -165,23 +216,72 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </form>
       </div>
 
-      <div v-if="payoutState && payoutState !== 'submitting'" class="payout-confirm">
-        Payout of {{ N(payoutState.amount) }} requested — pending Owner approval.
+      <div class="section">
+        <div class="section-title">Tonight's activity</div>
+        <p v-if="ledgerLoading && !activity.length" class="muted">Loading…</p>
+        <p v-else-if="!activity.length" class="muted">Nothing recorded for {{ player.display_name }} tonight yet.</p>
+        <div
+          v-for="row in activity" :key="row.id" class="activity-row"
+          :class="{ 'activity-row--voided': row.is_voided }"
+        >
+          <div class="activity-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
+          <div class="activity-info">
+            <div class="activity-title">
+              {{ TRANSACTION_TYPES[row.type]?.label || row.type }}
+              <span
+                v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge"
+                :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`"
+              >{{ row.status.replace('_', ' ') }}</span>
+            </div>
+            <div class="activity-meta">{{ formatTime(row.created_at) }}</div>
+          </div>
+          <div class="activity-amounts">
+            <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
+            <div v-if="row.is_voided" class="activity-balance activity-balance--voided">VOIDED</div>
+            <div v-else class="activity-balance">bal {{ N(row.running_balance) }}</div>
+          </div>
+          <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
+            &#8942;
+          </button>
+        </div>
       </div>
-      <template v-else>
+
+      <div class="section">
+        <div class="section-title">Payout</div>
         <button
           class="btn btn--primary payout-btn" type="button"
-          :disabled="!(player.balance > 0) || payoutState === 'submitting'"
+          :disabled="!(player.balance > 0) || payoutSubmitting"
           @click="onPayOut"
         >
-          {{ payoutState === 'submitting' ? 'Requesting…' : 'Pay Out Balance' }}
+          {{ payoutSubmitting ? 'Requesting…' : 'Pay Out Balance' }}
         </button>
         <p v-if="!(player.balance > 0)" class="payout-note">
           Not available — {{ player.display_name }} owes the club, the club doesn't owe them
         </p>
         <p v-if="payoutError" class="form-error">{{ payoutError }}</p>
-      </template>
+
+        <div class="payouts-list">
+          <div class="payouts-title">Payouts this game-day</div>
+          <p v-if="!payouts.length" class="muted">None requested yet tonight.</p>
+          <div v-for="p in payouts" :key="p.id" class="payout-row">
+            <div>
+              <div class="money">{{ N(p.amount) }}</div>
+              <div class="activity-meta">{{ formatTime(p.created_at) }}</div>
+            </div>
+            <span
+              v-if="p.is_voided" class="badge badge--voided">VOIDED</span>
+            <span v-else class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[p.status] || 'approved'}`">
+              {{ p.status.replace('_', ' ') }}
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
+
+    <VoidEntryModal
+      v-if="voidTarget" :transaction="voidTarget" :player-name="player.display_name"
+      :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
+    />
   </div>
 </template>
 
@@ -278,12 +378,58 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 .payout-btn { width: 100%; margin-bottom: 8px; }
 .payout-note { text-align: center; font-size: 11.5px; color: var(--text-tertiary); }
-.payout-confirm {
-  text-align: center;
-  font-size: 13px;
-  color: var(--success-text);
-  background: var(--success-bg);
-  border-radius: var(--radius-sm);
-  padding: 14px;
+
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px;
+  border-bottom: 1px solid var(--border);
 }
+.activity-row:last-child { border-bottom: none; }
+.activity-row--voided { opacity: 0.5; text-decoration: line-through; }
+.activity-row--voided .activity-dot { background: var(--status-voided-bg) !important; }
+.activity-dot { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
+.activity-dot.lane-chips { background: var(--lane-chips-bg); }
+.activity-dot.lane-payments { background: var(--lane-payments-bg); }
+.activity-info { flex-grow: 1; min-width: 0; }
+.activity-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.activity-meta { font-size: 10.5px; color: var(--text-tertiary); }
+.activity-amounts { text-align: right; flex-shrink: 0; }
+.activity-amounts .money { display: block; font-size: 12.5px; font-weight: 700; color: var(--text-primary); }
+.activity-balance { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-tertiary); }
+.activity-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
+.void-trigger {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
+
+.payouts-list { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+.payouts-title { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; }
+.payout-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.payout-row:last-child { border-bottom: none; }
+.payout-row .money { font-size: 13px; font-weight: 700; color: var(--text-primary); }
 </style>

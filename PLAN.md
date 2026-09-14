@@ -41,11 +41,12 @@ Written 2026-09-14, from a direct audit of the repo (test run, `git log`, file/r
 ## 2. Remaining work, in execution order
 
 ### Phase A — Round out Cashier v1
-- [ ] Void-entry UI (backend `POST /transactions/{id}/void/` already exists, no frontend affordance yet)
-- [ ] Dedicated Game-Day Ledger view — replace the placeholder stub at `views/game-day/GameDayLedgerView.vue`; club-wide running balance (`GET .../ledger/`, already correct and tested — distinct from the per-player `.../activity/` endpoint the working screen uses)
-- [ ] **Player Game-Day History view** — one player's own transaction list for *tonight's* game-day only, not lifetime history, not the club-wide ledger. Use case: a player asks the cashier "what have I done so far tonight" and gets a clean per-transaction breakdown (chips out/in, payments, running balance), not just the current balance figure Player Detail already shows. Backend already has what's needed — `GET /api/game-days/{id}/players/{player_pk}/ledger/` (`GameDayViewSet.player_ledger`) over `selectors.player_game_day_ledger`, inherently correctly-scoped — just no frontend consumer yet. Decide during build: own route, or a section within `PlayerDetailView`.
-- [ ] Payout status/history view — currently only an inline confirmation on Player Detail; no list of pending/approved/rejected/transfer-failed payouts
-- [ ] Polish pass: loading/empty/error states audit, toasts, tablet-viewport check
+- [x] Void-entry UI — `VoidEntryModal.vue`, wired into the Active Game-Day activity feed's per-row trigger, `canVoid.js` mirroring the backend's own eligibility rule. Surfaced and fixed a real backend bug along the way: voided rows were being filtered out of every ledger listing entirely rather than staying visible-but-struck-through as designed.
+- [x] **Player Game-Day History view** — built as a "Tonight's activity" section on `PlayerDetailView` (not a separate route): this player's own transaction list for tonight only, via `GET /api/game-days/{id}/players/{player_pk}/ledger/`, with the same void action available inline.
+- [x] Payout status/history — "Payouts this game-day" list added to `PlayerDetailView`'s payout section (replaces the old single inline confirmation banner), status-badged, reusing the same ledger fetch as the history section above (filtered to `type === 'PAYOUT'`).
+- [ ] Dedicated (club-wide) Game-Day Ledger view — replace the placeholder stub at `views/game-day/GameDayLedgerView.vue`; club-wide running balance (`GET .../ledger/`, already correct and tested — distinct from the per-player `.../activity/` endpoint the working screen uses)
+- [x] Toasts — `useToast.js`/`AppToast.vue`, mounted once in `App.vue`; used for void-success feedback so far
+- [ ] Rest of polish pass: loading/empty/error states audit, tablet-viewport check
 
 ### Phase B — Accountant frontend
 - [ ] Dashboard: outstanding balances owed by/to players, Outstanding Chips (`GET /api/dashboard/` already returns this, gated correctly server-side)
