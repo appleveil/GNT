@@ -1,3 +1,4 @@
+from django.db import transaction as db_transaction
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -143,4 +144,17 @@ class PlayerBankAccountViewSet(viewsets.ModelViewSet):
         return PlayerBankAccount.objects.filter(player_id=self.kwargs['player_pk'])
 
     def perform_create(self, serializer):
-        serializer.save(player_id=self.kwargs['player_pk'])
+        # Setting is_default=True here without first clearing any existing
+        # default violates one_default_bank_account_per_player (a real
+        # IntegrityError, found live 2026-09-14) — the DB constraint is
+        # correct, this view just never unset the old one for it.
+        with db_transaction.atomic():
+            if serializer.validated_data.get('is_default'):
+                self.get_queryset().update(is_default=False)
+            serializer.save(player_id=self.kwargs['player_pk'])
+
+    def perform_update(self, serializer):
+        with db_transaction.atomic():
+            if serializer.validated_data.get('is_default'):
+                self.get_queryset().exclude(pk=serializer.instance.pk).update(is_default=False)
+            serializer.save()

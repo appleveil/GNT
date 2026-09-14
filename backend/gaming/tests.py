@@ -526,3 +526,18 @@ class GameDaySeatingTests(APITestCase):
             f'/api/game-days/{self.game_day.id}/players/', {'account_code': 'WWI 39', 'display_name': 'Blocked'},
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_single_seated_player_detail_endpoint(self):
+        player = Player.objects.create(account_code='WWI 40', display_name='Detail Test')
+        services.seat_player(self.game_day, self.owner, player=player)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/{player.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['account_code'], 'WWI 40')
+        self.assertIsNone(response.data['gaming_account'])  # not provisioned
+
+    def test_player_detail_404_when_not_seated(self):
+        player = Player.objects.create(account_code='WWI 41', display_name='Not Seated')
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/{player.id}/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

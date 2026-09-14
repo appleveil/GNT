@@ -1,7 +1,7 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import FloorManager, Player, StaffUser
+from .models import FloorManager, Player, PlayerBankAccount, StaffUser
 
 
 class AuthTests(APITestCase):
@@ -132,3 +132,49 @@ class StaffAndFloorManagerAPITests(APITestCase):
         self.client.force_authenticate(self.cashier)
         response = self.client.get('/api/staff-users/')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class PlayerBankAccountAPITests(APITestCase):
+    """
+    Found live 2026-09-14: setting a new default bank account crashed with an
+    IntegrityError (one_default_bank_account_per_player) because nothing
+    unset the old default first — the constraint was correct, the view was
+    the bug.
+    """
+
+    def setUp(self):
+        self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI 1', display_name='Test Player')
+        self.client.force_authenticate(self.cashier)
+
+    def test_setting_a_new_default_unsets_the_old_one(self):
+        first = PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test Player', is_default=True,
+        )
+        second = PlayerBankAccount.objects.create(
+            player=self.player, bank_name='Access Bank', bank_code='044', account_number='9998887776',
+            account_name='Test Player', is_default=False,
+        )
+        response = self.client.patch(
+            f'/api/players/{self.player.id}/bank-accounts/{second.id}/', {'is_default': True},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertFalse(first.is_default)
+        self.assertTrue(second.is_default)
+
+    def test_creating_a_new_default_unsets_the_old_one(self):
+        PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test Player', is_default=True,
+        )
+        response = self.client.post(f'/api/players/{self.player.id}/bank-accounts/', {
+            'bank_name': 'Access Bank', 'bank_code': '044', 'account_number': '9998887776',
+            'account_name': 'Test Player', 'is_default': True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            PlayerBankAccount.objects.filter(player=self.player, is_default=True).count(), 1,
+        )

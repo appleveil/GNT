@@ -129,6 +129,17 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         seat = selectors.game_day_players(game_day).get(player=player)
         return Response(GameDaySeatedPlayerSerializer(seat).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get'], url_path=r'players/(?P<player_pk>\d+)')
+    def player_detail(self, request, pk=None, player_pk=None):
+        """
+        One seated player, game-day-scoped — backs PlayerDetailView. 404 if
+        that player isn't seated at this game-day (they're never auto-added
+        just by looking them up).
+        """
+        game_day = self.get_object()
+        seat = get_object_or_404(selectors.game_day_players(game_day), player_id=player_pk)
+        return Response(GameDaySeatedPlayerSerializer(seat).data)
+
 
 class ConversionRateViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ConversionRate.objects.all().order_by('-created_at')

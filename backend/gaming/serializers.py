@@ -152,6 +152,7 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
     bank_accounts = PlayerBankAccountSerializer(source='player.bank_accounts', many=True)
     balance = serializers.SerializerMethodField()
     chips_used_today = serializers.SerializerMethodField()
+    gaming_account = serializers.SerializerMethodField()
     added_at = serializers.DateTimeField()
 
     def get_balance(self, obj):
@@ -163,6 +164,17 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
             return None
         balance = self.get_balance(obj)
         return -balance if balance < 0 else Decimal('0')
+
+    def get_gaming_account(self, obj):
+        # None until provisioned — mirrors accounts.PlayerSerializer.get_gaming_account.
+        from payments.models import PaystackAccount
+        from payments.serializers import PaystackAccountSerializer
+
+        try:
+            account = obj.player.gaming_account
+        except PaystackAccount.DoesNotExist:
+            return None
+        return PaystackAccountSerializer(account).data
 
 
 class SeatPlayerSerializer(serializers.Serializer):
