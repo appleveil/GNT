@@ -77,6 +77,9 @@ class PlayerBankAccount(models.Model):
     account_number = models.CharField(max_length=20)
     account_name = models.CharField(max_length=150)
     is_default = models.BooleanField(default=False)
+    # Paystack transfer recipient for this account — created once on first payout
+    # attempt (payments.services.initiate_payout_transfer) and reused after that.
+    paystack_recipient_code = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

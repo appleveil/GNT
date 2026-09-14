@@ -198,6 +198,17 @@ All four are now implemented, migrated, and verified (51/51 existing tests still
 - **Chips-limit enforcement.** `Player.chips_limit` (nullable Decimal) added. `record_transaction` rejects a `CHIPS_OUT` whose resulting game-day debt (via the new `selectors.player_game_day_balance(player, game_day)`) would exceed it, raising `InvalidStateError` before the Floor Manager PIN step runs. `PlayerSerializer.validate_chips_limit` restricts writes to Owner-role callers (verified: a Cashier's write attempt fails validation, an Owner's succeeds). Added `chips_used_today` (read-only) alongside it so the Cashier UI doesn't need a second call for "used ₦X of ₦Y."
 - **Cashier balance-visibility split + outstanding-ledger permission gate.** `OutstandingLedgerView.permission_classes` changed to `IsOwnerOrAccountant` (verified: Cashier gets 403, Accountant gets 200). `PlayerSerializer.get_balance` is now role-conditional: a Cashier caller gets the lifetime `player_balance` only when it's ≥ 0; when it's negative, they get `player_game_day_balance` for the currently-open game-day instead (0 if that's also ≥0, or if no game-day is open) — the lifetime negative figure is never returned to a Cashier caller, matching "not even a hint of how much."
 
+### Built (2026-09-13) — real Paystack integration for Main account + Gaming accounts
+
+The "Gaming account (GA)" spec below (its own private/public keys, own webhook) describes something Paystack doesn't offer — there's no such thing as a per-customer sub-integration. What Paystack actually provides, and what got built, differs from that section in a way worth correcting here rather than only in code:
+
+- **One Paystack integration for the whole club** — one secret/public key pair (`PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, unchanged from before), one webhook URL, one underlying balance. A Gaming Account is a Paystack **Customer** plus a **Dedicated Virtual Account (DVA)** assigned to that customer — both created under the one integration via `payments/paystack_client.py` (`create_customer`, `create_dedicated_account`). `PaystackAccount` lost its per-row `secret_key`/`public_key`/`webhook_secret`/`paystack_integration_id` fields (there was never more than one of each to store) and gained `paystack_customer_code`; `DedicatedVirtualAccount` gained `paystack_dva_id`. The `MAIN` row is now just a label/anchor — it carries no Paystack identity of its own.
+- **"Next available GA" doesn't exist as a concept anymore.** `payments/services.provision_gaming_account(player)` creates a Customer+DVA on demand (`POST /api/players/{id}/provision-gaming-account/`, Cashier/Owner-triggered) — idempotent, so calling it again for an already-provisioned player just returns the existing account. No pool to allocate from, so there's nothing to run out of. `PlayerSerializer` gained a `gaming_account` field, `None` until provisioned — this is exactly the frontend's "Gaming Account not yet available" state.
+- **"Forward the payment to the Main account" (Deposits, below) is not a second Paystack money movement.** Under the Customer+DVA model there is only one Paystack balance, so a DVA deposit is already in it the instant it clears — the `Transaction` row (`channel=TRANSFER_DVA`) recorded by the webhook *is* that step. The `sweep_to_main_account` Celery task that used to model this as an explicit transfer has been retired.
+- **Payouts now actually move money.** `gaming/services.approve_payout` calls `payments/services.initiate_payout_transfer` (Paystack's real Transfer API — `create_transfer_recipient` + `initiate_transfer`) right after Owner approval; `PlayerBankAccount.paystack_recipient_code` caches the recipient so it's only created once per bank account. If the transfer can't be sent (no bank account on file yet, Paystack rejects it, ...), the payout lands in a new `Transaction.Status.TRANSFER_FAILED` state instead of silently sitting at `APPROVED` with nothing moving — visibly stuck, and re-approvable once fixed. Completion (`POSTED`) is confirmed asynchronously by a `transfer.success` webhook, not by the approval call itself; `transfer.failed`/`transfer.reversed` also route through the same webhook into `TRANSFER_FAILED`.
+- Verified live against the dev DB: provisioning end-to-end with a mocked Paystack response (customer → DVA → `PlayerSerializer.gaming_account` populated), provisioning is idempotent (second call doesn't hit Paystack again), a payout with no bank account fails cleanly to `TRANSFER_FAILED` with a readable reason, adding a bank account and retrying the same approval succeeds through to `APPROVED` with a `transfer_code`, the `transfer.success` webhook flips it to `POSTED`, and a missing `PAYSTACK_SECRET_KEY` surfaces as a clean `502` (not a `500`) via the global exception handler.
+- Still needed before this can go live: Paystack business KYC approval for Dedicated NUBAN (confirmed feasible with Paystack support per "Scope decisions" above, but not yet enabled on the account as of this writing), and real sandbox/live keys in `PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY` (currently unconfigured in local dev — every code path above was verified with the Paystack client functions mocked, not a real sandbox call).
+
 ## Role feature scope (v1)
 
 #### Cashier (staff account, logged in)
@@ -293,6 +304,8 @@ The platform collectively consists of five modules: four with an interface, and 
 
 #### Gaming account (GA)/ Player profile
 
+*Correction (2026-09-13, see "Built — real Paystack integration" above): a GA is not a separate Paystack account/integration — Paystack has no such concept. It's a Paystack Customer plus a Dedicated Virtual Account under the club's one integration, so the "Keys"/"Webhook url" bullets below don't apply per-GA; there's exactly one of each, club-wide (see "Main account" above).*
+
 Gaming accounts (GA) are Paystack accounts/integrations (similar to Stripe). Multiple GAs will be created with each one linked to a player. GAs have the following data/properties
 
 - One or more dedicated virtual account numbers (DVA) - primarily to capture deposits. A DVA is effectively a bank account, and each one has a:
@@ -327,7 +340,7 @@ Gaming accounts (GA) are Paystack accounts/integrations (similar to Stripe). Mul
                 Body: $_amount received from $player_name. Your balance is $_balance_amount
                 
             - ~~Player~~
-        - Forward the payment - less transfer charges - to the main account.
+        - ~~Forward the payment - less transfer charges - to the main account.~~ *(Correction 2026-09-13: not a separate step — under the single-integration model there's only one Paystack balance, so the deposit is already "in the Main account" the moment it clears. This step IS the ledger update below, not a second Paystack transfer.)*
         - Update the following ledgers in the “Deposit” columns:
             - Player ledger
             - Player game-day ledger (if applicable)
@@ -542,7 +555,7 @@ There are four ledgers - which are served from a master ledger (or database)
                 - Account number
             - Save
                 
-                ***Backend:** Links the profile to the next available GA and returns the DVAs linked to it.*
+                ***Backend:*** ~~*Links the profile to the next available GA and returns the DVAs linked to it.*~~ *Provisions a new GA on demand (`POST /api/players/{id}/provision-gaming-account/`) and returns its DVA — corrected 2026-09-13: there's no pool of pre-created GAs to allocate from, so nothing to run out of. See "Built — real Paystack integration."*
                 
         - Cashier gives player the dedicated virtual account (DVA) details.
     - Existing player

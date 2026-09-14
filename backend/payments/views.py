@@ -38,5 +38,7 @@ class PaystackWebhookView(APIView):
                 services.handle_charge_success(data)
             except services.UnrecognizedAccountError as exc:
                 logger.warning('Paystack webhook: %s', exc)
+        elif event in ('transfer.success', 'transfer.failed', 'transfer.reversed'):
+            services.handle_transfer_event(event, data)
 
         return Response(status=200)

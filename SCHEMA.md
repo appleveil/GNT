@@ -18,16 +18,18 @@ Target: Django + PostgreSQL. This is a plan to review, not code — field names/
 - `is_active`, `created_at`
 
 #### `PaystackAccount`
-Represents either the singleton **Main account** or a player's **Gaming Account** — merged into one table since the brief gives them identical shape (DVAs, keys, webhook, transfer endpoints).
+Represents either the singleton **Main account** or a player's **Gaming Account** — merged into one table since both have identical shape. Revised 2026-09-13: there is only ONE Paystack integration for the whole club (one key pair, in Django settings — see `paystack_client.py`), not a separate integration per player as originally drafted — see `CONCEPT.md`'s "Built — real Paystack integration." A Gaming Account is a Paystack **Customer** + a **Dedicated Virtual Account** under that one integration.
 - `account_type` — `MAIN` | `GAMING`
 - `player` — FK → Player, null for `MAIN`, required+unique for `GAMING`
-- `paystack_integration_id`, `integration_name`
-- `public_key`, `secret_key` (encrypted at rest), `webhook_secret`
+- `paystack_customer_code` — blank for `MAIN` (renamed from `paystack_integration_id` 2026-09-13)
+- `label` — display name (renamed from `integration_name` 2026-09-13); e.g. "LPC Main Account", or the player's name for a `GAMING` row
+- ~~`public_key`, `secret_key`, `webhook_secret`~~ — removed 2026-09-13: there's only ever one of each, already in settings (`PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`); nothing per-row to store
 - `created_at`
 - App-level constraint: exactly one `MAIN` row must exist
 
 #### `DedicatedVirtualAccount`
 - `paystack_account` — FK → PaystackAccount
+- `paystack_dva_id` — Paystack's own id for this DVA, for future deactivation calls. Added 2026-09-13.
 - `bank_name`, `bank_code`, `account_number`, `account_name`
 - `is_active`, `created_at`
 
@@ -35,6 +37,7 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 - `player` — FK → Player
 - `bank_name`, `bank_code`, `account_number`, `account_name`
 - `is_default`, `created_at`
+- `paystack_recipient_code` — cached Paystack transfer recipient, created once on first payout attempt and reused after. Added 2026-09-13.
 
 #### `StaffProfile` (Cashier / Accountant / Owner — real logins)
 - `user` — OneToOne → Django `User`
@@ -81,7 +84,7 @@ Represents either the singleton **Main account** or a player's **Gaming Account*
 - `recorded_by` — FK → StaffProfile, null for webhook-auto-captured rows
 - `floor_manager` — FK → FloorManager, set only for physical-count types (`CHIPS_OUT`, `CHIPS_IN`, `PAYMENT_CASH`, `RAKE`, `TIP`) — never Owner-authorized, a dual-witness count is always a Floor Manager PIN specifically
 - `confirmed_at` — when the FM PIN was validated
-- `status` — `POSTED` | `PENDING_APPROVAL` | `APPROVED` | `REJECTED` (only `PAYOUT` uses the non-`POSTED` states, per "every payout needs Owner approval")
+- `status` — `POSTED` | `PENDING_APPROVAL` | `APPROVED` | `REJECTED` | `TRANSFER_FAILED` (only `PAYOUT` uses the non-`POSTED` states, per "every payout needs Owner approval"). `TRANSFER_FAILED` added 2026-09-13: the Owner approved, but the real Paystack transfer didn't go through (no bank account on file, Paystack rejected it, ...) — distinct from `REJECTED` (an Owner's business decision); a `TRANSFER_FAILED` payout can be re-approved once the underlying issue is fixed.
 - `approved_by`, `approved_at` — FK → StaffProfile (Owner)
 - `is_voided`, `voided_by`, `voided_at`, `void_reason` — soft-correction trail
 - `external_reference` — Paystack transaction ID; unique when set, used for webhook idempotency (prevents double-processing a retried webhook)
@@ -131,3 +134,4 @@ erDiagram
 - **Chips-limit enforcement lives in `record_transaction`, not the serializer alone.** ✅ Built 2026-09-13: on a `CHIPS_OUT` attempt, computes the player's current game-day debt via `selectors.player_game_day_balance` + the new amount; raises `InvalidStateError` before the Floor Manager PIN step runs if `player.chips_limit` is set and would be exceeded.
 - **Authorizer resolution generalizes from Floor-Manager-only to Floor-Manager-or-Owner.** ✅ Built 2026-09-13, shipped slightly differently than first sketched here: rather than renaming `_resolve_floor_manager(floor_manager_id, pin)` into one combined `_resolve_authorizer(authorizer_type, authorizer_id, pin)`, `_resolve_floor_manager` was kept as-is and a new `_resolve_owner_pin(owner_id, pin)` added alongside it, unified by a `_resolve_owner_or_floor_manager` wrapper — less churn on the existing FM-only call sites (physical-count confirmations), same effect. `GameDay.opened_by`/`ConversionRate.set_by` are now nullable (`limit_choices_to={'role': OWNER}`).
 - **Cashier-facing "today's balance" is a new selector, not a new field.** ✅ Built 2026-09-13: `player_game_day_balance(player, game_day)` — a signed `SUM()` over `Transaction` rows scoped to one `game_day`, mirroring the existing lifetime `player_balance(player)` but bounded. `PlayerSerializer.get_balance` returns it instead of the lifetime `balance` for a Cashier caller when the lifetime figure is negative; positive values still return the lifetime figure regardless of caller role.
+- **A "Gaming Account" is a Paystack Customer + Dedicated Virtual Account, not a separate Paystack integration.** ✅ Built 2026-09-13: the original brief modeled each GA with its own key pair and webhook (mirrored in `PaystackAccount`'s original `public_key`/`secret_key`/`webhook_secret` fields), which isn't a real Paystack primitive — there is one integration, one key pair, one webhook, club-wide. `payments/paystack_client.py` wraps the real endpoints (`/customer`, `/dedicated_account`, `/transferrecipient`, `/transfer`); `payments/services.provision_gaming_account(player)` creates a Customer+DVA on demand (no "next available GA" pool — see `CONCEPT.md`). One consequence: there's no real "sweep to Main account" money movement (only one Paystack balance exists), so `sweep_to_main_account` was retired; a payout's approval now calls the real Transfer API instead, landing in the new `TRANSFER_FAILED` status if it can't complete.

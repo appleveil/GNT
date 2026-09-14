@@ -101,8 +101,10 @@ REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'lpc_backend.exception_handling.exception_handler',
 }
 
-# Paystack — Main account keys live here; each player's Gaming Account keys
-# are stored per-row on payments.PaystackAccount (see SCHEMA.md).
+# Paystack — one key pair for the club's single integration. A player's
+# "Gaming Account" is a Paystack Customer + Dedicated Virtual Account under
+# this same integration, not a separate key pair (see payments/paystack_client.py,
+# SCHEMA.md — revised 2026-09-13).
 PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY', default='')
 PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')
 

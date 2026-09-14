@@ -1,12 +1,13 @@
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import FloorManager, Player, StaffUser
+from accounts.models import FloorManager, Player, PlayerBankAccount, StaffUser
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError
@@ -215,8 +216,14 @@ class AuthorizationTests(TestCase):
 
     # --- payout approval ---
 
-    def test_payout_requires_owner_approval(self):
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_test'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_test'})
+    def test_payout_requires_owner_approval(self, mock_create_recipient, mock_initiate_transfer):
         player = Player.objects.create(account_code='WWI 4', display_name='Test4')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test4', is_default=True,
+        )
         payout = services.initiate_payout(player, Decimal(50000), self.cashier)
         self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
         with self.assertRaises(AuthorizationError):
@@ -224,6 +231,15 @@ class AuthorizationTests(TestCase):
         services.approve_payout(payout, self.owner)
         payout.refresh_from_db()
         self.assertEqual(payout.status, Transaction.Status.APPROVED)
+        self.assertEqual(payout.external_reference, 'TRF_test')
+
+    def test_payout_approval_fails_without_bank_account(self):
+        """No bank account on file — Paystack transfer can't proceed, lands TRANSFER_FAILED, not silently APPROVED."""
+        player = Player.objects.create(account_code='WWI 8', display_name='Test8')
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier)
+        services.approve_payout(payout, self.owner)
+        payout.refresh_from_db()
+        self.assertEqual(payout.status, Transaction.Status.TRANSFER_FAILED)
 
 
 class GameDayAndTransactionAPITests(APITestCase):
@@ -294,7 +310,13 @@ class GameDayAndTransactionAPITests(APITestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-    def test_payout_flow_requires_owner_approval_via_api(self):
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_test'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_test'})
+    def test_payout_flow_requires_owner_approval_via_api(self, mock_create_recipient, mock_initiate_transfer):
+        PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test Player', is_default=True,
+        )
         self.client.force_authenticate(self.cashier)
         response = self.client.post('/api/transactions/payout/', {'player': self.player.id, 'amount': '50000'})
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -307,6 +329,7 @@ class GameDayAndTransactionAPITests(APITestCase):
         self.client.force_authenticate(self.owner)
         approve_response = self.client.post(f'/api/transactions/{txn_id}/approve/')
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_response.data['status'], Transaction.Status.APPROVED)
         self.assertEqual(approve_response.data['status'], Transaction.Status.APPROVED)
 
 

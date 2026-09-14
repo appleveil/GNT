@@ -104,6 +104,12 @@ class Transaction(models.Model):
         PENDING_APPROVAL = 'PENDING_APPROVAL', 'Pending approval'
         APPROVED = 'APPROVED', 'Approved'
         REJECTED = 'REJECTED', 'Rejected'
+        # The Owner approved it but the real Paystack transfer didn't go through
+        # (no bank account on file, Paystack error, ...) — added 2026-09-13 when
+        # payout approval started actually moving money. Distinct from REJECTED
+        # (an Owner's business decision): this is an operational failure, and
+        # approve_payout can be retried once the underlying issue is fixed.
+        TRANSFER_FAILED = 'TRANSFER_FAILED', 'Transfer failed'
 
     # null = between-game-day entry (feeds the Outstanding ledger only)
     game_day = models.ForeignKey(

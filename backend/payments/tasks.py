@@ -1,29 +1,15 @@
-import logging
+"""
+No Celery tasks needed here as of 2026-09-13.
 
-from celery import shared_task
-from django.conf import settings
+sweep_to_main_account (queued from a DVA-deposit webhook) was retired: it
+assumed each Gaming Account was a separate Paystack integration that needed
+an explicit Transfer to move funds into the Main account. Under the actual
+Paystack model (one integration; a Gaming Account is a Customer + Dedicated
+Virtual Account) there is only one Paystack balance — a DVA deposit is
+already in it the moment it clears, so there is nothing to sweep. See
+payments/services.py's handle_charge_success and CONCEPT.md/SCHEMA.md.
 
-logger = logging.getLogger(__name__)
-
-
-@shared_task
-def sweep_to_main_account(transaction_id):
-    """
-    Sweeps a Gaming Account deposit into the Main account via Paystack's Transfer
-    API, per CONCEPT.md's "Platform rules > Deposits" flow (step: "Forward the
-    payment — less transfer charges — to the main account").
-
-    Runs async (not inline in the webhook view) so a slow/failing Paystack call
-    never delays the webhook response Paystack is waiting on.
-
-    Left as a stub: PAYSTACK_SECRET_KEY is empty until real sandbox keys exist,
-    so there's nothing safe to call yet.
-    """
-    if not settings.PAYSTACK_SECRET_KEY:
-        logger.info('Skipping Main account sweep for transaction %s — no Paystack key configured.', transaction_id)
-        return
-
-    # TODO: call Paystack's Transfer API to move the deposit (less transfer
-    # charges) from the player's Gaming Account balance to the Main account,
-    # then notify Cashier/Owner per the notification matrix (still open in
-    # CONCEPT.md).
+Payout transfers (money actually leaving the club's Paystack balance) are
+synchronous instead — see payments/services.py's initiate_payout_transfer,
+called from gaming.services.approve_payout.
+"""

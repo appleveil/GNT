@@ -237,13 +237,37 @@ def initiate_payout(player, amount, operator, game_day=None):
 
 
 def approve_payout(transaction_obj, operator):
-    """Every payout requires Owner approval before funds move — no threshold exemption."""
+    """
+    Every payout requires Owner approval before funds move — no threshold
+    exemption. Approval and the real Paystack transfer happen together: if
+    the transfer can't be sent (no bank account on file, Paystack rejects
+    it, ...), the payout lands TRANSFER_FAILED instead of APPROVED so it's
+    visibly stuck rather than silently "approved" with nothing moving.
+    TRANSFER_FAILED can be retried by calling this again once the underlying
+    issue is fixed (e.g. a bank account is added).
+    """
     if operator.role != StaffUser.Role.OWNER:
         raise AuthorizationError('Only the Owner can approve a payout.')
     if transaction_obj.type != Transaction.Type.PAYOUT:
         raise ValueError('Not a payout transaction.')
-    transaction_obj.status = Transaction.Status.APPROVED
+    if transaction_obj.status not in (Transaction.Status.PENDING_APPROVAL, Transaction.Status.TRANSFER_FAILED):
+        raise InvalidStateError('Only a pending or previously failed payout can be approved.')
+
+    # Deferred import: payments.services imports gaming.services (record_transaction)
+    # at module level, so importing it back at module level here would be circular.
+    from payments.services import PaystackAPIError, initiate_payout_transfer
+
     transaction_obj.approved_by = operator
     transaction_obj.approved_at = timezone.now()
-    transaction_obj.save(update_fields=['status', 'approved_by', 'approved_at'])
+    try:
+        transfer_code = initiate_payout_transfer(transaction_obj)
+    except PaystackAPIError as exc:
+        transaction_obj.status = Transaction.Status.TRANSFER_FAILED
+        transaction_obj.notes = f'{transaction_obj.notes}\nTransfer failed: {exc}'.strip()
+        transaction_obj.save(update_fields=['status', 'notes', 'approved_by', 'approved_at'])
+        return transaction_obj
+
+    transaction_obj.status = Transaction.Status.APPROVED
+    transaction_obj.external_reference = transfer_code
+    transaction_obj.save(update_fields=['status', 'approved_by', 'approved_at', 'external_reference'])
     return transaction_obj

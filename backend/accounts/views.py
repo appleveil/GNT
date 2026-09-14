@@ -1,4 +1,5 @@
-from rest_framework import viewsets
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -86,9 +87,24 @@ class PlayerViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_permissions(self):
-        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+        if self.action in ('create', 'update', 'partial_update', 'destroy', 'provision_gaming_account'):
             return [IsCashierOrOwner()]
         return super().get_permissions()
+
+    @action(detail=True, methods=['post'], url_path='provision-gaming-account')
+    def provision_gaming_account(self, request, pk=None):
+        """
+        Creates the player's Gaming Account (Paystack Customer + Dedicated
+        Virtual Account) if it doesn't already exist. A PaystackAPIError here
+        (e.g. Dedicated NUBAN not yet enabled) surfaces as 502 via the global
+        exception handler — see lpc_backend/exception_handling.py.
+        """
+        from payments.services import provision_gaming_account
+
+        player = self.get_object()
+        provision_gaming_account(player)
+        player.refresh_from_db()
+        return Response(PlayerSerializer(player, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 class PlayerBankAccountViewSet(viewsets.ModelViewSet):

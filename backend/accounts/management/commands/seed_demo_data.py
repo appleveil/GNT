@@ -33,8 +33,7 @@ class Command(BaseCommand):
             fm.save()
 
         PaystackAccount.objects.get_or_create(
-            account_type=PaystackAccount.AccountType.MAIN,
-            defaults={'paystack_integration_id': 'MAIN-DEV', 'integration_name': 'LPC Main Account'},
+            account_type=PaystackAccount.AccountType.MAIN, defaults={'label': 'LPC Main Account'},
         )
 
         players = {}

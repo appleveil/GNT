@@ -10,6 +10,6 @@ class DedicatedVirtualAccountInline(admin.TabularInline):
 
 @admin.register(PaystackAccount)
 class PaystackAccountAdmin(admin.ModelAdmin):
-    list_display = ('integration_name', 'account_type', 'player', 'created_at')
+    list_display = ('label', 'account_type', 'player', 'created_at')
     list_filter = ('account_type',)
     inlines = [DedicatedVirtualAccountInline]

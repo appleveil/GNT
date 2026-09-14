@@ -77,12 +77,13 @@ class PlayerSerializer(serializers.ModelSerializer):
     bank_accounts = PlayerBankAccountSerializer(many=True, read_only=True)
     balance = serializers.SerializerMethodField()
     chips_used_today = serializers.SerializerMethodField()
+    gaming_account = serializers.SerializerMethodField()
 
     class Meta:
         model = Player
         fields = [
             'id', 'account_code', 'display_name', 'is_active', 'created_at',
-            'bank_accounts', 'balance', 'chips_limit', 'chips_used_today',
+            'bank_accounts', 'balance', 'chips_limit', 'chips_used_today', 'gaming_account',
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -127,3 +128,17 @@ class PlayerSerializer(serializers.ModelSerializer):
             return Decimal('0')
         balance = player_game_day_balance(obj, game_day)
         return -balance if balance < 0 else Decimal('0')
+
+    def get_gaming_account(self, obj):
+        """
+        None until provisioned (see PlayerViewSet.provision_gaming_account) —
+        the frontend's "Gaming Account not yet available" state is exactly this.
+        """
+        from payments.models import PaystackAccount
+        from payments.serializers import PaystackAccountSerializer
+
+        try:
+            account = obj.gaming_account
+        except PaystackAccount.DoesNotExist:
+            return None
+        return PaystackAccountSerializer(account).data

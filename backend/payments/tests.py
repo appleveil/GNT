@@ -1,16 +1,18 @@
 import hashlib
 import hmac
 import json
+from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Player
+from accounts.models import Player, StaffUser
 from gaming.models import Transaction
 
-from . import services
-from .models import PaystackAccount
+from . import paystack_client, services
+from .models import DedicatedVirtualAccount, PaystackAccount
+from .paystack_client import PaystackAPIError, PaystackNotConfiguredError
 
 TEST_SECRET = 'test-paystack-secret'
 
@@ -59,7 +61,7 @@ class HandleChargeSuccessTests(TestCase):
         self.player = Player.objects.create(account_code='WWI 1', display_name='Amina')
         self.paystack_account = PaystackAccount.objects.create(
             account_type=PaystackAccount.AccountType.GAMING, player=self.player,
-            paystack_integration_id='CUS_test123', integration_name='Amina GA',
+            paystack_customer_code='CUS_test123', label='Amina GA',
         )
 
     def test_creates_payment_transfer_transaction(self):
@@ -98,7 +100,7 @@ class PaystackWebhookViewTests(APITestCase):
         self.player = Player.objects.create(account_code='WWI 2', display_name='Moses')
         PaystackAccount.objects.create(
             account_type=PaystackAccount.AccountType.GAMING, player=self.player,
-            paystack_integration_id='CUS_test456', integration_name='Moses GA',
+            paystack_customer_code='CUS_test456', label='Moses GA',
         )
 
     def test_valid_webhook_creates_transaction(self):
@@ -140,3 +142,123 @@ class PaystackWebhookViewTests(APITestCase):
             HTTP_X_PAYSTACK_SIGNATURE=signature,
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class PaystackClientTests(TestCase):
+    """paystack_client._request, exercised via its public wrapper functions."""
+
+    def test_raises_when_not_configured(self):
+        with override_settings(PAYSTACK_SECRET_KEY=''):
+            with self.assertRaises(PaystackNotConfiguredError):
+                paystack_client.create_customer('a@example.com', 'A', 'B')
+
+    @override_settings(PAYSTACK_SECRET_KEY=TEST_SECRET)
+    @patch('requests.request')
+    def test_raises_on_paystack_error_response(self, mock_request):
+        mock_request.return_value.ok = False
+        mock_request.return_value.status_code = 400
+        mock_request.return_value.json.return_value = {'status': False, 'message': 'Invalid email'}
+        with self.assertRaises(PaystackAPIError) as ctx:
+            paystack_client.create_customer('bad', 'A', 'B')
+        self.assertIn('Invalid email', str(ctx.exception))
+
+    @override_settings(PAYSTACK_SECRET_KEY=TEST_SECRET)
+    @patch('requests.request')
+    def test_returns_data_on_success(self, mock_request):
+        mock_request.return_value.ok = True
+        mock_request.return_value.status_code = 200
+        mock_request.return_value.json.return_value = {'status': True, 'data': {'customer_code': 'CUS_1'}}
+        result = paystack_client.create_customer('a@example.com', 'A', 'B')
+        self.assertEqual(result, {'customer_code': 'CUS_1'})
+
+
+@override_settings(PAYSTACK_SECRET_KEY=TEST_SECRET)
+class ProvisionGamingAccountTests(TestCase):
+    def setUp(self):
+        self.player = Player.objects.create(account_code='WWI 20', display_name='Tunde Test')
+
+    @patch('payments.paystack_client.create_dedicated_account')
+    @patch('payments.paystack_client.create_customer')
+    def test_provisions_customer_and_dva(self, mock_create_customer, mock_create_dva):
+        mock_create_customer.return_value = {'customer_code': 'CUS_new'}
+        mock_create_dva.return_value = {
+            'id': 555, 'account_number': '9990001111', 'account_name': 'Tunde Test',
+            'bank': {'name': 'Wema Bank', 'slug': 'wema-bank'},
+        }
+        account = services.provision_gaming_account(self.player)
+        self.assertEqual(account.account_type, PaystackAccount.AccountType.GAMING)
+        self.assertEqual(account.paystack_customer_code, 'CUS_new')
+        dva = DedicatedVirtualAccount.objects.get(paystack_account=account)
+        self.assertEqual(dva.account_number, '9990001111')
+        self.assertEqual(dva.paystack_dva_id, '555')
+        mock_create_customer.assert_called_once()
+        mock_create_dva.assert_called_once_with(customer_code='CUS_new')
+
+    @patch('payments.paystack_client.create_dedicated_account')
+    @patch('payments.paystack_client.create_customer')
+    def test_is_idempotent(self, mock_create_customer, mock_create_dva):
+        mock_create_customer.return_value = {'customer_code': 'CUS_new'}
+        mock_create_dva.return_value = {'id': 1, 'account_number': '1', 'account_name': 'x', 'bank': {}}
+        first = services.provision_gaming_account(self.player)
+        second = services.provision_gaming_account(self.player)
+        self.assertEqual(first.pk, second.pk)
+        mock_create_customer.assert_called_once()  # not called again on the second call
+
+    def test_paystack_error_propagates(self):
+        # No PAYSTACK_SECRET_KEY override here would hit real settings; instead
+        # force the underlying call to fail as Paystack itself would (e.g.
+        # Dedicated NUBAN not enabled yet).
+        with patch('payments.paystack_client.create_customer', side_effect=PaystackAPIError('boom')):
+            with self.assertRaises(PaystackAPIError):
+                services.provision_gaming_account(self.player)
+
+
+class HandleTransferEventTests(TestCase):
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner2', password='x', role=StaffUser.Role.OWNER)
+        self.player = Player.objects.create(account_code='WWI 21', display_name='Payout Test')
+        self.txn = Transaction.objects.create(
+            player=self.player, type=Transaction.Type.PAYOUT, amount=50000,
+            channel=Transaction.Channel.CASHIER, status=Transaction.Status.APPROVED,
+            approved_by=self.owner, external_reference='TRF_abc',
+        )
+
+    def test_transfer_success_marks_posted(self):
+        services.handle_transfer_event('transfer.success', {'transfer_code': 'TRF_abc'})
+        self.txn.refresh_from_db()
+        self.assertEqual(self.txn.status, Transaction.Status.POSTED)
+
+    def test_transfer_failed_marks_transfer_failed(self):
+        services.handle_transfer_event('transfer.failed', {'transfer_code': 'TRF_abc', 'reason': 'Insufficient funds'})
+        self.txn.refresh_from_db()
+        self.assertEqual(self.txn.status, Transaction.Status.TRANSFER_FAILED)
+        self.assertIn('Insufficient funds', self.txn.notes)
+
+    def test_unmatched_transfer_code_is_a_noop(self):
+        result = services.handle_transfer_event('transfer.success', {'transfer_code': 'TRF_unknown'})
+        self.assertIsNone(result)
+        self.txn.refresh_from_db()
+        self.assertEqual(self.txn.status, Transaction.Status.APPROVED)
+
+
+class ProvisionGamingAccountAPITests(APITestCase):
+    def setUp(self):
+        self.cashier = StaffUser.objects.create_user(username='cashier3', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI 22', display_name='API Test')
+
+    @patch('payments.paystack_client.create_dedicated_account')
+    @patch('payments.paystack_client.create_customer')
+    def test_cashier_can_provision(self, mock_create_customer, mock_create_dva):
+        mock_create_customer.return_value = {'customer_code': 'CUS_api'}
+        mock_create_dva.return_value = {'id': 1, 'account_number': '1', 'account_name': 'x', 'bank': {}}
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(f'/api/players/{self.player.id}/provision-gaming-account/')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNotNone(response.data['gaming_account'])
+        self.assertEqual(response.data['gaming_account']['paystack_customer_code'], 'CUS_api')
+
+    def test_not_configured_surfaces_as_502(self):
+        self.client.force_authenticate(self.cashier)
+        with override_settings(PAYSTACK_SECRET_KEY=''):
+            response = self.client.post(f'/api/players/{self.player.id}/provision-gaming-account/')
+        self.assertEqual(response.status_code, 502)
