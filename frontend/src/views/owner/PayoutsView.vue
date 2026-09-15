@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
+import RejectPayoutModal from '@/components/shared/RejectPayoutModal.vue'
 import { useToast } from '@/composables/useToast'
 
 // Owner-only payout approval queue (Phase C, 2026-09-14). No "list pending"
@@ -10,12 +11,19 @@ import { useToast } from '@/composables/useToast'
 // Roster's search. approve_payout (gaming/services.py) handles both a first
 // approval (PENDING_APPROVAL) and retrying a failed transfer
 // (TRANSFER_FAILED) via the same call.
+//
+// Rejection (2026-09-15, RejectPayoutModal) reuses void's fields under the
+// hood (reject_payout sets is_voided=True so the amount drops out of every
+// balance sum) — so a rejected row's status is REJECTED *and* is_voided is
+// true. Check status first in the history badge below, or every rejected
+// payout would render as a bare "VOIDED" instead of "Declined" with its reason.
 const toast = useToast()
 
 const players = ref([])
 const transactions = ref([])
 const loading = ref(true)
 const approvingId = ref(null)
+const rejectTarget = ref(null)
 
 async function load() {
   loading.value = true
@@ -63,6 +71,12 @@ async function onApprove(t) {
   }
 }
 
+function onRejected() {
+  toast.success(`${playerName(rejectTarget.value.player)}'s payout declined.`)
+  rejectTarget.value = null
+  load()
+}
+
 function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
@@ -95,31 +109,43 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <div class="row-sub">{{ formatDate(t.created_at) }} &middot; {{ formatTime(t.created_at) }}</div>
           </div>
           <div class="money">{{ N(t.amount) }}</div>
-          <button
-            class="btn btn--primary" type="button" :disabled="approvingId === t.id"
-            @click="onApprove(t)"
-          >
-            {{ approvingId === t.id ? 'Working…' : t.status === 'TRANSFER_FAILED' ? 'Retry transfer' : 'Approve' }}
-          </button>
+          <div class="row-actions">
+            <button
+              class="btn btn--primary" type="button" :disabled="approvingId === t.id"
+              @click="onApprove(t)"
+            >
+              {{ approvingId === t.id ? 'Working…' : t.status === 'TRANSFER_FAILED' ? 'Retry transfer' : 'Approve' }}
+            </button>
+            <button class="btn btn--danger" type="button" :disabled="approvingId === t.id" @click="rejectTarget = t">Decline</button>
+          </div>
         </div>
       </div>
 
       <div class="card section-card">
         <div class="section-title">Recent history</div>
-        <p v-if="!history.length" class="muted">No approved or rejected payouts yet.</p>
+        <p v-if="!history.length" class="muted">No approved or declined payouts yet.</p>
         <div v-for="t in history" :key="t.id" class="row">
           <div class="row-info">
             <div class="row-name">
               <RouterLink :to="`/roster/${t.player}`" class="player-link">{{ playerName(t.player) }}</RouterLink>
-              <span v-if="t.is_voided" class="badge badge--voided">VOIDED</span>
-              <span v-else class="badge" :class="`badge--${t.status === 'APPROVED' ? 'approved' : 'rejected'}`">{{ t.status.replace('_', ' ') }}</span>
+              <span v-if="t.status === 'REJECTED'" class="badge badge--rejected">Declined</span>
+              <span v-else-if="t.is_voided" class="badge badge--voided">VOIDED</span>
+              <span v-else class="badge badge--approved">{{ t.status.replace('_', ' ') }}</span>
             </div>
-            <div class="row-sub">{{ formatDate(t.created_at) }} &middot; {{ formatTime(t.created_at) }}</div>
+            <div class="row-sub">
+              {{ formatDate(t.created_at) }} &middot; {{ formatTime(t.created_at) }}
+              <template v-if="t.status === 'REJECTED' && t.void_reason"> &middot; "{{ t.void_reason }}"</template>
+            </div>
           </div>
           <div class="money">{{ N(t.amount) }}</div>
         </div>
       </div>
     </template>
+
+    <RejectPayoutModal
+      v-if="rejectTarget" :transaction="rejectTarget" :player-name="playerName(rejectTarget.player)"
+      @close="rejectTarget = null" @rejected="onRejected"
+    />
   </div>
 </template>
 
@@ -141,4 +167,5 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .player-link:hover { color: var(--accent-text); text-decoration: underline; }
 .row-sub { font-size: 11.5px; color: var(--text-tertiary); margin-top: 2px; }
 .money { font-family: var(--font-mono); font-weight: 700; font-size: 14px; color: var(--text-primary); flex-shrink: 0; }
+.row-actions { display: flex; gap: 8px; flex-shrink: 0; }
 </style>

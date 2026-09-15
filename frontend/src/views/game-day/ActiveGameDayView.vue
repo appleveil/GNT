@@ -185,18 +185,14 @@ async function onEntrySaved() {
   refreshAll()
 }
 
-// Leave Table / Return to Table — see PLAN.md's "leave the table" entry.
-// The 8th action-grid button is context-aware: an active player gets "Leave
-// Table" (opens the chips choice below); a departed one gets "Return to
-// Table" (straight back in, still subject to the active-seat cap).
+// Leave Table — see PLAN.md's "leave the table" entry. "Return to Table"
+// was removed 2026-09-15: a departed player comes back ONLY by being issued
+// chips (CHIPS_OUT), never through a bare re-add — so the 8th action-grid
+// button only ever renders for a still-active player now (see template).
 const leaveTarget = ref(null) // the player being asked "returning chips first?", or null
 
-function onLeaveOrReturnClick() {
-  if (selectedPlayer.value.left_at) {
-    onReturnToTable(selectedPlayer.value)
-  } else {
-    leaveTarget.value = selectedPlayer.value
-  }
+function onLeaveClick() {
+  leaveTarget.value = selectedPlayer.value
 }
 
 async function onLeaveWithoutChips() {
@@ -217,16 +213,6 @@ function onLeaveWithChips() {
   leaveTarget.value = null
   pendingLeave.value = player
   openEntry('CHIPS_IN', player)
-}
-
-async function onReturnToTable(player) {
-  try {
-    await api.post(`/game-days/${gameDay.current.id}/players/`, { player_id: player.id })
-    toast.success(`${player.display_name} is back at the table.`)
-    refreshAll()
-  } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not return this player to the table.')
-  }
 }
 
 function playerName(playerId) {
@@ -317,18 +303,20 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
         <div class="action-grid">
           <button class="action-btn action-btn--accent" type="button" @click="openEntry('CHIPS_OUT')">Issue Chips</button>
-          <button class="action-btn" type="button" @click="openEntry('CHIPS_IN')">Chips In</button>
+          <button class="action-btn" type="button" @click="openEntry('CHIPS_IN')">Return Chips</button>
           <button class="action-btn" type="button" @click="openEntry('PAYMENT_CASH')">Cash Payment</button>
           <button class="action-btn" type="button" @click="openEntry('PAYMENT_POS')">POS Payment</button>
           <button class="action-btn" type="button" @click="openEntry('PAYMENT_TRANSFER')">Transfer<br>(manual)</button>
           <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">Payout</button>
           <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">View Player</button>
           <button
-            class="action-btn" type="button"
-            :class="selectedPlayer.left_at ? 'action-btn--accent' : 'action-btn--warn'"
-            @click="onLeaveOrReturnClick"
-          >{{ selectedPlayer.left_at ? 'Return to Table' : 'Leave Table' }}</button>
+            v-if="!selectedPlayer.left_at" class="action-btn action-btn--warn" type="button"
+            @click="onLeaveClick"
+          >Leave Table</button>
         </div>
+        <p v-if="selectedPlayer.left_at" class="left-hint">
+          {{ selectedPlayer.display_name }} left the table — Issue Chips to bring them back.
+        </p>
       </div>
       <div v-else class="card section player-panel player-panel--empty">
         <p class="muted">Pick a player above to issue chips, take a payment, or view their balance.</p>
@@ -542,6 +530,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 
 .action-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.left-hint { font-size: 11.5px; color: var(--text-tertiary); text-align: center; margin-top: 8px; }
 .action-btn {
   border: 1px solid var(--border-strong);
   background: var(--surface);

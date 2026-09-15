@@ -15,7 +15,7 @@
  */
 export const TRANSACTION_TYPES = {
   CHIPS_OUT: { label: 'Chips Out', actionLabel: 'Issue Chips', lane: 'chips', physicalCount: true },
-  CHIPS_IN: { label: 'Chips In', actionLabel: 'Chips In', lane: 'chips', physicalCount: true },
+  CHIPS_IN: { label: 'Return Chips', actionLabel: 'Return Chips', lane: 'chips', physicalCount: true },
   PAYMENT_CASH: {
     label: 'Cash Payment', actionLabel: 'Cash Payment', lane: 'payments', physicalCount: true, needsCurrency: true,
   },

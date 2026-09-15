@@ -265,6 +265,15 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         txn = services.approve_payout(txn, request.user)
         return Response(TransactionSerializer(txn).data)
 
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Owner declines a pending/failed payout — see services.reject_payout."""
+        txn = self.get_object()
+        serializer = VoidTransactionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        txn = services.reject_payout(txn, request.user, serializer.validated_data['reason'])
+        return Response(TransactionSerializer(txn).data)
+
 
 class OutstandingLedgerView(APIView):
     """

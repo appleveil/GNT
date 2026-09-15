@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
 
 // Read-only player detail for Accountant/Owner (Phase B, 2026-09-14) — the
@@ -19,9 +20,15 @@ import { useToast } from '@/composables/useToast'
 // inline-editable (PATCH /api/players/{id}/ {chips_limit} — already
 // Owner-gated server-side in PlayerSerializer.validate_chips_limit, no
 // backend change needed) and a Deal/Write-off mini-form (POST
-// /api/transactions/ with game_day omitted, so the new row lands in the
-// Outstanding section on this same page — matches CONCEPT.md's framing of
-// "Owner credit/write-offs" as a player-detail/outstanding-style view).
+// /api/transactions/). Revised 2026-09-15: the form gained a game-day
+// picker (reusing the `gameDays` list already fetched for "any game-day's
+// activity" below) — a Deal recorded WITH a game-day selected lands in that
+// game-day's ledger (Cashier's and Accountant's) instead of Outstanding,
+// since RecordTransactionSerializer already accepts an optional game_day and
+// player_game_day_ledger/game_day_ledger already include PAYMENT_DEAL rows
+// once one is set (only RAKE/TIP are excluded) — no backend change needed,
+// this view was just always omitting it. Leaving it blank (the default)
+// keeps today's behavior: an Outstanding (between-game-day) entry.
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
@@ -31,12 +38,15 @@ const player = ref(null)
 const loading = ref(true)
 
 const editingLimit = ref(false)
-const limitInput = ref('')
+const limitInput = ref('') // plain numeric string, no commas — see utils/amountInput.js
+const displayLimitInput = computed(() => formatAmountForDisplay(limitInput.value))
 const savingLimit = ref(false)
 
 const dealType = ref('PAYMENT_DEAL')
-const dealAmount = ref('')
+const dealAmount = ref('') // plain numeric string, no commas
+const displayDealAmount = computed(() => formatAmountForDisplay(dealAmount.value))
 const dealReason = ref('')
+const dealGameDayId = ref('') // '' = Outstanding (no game-day) — the default
 const dealSubmitting = ref(false)
 const dealError = ref('')
 
@@ -105,11 +115,23 @@ async function onSubmitDeal() {
       type: dealType.value,
       amount: dealAmount.value,
       notes: dealReason.value,
+      ...(dealGameDayId.value ? { game_day: dealGameDayId.value } : {}),
     })
+    const recordedGameDayId = dealGameDayId.value
     dealAmount.value = ''
     dealReason.value = ''
-    toast.success(`${dealType.value === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'} recorded.`)
-    loadOutstanding() // the new row shows up in the section above
+    dealGameDayId.value = ''
+    toast.success(
+      `${dealType.value === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'} recorded`
+      + (recordedGameDayId ? ` against Game-Day #${gameDays.value.find(g => g.id === Number(recordedGameDayId))?.number}.` : ' — Outstanding.'),
+    )
+    loadOutstanding() // harmless no-op if this one was attached to a game-day instead
+    // If they're currently looking at the same game-day this landed in, refresh
+    // that view too so the new row appears without a manual re-pick.
+    if (recordedGameDayId && String(selectedGameDayId.value) === String(recordedGameDayId)) {
+      const { data } = await api.get(`/game-days/${recordedGameDayId}/players/${route.params.id}/ledger/`)
+      gdLedger.value = data.slice().reverse()
+    }
   } catch (err) {
     dealError.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not record this.'
   } finally {
@@ -169,7 +191,10 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <button v-if="auth.isOwner" class="link-btn" type="button" @click="onStartEditLimit">Edit</button>
           </div>
           <div v-else class="limit-edit">
-            <input v-model="limitInput" type="number" min="0" step="0.01" placeholder="No cap" class="limit-input" />
+            <input
+              :value="displayLimitInput" type="text" inputmode="decimal" placeholder="No cap" class="limit-input"
+              @input="e => (limitInput = parseAmountInput(e.target.value))"
+            />
             <button class="link-btn" type="button" :disabled="savingLimit" @click="onSaveLimit">{{ savingLimit ? 'Saving…' : 'Save' }}</button>
             <button class="link-btn link-btn--muted" type="button" @click="editingLimit = false">Cancel</button>
           </div>
@@ -236,8 +261,15 @@ const N = n => `₦${Number(n).toLocaleString()}`
                   Write-off
                 </label>
               </div>
-              <input v-model="dealAmount" type="number" min="0.01" step="0.01" placeholder="Amount" required class="deal-input" />
+              <input
+                :value="displayDealAmount" type="text" inputmode="decimal" placeholder="Amount" required class="deal-input"
+                @input="e => (dealAmount = parseAmountInput(e.target.value))"
+              />
               <input v-model="dealReason" type="text" placeholder="Reason" required class="deal-input" />
+              <select v-model="dealGameDayId" class="deal-input">
+                <option value="">Outstanding (no game-day)</option>
+                <option v-for="gd in gameDays" :key="gd.id" :value="gd.id">Game-Day #{{ gd.number }} &middot; {{ formatDate(gd.started_at) }}</option>
+              </select>
               <p v-if="dealError" class="form-error">{{ dealError }}</p>
               <button class="btn btn--primary" type="submit" :disabled="dealSubmitting">
                 {{ dealSubmitting ? 'Recording…' : `Record ${dealType === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'}` }}

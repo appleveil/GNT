@@ -318,6 +318,41 @@ class AuthorizationTests(TestCase):
         with self.assertRaises(InvalidStateError):
             services.initiate_payout(player, Decimal(1000), self.cashier)
 
+    # --- payout rejection ---
+
+    def test_owner_can_reject_a_pending_payout(self):
+        gd = services.open_game_day(24, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 11', display_name='Test11')
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
+        # A pending payout already counts against the player's balance.
+        self.assertEqual(selectors.player_game_day_balance(player, gd), Decimal(0))
+        rejected = services.reject_payout(payout, self.owner, 'Player never actually requested this.')
+        self.assertEqual(rejected.status, Transaction.Status.REJECTED)
+        self.assertTrue(rejected.is_voided)
+        self.assertEqual(rejected.void_reason, 'Player never actually requested this.')
+        # Rejecting must drop it back out of the player's balance — it never happened.
+        self.assertEqual(selectors.player_game_day_balance(player, gd), Decimal(50000))
+
+    def test_cashier_cannot_reject_a_payout(self):
+        gd = services.open_game_day(25, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 12', display_name='Test12')
+        payout = services.initiate_payout(player, Decimal(0), self.cashier, game_day=gd)
+        with self.assertRaises(AuthorizationError):
+            services.reject_payout(payout, self.cashier, 'No.')
+
+    def test_cannot_reject_an_already_approved_payout(self):
+        gd = services.open_game_day(26, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 13', display_name='Test13')
+        payout = services.initiate_payout(player, Decimal(0), self.cashier, game_day=gd)
+        payout.status = Transaction.Status.APPROVED
+        payout.save(update_fields=['status'])
+        with self.assertRaises(InvalidStateError):
+            services.reject_payout(payout, self.owner, 'Too late.')
+
 
 class GameDayAndTransactionAPITests(APITestCase):
     def setUp(self):
@@ -474,6 +509,28 @@ class GameDayAndTransactionAPITests(APITestCase):
         approve_response = self.client.post(f'/api/transactions/{txn_id}/approve/')
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
         self.assertEqual(approve_response.data['status'], Transaction.Status.APPROVED)
+
+    def test_payout_reject_flow_via_api(self):
+        gd = services.open_game_day(27, timezone.now(), self.owner)
+        Transaction.objects.create(
+            game_day=gd, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/payout/', {'player': self.player.id, 'amount': '50000'})
+        txn_id = response.data['id']
+
+        reject_response = self.client.post(f'/api/transactions/{txn_id}/reject/', {'reason': 'Mistaken request.'})
+        self.assertEqual(reject_response.status_code, status.HTTP_403_FORBIDDEN)  # Cashier can't reject
+
+        self.client.force_authenticate(self.owner)
+        reject_response = self.client.post(f'/api/transactions/{txn_id}/reject/', {})
+        self.assertEqual(reject_response.status_code, status.HTTP_400_BAD_REQUEST)  # reason required
+
+        reject_response = self.client.post(f'/api/transactions/{txn_id}/reject/', {'reason': 'Mistaken request.'})
+        self.assertEqual(reject_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(reject_response.data['status'], Transaction.Status.REJECTED)
+        self.assertTrue(reject_response.data['is_voided'])
 
 
 class DashboardAndMainAccountAPITests(APITestCase):
@@ -677,6 +734,9 @@ class LeaveTableTests(APITestCase):
         self.game_day = services.open_game_day(50, timezone.now(), self.owner)
         self.player = Player.objects.create(account_code='WWI 50', display_name='Leaver')
         services.seat_player(self.game_day, self.owner, player=self.player)
+        self.fm = FloorManager(name='Floor Boss', created_by=self.owner)
+        self.fm.set_pin('4321')
+        self.fm.save()
 
     def test_leave_table_sets_left_at_without_touching_history(self):
         services.record_transaction(
@@ -692,29 +752,67 @@ class LeaveTableTests(APITestCase):
         with self.assertRaises(InvalidStateError):
             services.leave_table(self.game_day, stranger, operator=self.cashier)
 
-    def test_reseating_a_departed_player_clears_left_at(self):
+    def test_reseating_a_departed_player_via_seat_player_now_raises(self):
+        """Revised 2026-09-15: "Return to Table" is gone — seat_player can no
+        longer revive anyone, only issuing chips can. A departed player_id
+        gets a clear, specific error instead of a silent re-seat."""
         services.leave_table(self.game_day, self.player, operator=self.cashier)
-        services.seat_player(self.game_day, self.owner, player=self.player)
+        with self.assertRaises(InvalidStateError):
+            services.seat_player(self.game_day, self.owner, player=self.player)
+        seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
+        self.assertIsNotNone(seat.left_at)  # untouched — still departed
+
+    def test_issuing_chips_to_a_departed_player_revives_them(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
         seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
         self.assertIsNone(seat.left_at)
 
-    def test_recording_a_transaction_for_a_departed_player_revives_them(self):
+    def test_any_other_transaction_type_does_not_revive_a_departed_player(self):
+        """Only CHIPS_OUT revives — Return Chips (CHIPS_IN), a payment, etc.
+        record normally against a departed player without seating them again."""
         services.leave_table(self.game_day, self.player, operator=self.cashier)
         services.record_transaction(
             type=Transaction.Type.PAYMENT_POS, amount=Decimal(5000), recorded_by=self.cashier,
             game_day=self.game_day, player=self.player,
         )
         seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
-        self.assertIsNone(seat.left_at)
+        self.assertIsNotNone(seat.left_at)  # still departed
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(5000))  # but recorded
 
-    def test_returning_to_table_is_subject_to_the_active_cap(self):
+    def test_issuing_chips_to_a_departed_player_is_subject_to_the_active_cap(self):
         services.leave_table(self.game_day, self.player, operator=self.cashier)
         fillers = [Player.objects.create(account_code=f'WWI RET{i}', display_name=f'Filler {i}')
                    for i in range(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)]
         for p in fillers:
             services.seat_player(self.game_day, self.owner, player=p)
         with self.assertRaises(TableFullError):
-            services.seat_player(self.game_day, self.owner, player=self.player)
+            services.record_transaction(
+                type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+                game_day=self.game_day, player=self.player,
+                floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            )
+
+    def test_a_brand_new_players_first_transaction_is_subject_to_the_active_cap(self):
+        """Closes a gap found alongside the above: record_transaction seating
+        someone never seated tonight at all (not just reviving a departed
+        one) must be capped too, regardless of transaction type. self.player
+        (from setUp) already occupies one active seat, so one fewer filler
+        is needed to reach the cap of MAX_ACTIVE_PLAYERS_PER_GAME_DAY."""
+        fillers = [Player.objects.create(account_code=f'WWI NEW{i}', display_name=f'Filler {i}')
+                   for i in range(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY - 1)]
+        for p in fillers:
+            services.seat_player(self.game_day, self.owner, player=p)
+        stranger = Player.objects.create(account_code='WWI STRANGER', display_name='Stranger')
+        with self.assertRaises(TableFullError):
+            services.record_transaction(
+                type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(1000), recorded_by=self.cashier,
+                game_day=self.game_day, player=stranger,
+            )
 
     def test_cashier_can_mark_a_player_as_left_via_api(self):
         self.client.force_authenticate(self.cashier)

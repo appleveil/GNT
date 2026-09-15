@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import api from '@/api/axios'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
 import { TRANSACTION_TYPES } from '@/constants/transactionTypes'
+import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 
 // A bottom sheet for recording one Transaction — used from ActiveGameDayView
 // for both per-player entries (Issue Chips, Chips In, Cash/POS/Transfer
@@ -21,7 +22,8 @@ const config = computed(() => TRANSACTION_TYPES[props.type])
 
 const CURRENCIES = ['NGN', 'USD', 'GBP', 'EUR', 'OTHER']
 
-const amount = ref('')
+const amount = ref('') // plain numeric string, no commas — see utils/amountInput.js
+const displayAmount = computed(() => formatAmountForDisplay(amount.value))
 const notes = ref('')
 const provider = ref('')
 const currency = ref('NGN')
@@ -156,7 +158,10 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
       </div>
       <div class="amount-box" :class="{ 'amount-box--danger': exceedsChipsLimit }">
         <span class="amount-prefix">{{ config.needsCurrency && currency !== 'NGN' ? currency : '₦' }}</span>
-        <input v-model="amount" type="text" inputmode="decimal" placeholder="0" class="amount-input" autofocus />
+        <input
+          :value="displayAmount" type="text" inputmode="decimal" placeholder="0" class="amount-input" autofocus
+          @input="e => (amount = parseAmountInput(e.target.value))"
+        />
       </div>
       <p v-if="exceedsChipsLimit" class="warn-text">
         This exceeds {{ player.display_name }}'s chips limit for tonight ({{ N(player.chips_limit) }} total,

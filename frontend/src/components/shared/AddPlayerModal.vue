@@ -24,10 +24,11 @@ const accountCode = ref('')
 const displayName = ref('')
 const bank = ref({ bank_name: '', bank_code: '', account_number: '', account_name: '' })
 
-// Existing player — multi-select against the roster MINUS whoever's
-// ACTIVELY seated tonight (a departed player — left_at set — is meant to be
-// re-addable via "Return to Table", same as this modal; only currently-
-// active seats are excluded).
+// Existing player — multi-select against the roster MINUS anyone with a
+// GameDayPlayer row for tonight at all, active OR departed. "Return to
+// Table" was removed 2026-09-15 — a departed player is never re-addable
+// here, only by being issued chips directly (see ActiveGameDayView.vue) —
+// so they must not appear in this list either, closing that side door.
 const MAX_ACTIVE_PLAYERS = 9 // mirrors gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY
 
 const roster = ref([])
@@ -52,12 +53,12 @@ async function loadRoster() {
       api.get('/players/'),
       api.get(`/game-days/${gameDay.current.id}/players/`),
     ])
-    const activeIds = new Set(seatedRes.data.filter(p => !p.left_at).map(p => p.id))
-    activeCount.value = activeIds.size
-    roster.value = allRes.data.filter(p => !activeIds.has(p.id))
+    const seatedIds = new Set(seatedRes.data.map(p => p.id)) // active + departed — all excluded
+    activeCount.value = seatedRes.data.filter(p => !p.left_at).length
+    roster.value = allRes.data.filter(p => !seatedIds.has(p.id))
     // Drop anyone from the current selection who got seated elsewhere
     // (another cashier device, or a retry after a partial failure below).
-    selectedIds.value = selectedIds.value.filter(id => !activeIds.has(id))
+    selectedIds.value = selectedIds.value.filter(id => !seatedIds.has(id))
   } catch {
     toast.error('Could not load the player roster.')
   } finally {
