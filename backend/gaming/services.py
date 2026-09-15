@@ -20,15 +20,31 @@ from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, Tran
 # _ensure_seated's `revive` param and PLAN.md's "leave the table" entry.
 MAX_ACTIVE_PLAYERS_PER_GAME_DAY = 9
 
+# The one exception to "a closed game-day accepts no new entries" — see
+# _require_open_game_day. A Deal/write-off made right after a game-day closes
+# (it really happened during it, entered a few minutes late) can still be
+# attributed to that specific night, never an older one.
+DEAL_TYPES = {Transaction.Type.PAYMENT_DEAL, Transaction.Type.WRITE_OFF}
 
-def _require_open_game_day(game_day):
+
+def _require_open_game_day(game_day, type=None):
     """
     Enforced server-side, not left to whichever frontend is calling in: a client
     can go stale (another device closed this game-day moments ago) or simply not
     be the sanctioned UI at all, so this can't be a client-side-only rule.
+
+    One narrow exception (2026-09-15): a Deal/write-off (`type` in DEAL_TYPES)
+    may target the game-day that JUST closed — the single most-recently-closed
+    one, never any older one, and no other transaction type — matching the
+    choice RosterDetailView.vue's Deal form actually offers the Owner.
     """
-    if game_day is not None and game_day.status != GameDay.Status.OPEN:
-        raise InvalidStateError(f'Game-day {game_day.number} is closed — it cannot accept new entries.')
+    if game_day is None or game_day.status == GameDay.Status.OPEN:
+        return
+    if type in DEAL_TYPES:
+        last_closed = GameDay.objects.filter(status=GameDay.Status.CLOSED).order_by('-number').first()
+        if last_closed is not None and last_closed.pk == game_day.pk:
+            return
+    raise InvalidStateError(f'Game-day {game_day.number} is closed — it cannot accept new entries.')
 
 
 def _resolve_floor_manager(floor_manager_id, pin):
@@ -296,8 +312,14 @@ def record_transaction(
     A CHIPS_OUT that would push the player's current-game-day debt past their
     chips_limit is rejected before the Floor Manager PIN step ever runs — see
     CONCEPT.md's "Chips limit."
+
+    A Deal/write-off may target a CLOSED game-day, but only the one that just
+    ended — see _require_open_game_day and DEAL_TYPES. When that happens,
+    seating (_ensure_seated) is skipped entirely: that night's roster is
+    already final, and a retroactive ledger entry shouldn't reopen its
+    active-player cap or resurrect anyone into its seated list.
     """
-    _require_open_game_day(game_day)
+    _require_open_game_day(game_day, type)
     if type == Transaction.Type.CHIPS_OUT and player is not None and player.chips_limit is not None:
         current_balance = selectors.player_game_day_balance(player, game_day) if game_day else Decimal('0')
         debt_after = max(Decimal('0'), amount - current_balance)
@@ -311,7 +333,8 @@ def record_transaction(
         fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
         if fm is None:
             raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
-    _ensure_seated(game_day, player, recorded_by, revive=(type == Transaction.Type.CHIPS_OUT))
+    if game_day is not None and game_day.status == GameDay.Status.OPEN:
+        _ensure_seated(game_day, player, recorded_by, revive=(type == Transaction.Type.CHIPS_OUT))
     return Transaction.objects.create(
         game_day=game_day, player=player, type=type, amount=amount,
         currency=currency, conversion_rate=conversion_rate,

@@ -824,3 +824,81 @@ class LeaveTableTests(APITestCase):
         self.client.force_authenticate(self.accountant)
         response = self.client.post(f'/api/game-days/{self.game_day.id}/players/{self.player.id}/leave/')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class DealOnClosedGameDayTests(APITestCase):
+    """
+    Corrected 2026-09-15: a Deal/write-off is not manually pointed at any
+    game-day the Owner picks from history — it automatically lands wherever
+    is open right now, and the ONLY closed game-day it may ever target is
+    the single most-recently-closed one (RosterDetailView.vue's "just
+    ended" checkbox). See services._require_open_game_day/DEAL_TYPES.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner4', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier4', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI 60', display_name='Deal Target')
+
+        self.old_gd = services.open_game_day(60, timezone.now(), self.owner)
+        services.close_game_day(self.old_gd, self.cashier)
+        self.last_closed_gd = services.open_game_day(61, timezone.now(), self.owner)
+        services.close_game_day(self.last_closed_gd, self.cashier)
+        self.open_gd = services.open_game_day(62, timezone.now(), self.owner)
+
+    def test_deal_on_the_just_closed_game_day_is_accepted_and_lands_there(self):
+        txn = services.record_transaction(
+            type=Transaction.Type.PAYMENT_DEAL, amount=Decimal(1000), recorded_by=self.owner,
+            game_day=self.last_closed_gd, player=self.player, notes='retroactive',
+        )
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.last_closed_gd), Decimal(1000))
+        self.assertEqual(selectors.outstanding_ledger(player=self.player).count(), 0)
+        # A ledger entry on a closed night shouldn't resurrect/seat anyone into it.
+        self.assertFalse(GameDayPlayer.objects.filter(game_day=self.last_closed_gd, player=self.player).exists())
+        self.assertIsNotNone(txn.game_day_id)
+
+    def test_write_off_on_the_just_closed_game_day_is_also_accepted(self):
+        services.record_transaction(
+            type=Transaction.Type.WRITE_OFF, amount=Decimal(200), recorded_by=self.owner,
+            game_day=self.last_closed_gd, player=self.player, notes='retroactive write-off',
+        )
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.last_closed_gd), Decimal(200))
+
+    def test_deal_on_an_older_closed_game_day_is_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            services.record_transaction(
+                type=Transaction.Type.PAYMENT_DEAL, amount=Decimal(1000), recorded_by=self.owner,
+                game_day=self.old_gd, player=self.player, notes='too old',
+            )
+
+    def test_non_deal_type_on_the_just_closed_game_day_is_still_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            services.record_transaction(
+                type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(1000), recorded_by=self.owner,
+                game_day=self.last_closed_gd, player=self.player,
+            )
+
+    def test_deal_with_no_game_day_still_lands_in_outstanding_as_before(self):
+        txn = services.record_transaction(
+            type=Transaction.Type.PAYMENT_DEAL, amount=Decimal(300), recorded_by=self.owner,
+            game_day=None, player=self.player, notes='no game-day',
+        )
+        self.assertEqual(selectors.outstanding_ledger(player=self.player).count(), 1)
+        self.assertIsNone(txn.game_day_id)
+
+    def test_deal_on_the_currently_open_game_day_still_works_and_seats_normally(self):
+        services.record_transaction(
+            type=Transaction.Type.PAYMENT_DEAL, amount=Decimal(400), recorded_by=self.owner,
+            game_day=self.open_gd, player=self.player,
+        )
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.open_gd), Decimal(400))
+        self.assertTrue(GameDayPlayer.objects.filter(game_day=self.open_gd, player=self.player).exists())
+
+    def test_deal_via_api_on_the_just_closed_game_day(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'type': 'PAYMENT_DEAL', 'amount': '750', 'player': self.player.id,
+            'notes': 'via api', 'game_day': self.last_closed_gd.id,
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.last_closed_gd), Decimal(750))

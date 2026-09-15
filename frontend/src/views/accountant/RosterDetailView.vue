@@ -20,15 +20,31 @@ import { useToast } from '@/composables/useToast'
 // inline-editable (PATCH /api/players/{id}/ {chips_limit} — already
 // Owner-gated server-side in PlayerSerializer.validate_chips_limit, no
 // backend change needed) and a Deal/Write-off mini-form (POST
-// /api/transactions/). Revised 2026-09-15: the form gained a game-day
-// picker (reusing the `gameDays` list already fetched for "any game-day's
-// activity" below) — a Deal recorded WITH a game-day selected lands in that
-// game-day's ledger (Cashier's and Accountant's) instead of Outstanding,
-// since RecordTransactionSerializer already accepts an optional game_day and
-// player_game_day_ledger/game_day_ledger already include PAYMENT_DEAL rows
-// once one is set (only RAKE/TIP are excluded) — no backend change needed,
-// this view was just always omitting it. Leaving it blank (the default)
-// keeps today's behavior: an Outstanding (between-game-day) entry.
+// /api/transactions/).
+//
+// Corrected 2026-09-15: a Deal isn't manually pointed at an arbitrary
+// game-day from history — it automatically lands in whichever game-day is
+// open right now (if any), same as any other transaction recorded live. The
+// Owner only gets an explicit choice when NO game-day is currently open:
+// attach it to the one that JUST closed (a deal that really happened during
+// it, entered right after), or leave it in Outstanding. No older game-day is
+// ever reachable from here. RecordTransactionSerializer already accepts an
+// optional game_day and player_game_day_ledger/game_day_ledger already
+// include PAYMENT_DEAL rows once one is set (only RAKE/TIP are excluded) —
+// this is purely which game_day (if any) this view sends, not a backend
+// change.
+const openGameDay = computed(() => gameDays.value.find(g => g.status === 'OPEN') || null)
+// `gameDays` is fetched newest-number-first, so the first CLOSED entry is
+// the most recently closed one — "the one that just ended."
+const lastClosedGameDay = computed(() => gameDays.value.find(g => g.status === 'CLOSED') || null)
+// Only meaningful while nothing is open; the Owner opts into backdating a
+// deal onto the game-day that just ended instead of leaving it Outstanding.
+const dealAttachToLastClosed = ref(false)
+const dealTargetGameDay = computed(() => {
+  if (openGameDay.value) return openGameDay.value
+  if (dealAttachToLastClosed.value && lastClosedGameDay.value) return lastClosedGameDay.value
+  return null
+})
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
@@ -46,7 +62,6 @@ const dealType = ref('PAYMENT_DEAL')
 const dealAmount = ref('') // plain numeric string, no commas
 const displayDealAmount = computed(() => formatAmountForDisplay(dealAmount.value))
 const dealReason = ref('')
-const dealGameDayId = ref('') // '' = Outstanding (no game-day) — the default
 const dealSubmitting = ref(false)
 const dealError = ref('')
 
@@ -109,27 +124,27 @@ async function onSaveLimit() {
 async function onSubmitDeal() {
   dealError.value = ''
   dealSubmitting.value = true
+  const targetGameDay = dealTargetGameDay.value
   try {
     await api.post('/transactions/', {
       player: player.value.id,
       type: dealType.value,
       amount: dealAmount.value,
       notes: dealReason.value,
-      ...(dealGameDayId.value ? { game_day: dealGameDayId.value } : {}),
+      ...(targetGameDay ? { game_day: targetGameDay.id } : {}),
     })
-    const recordedGameDayId = dealGameDayId.value
     dealAmount.value = ''
     dealReason.value = ''
-    dealGameDayId.value = ''
+    dealAttachToLastClosed.value = false
     toast.success(
       `${dealType.value === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'} recorded`
-      + (recordedGameDayId ? ` against Game-Day #${gameDays.value.find(g => g.id === Number(recordedGameDayId))?.number}.` : ' — Outstanding.'),
+      + (targetGameDay ? ` against Game-Day #${targetGameDay.number}.` : ' — Outstanding.'),
     )
     loadOutstanding() // harmless no-op if this one was attached to a game-day instead
     // If they're currently looking at the same game-day this landed in, refresh
     // that view too so the new row appears without a manual re-pick.
-    if (recordedGameDayId && String(selectedGameDayId.value) === String(recordedGameDayId)) {
-      const { data } = await api.get(`/game-days/${recordedGameDayId}/players/${route.params.id}/ledger/`)
+    if (targetGameDay && String(selectedGameDayId.value) === String(targetGameDay.id)) {
+      const { data } = await api.get(`/game-days/${targetGameDay.id}/players/${route.params.id}/ledger/`)
       gdLedger.value = data.slice().reverse()
     }
   } catch (err) {
@@ -266,10 +281,16 @@ const N = n => `₦${Number(n).toLocaleString()}`
                 @input="e => (dealAmount = parseAmountInput(e.target.value))"
               />
               <input v-model="dealReason" type="text" placeholder="Reason" required class="deal-input" />
-              <select v-model="dealGameDayId" class="deal-input">
-                <option value="">Outstanding (no game-day)</option>
-                <option v-for="gd in gameDays" :key="gd.id" :value="gd.id">Game-Day #{{ gd.number }} &middot; {{ formatDate(gd.started_at) }}</option>
-              </select>
+
+              <p v-if="openGameDay" class="deal-gd-note">
+                Will land on <strong>Game-Day #{{ openGameDay.number }}</strong>'s ledger — it's open right now.
+              </p>
+              <label v-else-if="lastClosedGameDay" class="deal-gd-toggle">
+                <input v-model="dealAttachToLastClosed" type="checkbox" />
+                Attach to Game-Day #{{ lastClosedGameDay.number }} (just ended), instead of Outstanding
+              </label>
+              <p v-else class="deal-gd-note">No game-day open — this lands in Outstanding.</p>
+
               <p v-if="dealError" class="form-error">{{ dealError }}</p>
               <button class="btn btn--primary" type="submit" :disabled="dealSubmitting">
                 {{ dealSubmitting ? 'Recording…' : `Record ${dealType === 'PAYMENT_DEAL' ? 'Deal' : 'Write-off'}` }}
@@ -365,6 +386,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
   background: var(--surface);
 }
 .deal-input:focus { outline: none; border-color: var(--accent); }
+.deal-gd-note { font-size: 12px; color: var(--text-tertiary); }
+.deal-gd-toggle { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-secondary); cursor: pointer; }
 .form-error {
   font-size: 12.5px;
   color: var(--danger);
