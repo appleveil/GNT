@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
-import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 
@@ -69,6 +69,10 @@ function playerName(playerId) {
   if (!playerId) return ''
   return players.value.find(p => p.id === playerId)?.display_name || ''
 }
+
+// LedgerTable needs player_name pre-resolved on each row — no roster route
+// exists on the Cashier's side, so no playerTo prop (name renders as plain text).
+const ledgerRows = computed(() => ledger.value.map(row => ({ ...row, player_name: playerName(row.player) })))
 
 function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
@@ -135,31 +139,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
 
       <div class="ledger-feed">
-        <p v-if="!ledger.length" class="muted">No activity recorded for this game-day.</p>
-        <div
-          v-for="row in ledger" :key="row.id" class="ledger-row"
-          :class="{ 'ledger-row--voided': row.is_voided }"
-        >
-          <div class="ledger-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
-          <div class="ledger-info">
-            <div class="ledger-title">
-              <template v-if="playerName(row.player)">{{ playerName(row.player) }} &middot; </template>{{ TRANSACTION_TYPES[row.type]?.label || row.type }}
-              <span
-                v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge"
-                :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`"
-              >{{ row.status.replace('_', ' ') }}</span>
-            </div>
-            <div class="ledger-meta">{{ formatTime(row.created_at) }}</div>
-          </div>
-          <div class="ledger-amounts">
-            <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-            <div v-if="row.is_voided" class="ledger-balance ledger-balance--voided">VOIDED</div>
-            <div v-else class="ledger-balance">{{ N(row.running_balance) }}</div>
-          </div>
-          <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
-            &#8942;
-          </button>
-        </div>
+        <LedgerTable :rows="ledgerRows" show-player voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
         <p class="scroll-note">&middot; scrolls for full day &middot;</p>
         <p class="scroll-note scroll-note--italic">Rake and Tips aren't rows in this ledger by design — see the totals above.</p>
       </div>
@@ -208,32 +188,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .lbl--muted { font-weight: 500; color: var(--text-tertiary); }
 
 .ledger-feed { border-top: 1px solid var(--border); }
-.ledger-row { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
-.ledger-row--voided { opacity: 0.55; text-decoration: line-through; }
-.ledger-row--voided .ledger-dot { background: var(--status-voided-bg) !important; }
-.ledger-dot { width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
-.ledger-dot.lane-chips { background: var(--lane-chips-bg); }
-.ledger-dot.lane-payments { background: var(--lane-payments-bg); }
-.ledger-info { flex-grow: 1; min-width: 0; }
-.ledger-title { font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ledger-meta { font-size: 10.5px; color: var(--text-tertiary); }
-.ledger-amounts { text-align: right; flex-shrink: 0; }
-.ledger-amounts .money { display: block; font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); }
-.ledger-balance { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
-.ledger-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
-.void-trigger {
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  border: none;
-  background: none;
-  color: var(--text-tertiary);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: 50%;
-}
-.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .scroll-note { text-align: center; font-size: 11px; color: var(--text-tertiary); padding: 10px 0 4px; }
 .scroll-note--italic { font-style: italic; padding-top: 0; padding-bottom: 12px; }

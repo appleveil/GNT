@@ -93,6 +93,36 @@ User feedback: a Deal isn't tied to any particular game-day by manual choice —
 - [x] **Backend gap found and closed while live-verifying**: `gaming/services.py::_require_open_game_day` unconditionally rejected *any* transaction against a non-`OPEN` game-day — meaning the original manual-picker version (and any stale/direct API call) would have 400'd the moment a closed game-day was actually selected; this had only ever been exercised live against the currently-open one. Added a narrow, server-side-enforced exception: a `PAYMENT_DEAL`/`WRITE_OFF` (`DEAL_TYPES`) may target the single most-recently-closed `GameDay` (looked up by `-number`, not trusted from the client) — every other type, and any older closed game-day, is still rejected. `record_transaction` also now skips `_ensure_seated` entirely when the target game-day isn't `OPEN`, so a retroactive deal never re-seats/resurrects a player into a closed night's roster or trips its (no-longer-relevant) active-player cap.
 - 7 new backend tests (`DealOnClosedGameDayTests`; 122/122 passing overall). `npm run build` clean. Verified live: a Deal against the real currently-open game-day auto-attaches and seats normally; a disposable player + service-layer calls against the real closed game-days confirmed the just-closed one is accepted (lands in its ledger, not Outstanding, no seat created) while an older closed one and a non-deal type against the just-closed one are both still rejected with a clear error — all via throwaway players, cleaned up after, real game-day rows (#1–#5) confirmed untouched.
 
+### Ledgers: list rows → tabular "Ledger Grid" (2026-09-17)
+User wanted every ledger feed changed from the two-line flex-row list
+(colored dot, title+badge line, meta line, right-aligned amount+balance
+stack) to a real table — one entry per row. Presented three concrete
+directions with ASCII previews (Ledger Grid / Compact Scan / Statement
+Style); **chosen: Ledger Grid** — Time · Type · Player · Amount · Balance ·
+Status as real columns, a colored lane-stripe cell instead of a dot, sticky
+header — applied everywhere, including Cashier's touch-first live screens.
+- [x] New shared, presentational `components/shared/LedgerTable.vue` —
+  collapses 7 near-duplicate row implementations into one `<table>`
+  component (no API/store access; parents still fetch data and handle
+  voiding exactly as before). Props: `rows`, `showPlayer`, `playerTo`
+  (function, for `RouterLink` vs plain text), `dateFormat`
+  (`'time'`/`'datetime'`), `voidable`, `canVoidFn`. Row height comes from
+  the existing `--control-row-min` token, so Cashier's tables stay
+  touch-sized and Accountant/Owner's stay desktop-dense automatically — no
+  separate density prop needed.
+- [x] Wired into all 7 locations: `GameDayLedgerView.vue`,
+  `GameDayDetailView.vue`, `OutstandingView.vue`, `RosterDetailView.vue`
+  (both its Outstanding and any-game-day panels), `ActiveGameDayView.vue`'s
+  "Today's activity", `PlayerDetailView.vue`'s "Tonight's activity" — each
+  view's old `.feed-row`/`.ledger-row`/`.activity-row` markup and its scoped
+  CSS removed, replaced with `<LedgerTable>` plus a small per-row
+  `player_name`-resolving computed. Left untouched (different row shapes):
+  `OutstandingView.vue`'s "By player" balance summary, `PlayerDetailView.vue`'s
+  "Payouts this game-day" mini-list, `PayoutsView.vue`, `AdminView.vue`.
+- Backend untouched (pure display change) — 122/122 tests still passing.
+  `npm run build` clean, noticeably smaller per-view bundles from the
+  de-duplication (e.g. `RosterDetailView` 9.97kB → 8.35kB).
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

@@ -6,8 +6,8 @@ import { useGameDayStore } from '@/stores/gameDay'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
 import TransactionEntryModal from '@/components/shared/TransactionEntryModal.vue'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
 import AddPlayerModal from '@/components/shared/AddPlayerModal.vue'
-import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 import api from '@/api/axios'
@@ -220,6 +220,8 @@ function playerName(playerId) {
   return players.value.find(p => p.id === playerId)?.display_name || ''
 }
 
+const ledgerRows = computed(() => ledger.value.map(row => ({ ...row, player_name: playerName(row.player) })))
+
 // Void
 const voidTarget = ref(null) // the ledger row being voided, or null
 
@@ -231,10 +233,6 @@ function onVoided() {
   voidTarget.value = null
   toast.success('Entry voided.')
   refreshAll()
-}
-
-function formatTime(iso) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
 const N = n => `₦${Number(n).toLocaleString()}`
@@ -332,30 +330,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       <div class="ledger-feed">
         <p v-if="ledgerLoading" class="muted">Loading…</p>
         <p v-else-if="!ledger.length" class="muted">No activity yet tonight.</p>
-        <div
-          v-for="row in ledger" :key="row.id" class="ledger-row"
-          :class="{ 'ledger-row--voided': row.is_voided }"
-        >
-          <div class="ledger-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
-          <div class="ledger-info">
-            <div class="ledger-title">
-              <template v-if="playerName(row.player)">{{ playerName(row.player) }} &middot; </template>{{ TRANSACTION_TYPES[row.type]?.label || row.type }}
-              <span
-                v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge"
-                :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`"
-              >{{ row.status.replace('_', ' ') }}</span>
-            </div>
-            <div class="ledger-meta">{{ formatTime(row.created_at) }}</div>
-          </div>
-          <div class="ledger-amounts">
-            <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-            <div v-if="row.is_voided" class="ledger-balance ledger-balance--voided">VOIDED</div>
-            <div v-else class="ledger-balance">bal {{ N(row.running_balance) }}</div>
-          </div>
-          <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
-            &#8942;
-          </button>
-        </div>
+        <LedgerTable v-else :rows="ledgerRows" show-player voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
       </div>
     </template>
 
@@ -552,38 +527,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .ledger-head-links { display: flex; gap: 16px; }
 .link-btn { border: none; background: none; font-size: 11.5px; font-weight: 700; color: var(--accent); cursor: pointer; }
 .ledger-feed { border-top: 1px solid var(--border); }
-.ledger-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 4px;
-  border-bottom: 1px solid var(--border);
-}
-.ledger-row--voided { opacity: 0.5; text-decoration: line-through; }
-.ledger-row--voided .ledger-dot { background: var(--status-voided-bg) !important; }
-.ledger-dot { width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
-.ledger-dot.lane-chips { background: var(--lane-chips-bg); }
-.ledger-dot.lane-payments { background: var(--lane-payments-bg); }
-.ledger-info { flex-grow: 1; min-width: 0; }
-.ledger-title { font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ledger-meta { font-size: 11px; color: var(--text-tertiary); }
-.ledger-amounts { text-align: right; flex-shrink: 0; }
-.ledger-amounts .money { display: block; font-size: 13px; font-weight: 700; color: var(--text-primary); }
-.ledger-balance { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
-.ledger-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
-.void-trigger {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: none;
-  color: var(--text-tertiary);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: 50%;
-}
-.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .overlay {
   position: fixed;

@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
-import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 
@@ -69,14 +69,8 @@ const byPlayer = computed(() => {
     .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance))
 })
 
-const feed = computed(() => rows.value.slice().reverse())
-
-function formatTime(iso) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-}
-function formatDate(iso) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+const feed = computed(() => rows.value.slice().reverse().map(row => ({ ...row, player_name: playerName(row.player) })))
+const playerTo = row => (row.player ? `/roster/${row.player}` : null)
 
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
@@ -95,28 +89,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       <div class="card feed-card">
         <div class="section-title">Full activity</div>
         <div class="feed">
-          <div v-for="row in feed" :key="row.id" class="feed-row" :class="{ 'feed-row--voided': row.is_voided }">
-            <div class="feed-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
-            <div class="feed-info">
-              <div class="feed-title">
-                <RouterLink :to="`/roster/${row.player}`" class="player-link">{{ playerName(row.player) }}</RouterLink>
-                &middot; {{ TRANSACTION_TYPES[row.type]?.label || row.type }}
-                <span
-                  v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge"
-                  :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`"
-                >{{ row.status.replace('_', ' ') }}</span>
-              </div>
-              <div class="feed-meta">{{ formatDate(row.created_at) }} &middot; {{ formatTime(row.created_at) }}</div>
-            </div>
-            <div class="feed-amounts">
-              <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-              <div v-if="row.is_voided" class="feed-balance feed-balance--voided">VOIDED</div>
-              <div v-else class="feed-balance">{{ N(row.running_balance) }}</div>
-            </div>
-            <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
-              &#8942;
-            </button>
-          </div>
+          <LedgerTable :rows="feed" show-player :player-to="playerTo" date-format="datetime" voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
         </div>
       </div>
 
@@ -148,34 +121,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin-bottom: 12px; }
 
 .feed { border-top: 1px solid var(--border); }
-.feed-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-.feed-row:last-child { border-bottom: none; }
-.feed-row--voided { opacity: 0.55; text-decoration: line-through; }
-.feed-dot { width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
-.feed-dot.lane-chips { background: var(--lane-chips-bg); }
-.feed-dot.lane-payments { background: var(--lane-payments-bg); }
-.feed-info { flex-grow: 1; min-width: 0; }
-.feed-title { font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.player-link { color: var(--accent-text); text-decoration: none; font-weight: 700; }
-.player-link:hover { text-decoration: underline; }
-.feed-meta { font-size: 11px; color: var(--text-tertiary); }
-.feed-amounts { text-align: right; flex-shrink: 0; }
-.feed-amounts .money { display: block; font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); }
-.feed-balance { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
-.feed-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
-.void-trigger {
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  border: none;
-  background: none;
-  color: var(--text-tertiary);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: 50%;
-}
-.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .summary-row {
   display: flex;

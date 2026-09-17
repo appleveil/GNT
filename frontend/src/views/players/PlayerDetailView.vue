@@ -6,7 +6,8 @@ import { useGameDayStore } from '@/stores/gameDay'
 import { useAuthStore } from '@/stores/auth'
 import BankAccountFields from '@/components/shared/BankAccountFields.vue'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
-import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
+import { TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 
@@ -226,30 +227,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div class="section-title">Tonight's activity</div>
         <p v-if="ledgerLoading && !activity.length" class="muted">Loading…</p>
         <p v-else-if="!activity.length" class="muted">Nothing recorded for {{ player.display_name }} tonight yet.</p>
-        <div
-          v-for="row in activity" :key="row.id" class="activity-row"
-          :class="{ 'activity-row--voided': row.is_voided }"
-        >
-          <div class="activity-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
-          <div class="activity-info">
-            <div class="activity-title">
-              {{ TRANSACTION_TYPES[row.type]?.label || row.type }}
-              <span
-                v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge"
-                :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`"
-              >{{ row.status.replace('_', ' ') }}</span>
-            </div>
-            <div class="activity-meta">{{ formatTime(row.created_at) }}</div>
-          </div>
-          <div class="activity-amounts">
-            <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-            <div v-if="row.is_voided" class="activity-balance activity-balance--voided">VOIDED</div>
-            <div v-else class="activity-balance">bal {{ N(row.running_balance) }}</div>
-          </div>
-          <button v-if="canVoid(row)" class="void-trigger" type="button" title="Void this entry" @click="voidTarget = row">
-            &#8942;
-          </button>
-        </div>
+        <LedgerTable v-else :rows="activity" voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
       </div>
 
       <div class="section">
@@ -395,47 +373,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .payout-btn { width: 100%; margin-bottom: 8px; }
 .payout-note { text-align: center; font-size: 11.5px; color: var(--text-tertiary); }
 
-.activity-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 4px;
-  border-bottom: 1px solid var(--border);
-}
-.activity-row:last-child { border-bottom: none; }
-.activity-row--voided { opacity: 0.5; text-decoration: line-through; }
-.activity-row--voided .activity-dot { background: var(--status-voided-bg) !important; }
-.activity-dot { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
-.activity-dot.lane-chips { background: var(--lane-chips-bg); }
-.activity-dot.lane-payments { background: var(--lane-payments-bg); }
-.activity-info { flex-grow: 1; min-width: 0; }
-.activity-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
 .activity-meta { font-size: 10.5px; color: var(--text-tertiary); }
-.activity-amounts { text-align: right; flex-shrink: 0; }
-.activity-amounts .money { display: block; font-size: 12.5px; font-weight: 700; color: var(--text-primary); }
-.activity-balance { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-tertiary); }
-.activity-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
-.void-trigger {
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  border: none;
-  background: none;
-  color: var(--text-tertiary);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: 50%;
-}
-.void-trigger:hover { background: var(--bg); color: var(--text-primary); }
 
 .payouts-list { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
 .payouts-title { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; }

@@ -3,7 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
-import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
 
@@ -169,9 +169,6 @@ watch(selectedGameDayId, async id => {
 
 onMounted(load)
 
-function formatTime(iso) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-}
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
@@ -246,21 +243,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <div class="section-title">Outstanding activity <span class="lbl--muted">between game-days</span></div>
             <p v-if="outstandingLoading && !outstanding.length" class="muted">Loading…</p>
             <p v-else-if="!outstanding.length" class="muted">Nothing recorded outside a game-day for {{ player.display_name }}.</p>
-            <div v-for="row in outstanding" :key="row.id" class="feed-row" :class="{ 'feed-row--voided': row.is_voided }">
-              <div class="feed-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
-              <div class="feed-info">
-                <div class="feed-title">
-                  {{ TRANSACTION_TYPES[row.type]?.label || row.type }}
-                  <span v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ row.status.replace('_', ' ') }}</span>
-                </div>
-                <div class="feed-meta">{{ formatDate(row.created_at) }} &middot; {{ formatTime(row.created_at) }}</div>
-              </div>
-              <div class="feed-amounts">
-                <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-                <div v-if="row.is_voided" class="feed-balance feed-balance--voided">VOIDED</div>
-                <div v-else class="feed-balance">{{ N(row.running_balance) }}</div>
-              </div>
-            </div>
+            <LedgerTable v-else :rows="outstanding" date-format="datetime" />
           </div>
 
           <div v-if="auth.isOwner" class="card section-card">
@@ -312,23 +295,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <p v-if="!selectedGameDayId" class="muted gd-hint">Pick a game-day to see {{ player.display_name }}'s activity for just that day.</p>
             <p v-else-if="gdLedgerLoading" class="muted">Loading…</p>
             <p v-else-if="!gdLedger.length" class="muted">{{ player.display_name }} wasn't part of that game-day.</p>
-            <div v-else>
-              <div v-for="row in gdLedger" :key="row.id" class="feed-row" :class="{ 'feed-row--voided': row.is_voided }">
-                <div class="feed-dot" :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" />
-                <div class="feed-info">
-                  <div class="feed-title">
-                    {{ TRANSACTION_TYPES[row.type]?.label || row.type }}
-                    <span v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ row.status.replace('_', ' ') }}</span>
-                  </div>
-                  <div class="feed-meta">{{ formatTime(row.created_at) }}</div>
-                </div>
-                <div class="feed-amounts">
-                  <div class="money">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</div>
-                  <div v-if="row.is_voided" class="feed-balance feed-balance--voided">VOIDED</div>
-                  <div v-else class="feed-balance">bal {{ N(row.running_balance) }}</div>
-                </div>
-              </div>
-            </div>
+            <LedgerTable v-else :rows="gdLedger" />
           </div>
         </div>
       </div>
@@ -431,20 +398,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .gd-select:focus { outline: none; border-color: var(--accent); }
 .gd-hint { padding: 8px 0; }
-
-.feed-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
-.feed-row:last-child { border-bottom: none; }
-.feed-row--voided { opacity: 0.55; text-decoration: line-through; }
-.feed-dot { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; background: var(--lane-other-bg); }
-.feed-dot.lane-chips { background: var(--lane-chips-bg); }
-.feed-dot.lane-payments { background: var(--lane-payments-bg); }
-.feed-info { flex-grow: 1; min-width: 0; }
-.feed-title { font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.feed-meta { font-size: 10.5px; color: var(--text-tertiary); }
-.feed-amounts { text-align: right; flex-shrink: 0; }
-.feed-amounts .money { display: block; font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); }
-.feed-balance { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-tertiary); }
-.feed-balance--voided { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); }
 
 @media (max-width: 860px) {
   .stat-grid { grid-template-columns: 1fr; }
