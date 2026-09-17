@@ -123,6 +123,21 @@ header — applied everywhere, including Cashier's touch-first live screens.
   `npm run build` clean, noticeably smaller per-view bundles from the
   de-duplication (e.g. `RosterDetailView` 9.97kB → 8.35kB).
 
+### Jumping from a Game-Day to a player now lands on that game-day's activity (2026-09-17)
+Clicking a player from `GameDayDetailView.vue` (its ledger table or "Players
+seated" panel) went to `/roster/:id`'s general/lifetime view, with the
+"Any game-day's activity" panel defaulting to a blank picker — the Owner had
+to manually reselect the very game-day they just came from.
+- [x] Both player links in `GameDayDetailView.vue` now carry that game-day's
+  id as a `?gameDay=<id>` query param instead of a bare path.
+- [x] `RosterDetailView.vue`'s `load()` pre-sets `selectedGameDayId` from
+  `route.query.gameDay` when present, firing the existing `watch` that
+  already fetches/display's that game-day's ledger for this player — no new
+  endpoint, reuses `GET /game-days/{id}/players/{playerId}/ledger/` exactly
+  as the manual picker already did. A direct `/roster/:id` visit (no query
+  param) is unchanged.
+- Pure frontend routing change. `npm run build` clean.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

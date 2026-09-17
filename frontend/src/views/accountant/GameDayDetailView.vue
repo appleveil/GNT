@@ -67,7 +67,11 @@ function playerName(playerId) {
 }
 
 const ledgerRows = computed(() => ledger.value.map(row => ({ ...row, player_name: playerName(row.player) })))
-const playerTo = row => (row.player ? `/roster/${row.player}` : null)
+// Carries this game-day's id along so RosterDetailView.vue can land the
+// Owner directly on this player's activity for THIS game-day, instead of a
+// blank "select a game-day" picker — see PLAN.md's "Jumping from a
+// Game-Day to a player" entry.
+const playerTo = row => (row.player ? { path: `/roster/${row.player}`, query: { gameDay: gameDayId } } : null)
 
 function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
@@ -135,7 +139,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div class="card players-card">
           <div class="section-title">Players seated</div>
           <p v-if="!players.length" class="muted">No players seated.</p>
-          <RouterLink v-for="p in players" :key="p.id" :to="`/roster/${p.id}`" class="player-row">
+          <RouterLink v-for="p in players" :key="p.id" :to="{ path: `/roster/${p.id}`, query: { gameDay: gameDayId } }" class="player-row">
             <div>
               <div class="player-name">{{ p.display_name }}</div>
               <div class="player-code">{{ p.account_code }}</div>

@@ -82,6 +82,11 @@ async function load() {
     ])
     player.value = playerRes.data
     gameDays.value = gameDaysRes.data
+    // Arriving from a specific game-day's detail page (its ledger or
+    // "Players seated" list) carries that game-day's id as a query param —
+    // pre-select it so this player's activity for THAT game-day shows
+    // immediately, instead of the blank "select a game-day" picker.
+    if (route.query.gameDay) selectedGameDayId.value = route.query.gameDay
     loadOutstanding() // don't block the rest of the page on this
   } catch {
     toast.error('Could not load this player.')
