@@ -4,12 +4,19 @@ from django.db import models
 
 
 class StaffUser(AbstractUser):
-    """Cashier, Accountant, or Owner — the three roles that get real logins."""
+    """Cashier, Accountant, Owner, or (added 2026-09-17) Floor Manager — the
+    roles that get real logins."""
 
     class Role(models.TextChoices):
         CASHIER = 'CASHIER', 'Cashier'
         ACCOUNTANT = 'ACCOUNTANT', 'Accountant'
         OWNER = 'OWNER', 'Owner'
+        # A Floor Manager's PIN-witness credential (see FloorManager below)
+        # is unchanged and unrelated to this — this is a SEPARATE, real login
+        # for the same real person, added so they can manage the Service
+        # Staff roster themselves (gaming.models.ServiceStaff). See
+        # FloorManager.staff_user for how the two records link.
+        FLOOR_MANAGER = 'FLOOR_MANAGER', 'Floor Manager'
 
     role = models.CharField(max_length=20, choices=Role.choices)
 
@@ -30,9 +37,17 @@ class StaffUser(AbstractUser):
 
 class FloorManager(models.Model):
     """
-    Not a login/role — a named individual's confirmation PIN, entered inline on a
-    Cashier's device to co-sign physical-count entries, game-day open/close, and
-    FX rate changes. See CONCEPT.md.
+    A named individual's confirmation PIN, entered inline on a Cashier's
+    device to co-sign physical-count entries, game-day open/close, and FX
+    rate changes. See CONCEPT.md.
+
+    Revised 2026-09-17: a Floor Manager can now ALSO have a real login of
+    their own (StaffUser.Role.FLOOR_MANAGER, for managing the Service Staff
+    roster) — `staff_user` optionally links this PIN-witness record to that
+    login for the same real person. The PIN-witness mechanic itself is
+    completely unchanged: it's still looked up by this model directly
+    (_resolve_floor_manager), never via the linked login, and a FloorManager
+    row with no linked staff_user still works exactly as before.
     """
 
     name = models.CharField(max_length=150)
@@ -42,6 +57,10 @@ class FloorManager(models.Model):
         StaffUser, on_delete=models.PROTECT, related_name='floor_managers_added',
         limit_choices_to={'role': StaffUser.Role.OWNER},
     )
+    staff_user = models.OneToOneField(
+        StaffUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='floor_manager_profile',
+        limit_choices_to={'role': StaffUser.Role.FLOOR_MANAGER},
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def set_pin(self, raw_pin: str) -> None:
@@ -49,6 +68,25 @@ class FloorManager(models.Model):
 
     def check_pin(self, raw_pin: str) -> bool:
         return check_password(raw_pin, self.pin_hash)
+
+    def __str__(self):
+        return self.name
+
+
+class ServiceStaff(models.Model):
+    """
+    A named tipped-service person (not a Dealer — dealer tips stay
+    anonymous/aggregate) — added 2026-09-17 alongside the Floor Manager
+    login, since managing this roster is a Floor Manager function. Mirrors
+    FloorManager's shape minus the PIN — this is a named recipient a tip
+    gets attributed to, not a witness/authorizer, so no login/PIN of its
+    own. See gaming.models.Transaction.service_staff/tip_category.
+    """
+
+    name = models.CharField(max_length=150)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(StaffUser, on_delete=models.PROTECT, related_name='service_staff_added')
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.name

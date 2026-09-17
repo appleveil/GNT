@@ -155,6 +155,68 @@ class StaffAndFloorManagerAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class FloorManagerRoleAndServiceStaffTests(APITestCase):
+    """
+    Floor Manager as a real logged-in role, added 2026-09-17 alongside the
+    Service Staff roster it's meant to manage — see PLAN.md's entry. The
+    existing PIN-witness FloorManager model/mechanic is unaffected; this
+    covers only the new login + Service Staff pieces.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner2', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier2', password='x', role=StaffUser.Role.CASHIER)
+        self.fm_login = StaffUser.objects.create_user(
+            username='fm1', password='x', role=StaffUser.Role.FLOOR_MANAGER,
+        )
+
+    def test_floor_manager_can_log_in(self):
+        response = self.client.post('/api/auth/login/', {'username': 'fm1', 'password': 'x'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+
+    def test_floor_manager_pin_witness_record_can_link_to_the_login(self):
+        """The two credentials — PIN-witness and login — are separate but
+        linkable for the same real person; linking doesn't change how the
+        PIN-witness mechanic itself works (_resolve_floor_manager)."""
+        fm = FloorManager(name='Femi Floor', created_by=self.owner, staff_user=self.fm_login)
+        fm.set_pin('1234')
+        fm.save()
+        self.assertEqual(fm.staff_user, self.fm_login)
+        self.assertTrue(fm.check_pin('1234'))  # unaffected by the link
+
+    def test_floor_manager_can_create_service_staff(self):
+        self.client.force_authenticate(self.fm_login)
+        response = self.client.post('/api/service-staff/', {'name': 'Tunde the Dealer Assistant'})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_owner_can_also_create_service_staff(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/service-staff/', {'name': 'Blessing'})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_cashier_cannot_create_service_staff(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/service-staff/', {'name': 'Blessing'})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_any_staff_can_list_service_staff(self):
+        """Needed for the Tip entry form's Service-staff picker."""
+        from .models import ServiceStaff
+        ServiceStaff.objects.create(name='Blessing', created_by=self.owner)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/service-staff/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('Blessing', [row['name'] for row in response.data])
+
+    def test_inactive_service_staff_hidden_from_non_floor_manager_non_owner(self):
+        from .models import ServiceStaff
+        ServiceStaff.objects.create(name='Retired Server', created_by=self.owner, is_active=False)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/service-staff/')
+        self.assertNotIn('Retired Server', [row['name'] for row in response.data])
+
+
 class PlayerBankAccountAPITests(APITestCase):
     """
     Found live 2026-09-14: setting a new default bank account crashed with an

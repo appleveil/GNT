@@ -30,3 +30,13 @@ class IsCashierOrOwner(BasePermission):
 class IsOwnerOrAccountant(BasePermission):
     def has_permission(self, request, view):
         return _has_role(request, {StaffUser.Role.OWNER, StaffUser.Role.ACCOUNTANT})
+
+
+class IsFloorManager(BasePermission):
+    def has_permission(self, request, view):
+        return _has_role(request, {StaffUser.Role.FLOOR_MANAGER})
+
+
+class IsFloorManagerOrOwner(BasePermission):
+    def has_permission(self, request, view):
+        return _has_role(request, {StaffUser.Role.FLOOR_MANAGER, StaffUser.Role.OWNER})

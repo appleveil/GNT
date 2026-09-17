@@ -26,11 +26,21 @@ class Command(BaseCommand):
             owner.save(update_fields=['pin_hash'])
         cashier = self._get_or_create_staff('cashier1', StaffUser.Role.CASHIER, 'Chidi', 'Cashier')
         self._get_or_create_staff('accountant1', StaffUser.Role.ACCOUNTANT, 'Ada', 'Accountant')
+        # Revised 2026-09-17: Floor Manager now also gets a real login, linked
+        # to their PIN-witness FloorManager record below via staff_user.
+        floor_manager_login = self._get_or_create_staff(
+            'floormanager1', StaffUser.Role.FLOOR_MANAGER, 'Femi', 'Floor',
+        )
 
-        fm, fm_created = FloorManager.objects.get_or_create(name='Femi Floor', defaults={'created_by': owner})
+        fm, fm_created = FloorManager.objects.get_or_create(
+            name='Femi Floor', defaults={'created_by': owner, 'staff_user': floor_manager_login},
+        )
         if fm_created:
             fm.set_pin(DEMO_PIN)
             fm.save()
+        elif fm.staff_user_id is None:
+            fm.staff_user = floor_manager_login
+            fm.save(update_fields=['staff_user'])
 
         PaystackAccount.objects.get_or_create(
             account_type=PaystackAccount.AccountType.MAIN, defaults={'label': 'LPC Main Account'},
@@ -61,8 +71,8 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS('Seed complete.'))
         self.stdout.write(f'Staff logins (password for all): {DEMO_PASSWORD}')
-        self.stdout.write('  owner1 (Owner) / cashier1 (Cashier) / accountant1 (Accountant)')
-        self.stdout.write(f'Floor Manager: "Femi Floor", PIN {DEMO_PIN}')
+        self.stdout.write('  owner1 (Owner) / cashier1 (Cashier) / accountant1 (Accountant) / floormanager1 (Floor Manager)')
+        self.stdout.write(f'Floor Manager PIN-witness credential: "Femi Floor", PIN {DEMO_PIN} (separate from floormanager1\'s login password above)')
         self.stdout.write(f"Owner's own in-person PIN (separate from their password): {DEMO_PIN}")
         self.stdout.write(f'Game-day #{game_day.number} is {game_day.status.lower()}, {len(players)} players seeded.')
 

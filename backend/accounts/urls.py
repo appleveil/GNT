@@ -7,6 +7,7 @@ from . import views
 router = DefaultRouter()
 router.register('staff-users', views.StaffUserViewSet, basename='staffuser')
 router.register('floor-managers', views.FloorManagerViewSet, basename='floormanager')
+router.register('service-staff', views.ServiceStaffViewSet, basename='servicestaff')
 router.register('players', views.PlayerViewSet, basename='player')
 
 bank_accounts = views.PlayerBankAccountViewSet

@@ -20,7 +20,9 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
 function homeRouteFor(role) {
-  return role === 'CASHIER' ? '/game-day' : '/dashboard'
+  if (role === 'CASHIER') return '/game-day'
+  if (role === 'FLOOR_MANAGER') return '/service-staff'
+  return '/dashboard'
 }
 
 const LoginView = () => import('@/views/auth/LoginView.vue')
@@ -46,6 +48,10 @@ const OutstandingView = () => import('@/views/accountant/OutstandingView.vue')
 const RosterListView = () => import('@/views/accountant/RosterListView.vue')
 const RosterDetailView = () => import('@/views/accountant/RosterDetailView.vue')
 
+// Floor Manager's own screen (2026-09-17) — a real logged-in role now,
+// managing the Service Staff roster.
+const ServiceStaffView = () => import('@/views/floor-manager/ServiceStaffView.vue')
+
 // Owner-only additions (Phase C, 2026-09-14).
 const AdminView = () => import('@/views/owner/AdminView.vue')
 const PayoutsView = () => import('@/views/owner/PayoutsView.vue')
@@ -58,6 +64,9 @@ const MainAccountLedgerView = () => import('@/views/owner/MainAccountLedgerView.
 
 const BACK_OFFICE_ROLES = ['ACCOUNTANT', 'OWNER']
 const OWNER_ONLY_ROLES = ['OWNER']
+// Owner can also reach Service Staff (ServiceStaffViewSet allows both) even
+// though it's primarily the Floor Manager's own screen/nav entry.
+const FLOOR_MANAGER_ROLES = ['FLOOR_MANAGER', 'OWNER']
 
 const routes = [
   { path: '/login', component: LoginView, meta: { public: true } },
@@ -84,6 +93,7 @@ const routes = [
       { path: 'admin', name: 'admin', component: AdminView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'main-account', name: 'main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'service-staff', name: 'service-staff', component: ServiceStaffView, meta: { roles: FLOOR_MANAGER_ROLES } },
     ],
   },
 

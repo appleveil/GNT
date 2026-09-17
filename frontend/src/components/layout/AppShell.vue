@@ -20,6 +20,7 @@ const initial = computed(() => (auth.user?.fullName || '?').trim().charAt(0).toU
 const tabs = computed(() => {
   const role = auth.user?.role
   if (role === 'CASHIER') return []
+  if (role === 'FLOOR_MANAGER') return [{ name: 'service-staff', label: 'Service Staff', path: '/service-staff' }]
   const base = [
     { name: 'dashboard', label: 'Dashboard', path: '/dashboard' },
     { name: 'game-days', label: 'Game Days', path: '/game-days' },
@@ -45,6 +46,7 @@ const isBackOffice = computed(() => auth.user?.role !== 'CASHIER')
 const brand = computed(() => {
   if (auth.user?.role === 'ACCOUNTANT') return 'LPC Accountant'
   if (auth.user?.role === 'OWNER') return 'LPC Owner'
+  if (auth.user?.role === 'FLOOR_MANAGER') return 'LPC Floor Manager'
   return 'LPC Cashier'
 })
 

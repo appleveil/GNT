@@ -8,8 +8,8 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import FloorManager, Player, PlayerBankAccount, StaffUser
-from .permissions import IsCashierOrOwner, IsOwner
+from .models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
+from .permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner
 
 PIN_MIN_LENGTH = 4
 PIN_MAX_LENGTH = 8
@@ -17,6 +17,7 @@ from .serializers import (
     FloorManagerSerializer,
     PlayerBankAccountSerializer,
     PlayerSerializer,
+    ServiceStaffSerializer,
     StaffLoginSerializer,
     StaffPasswordResetSerializer,
     StaffUserCreateSerializer,
@@ -119,6 +120,29 @@ class FloorManagerViewSet(viewsets.ModelViewSet):
         if self.action in ('list', 'retrieve'):
             return [IsAuthenticated()]
         return [IsOwner()]
+
+
+class ServiceStaffViewSet(viewsets.ModelViewSet):
+    """
+    Named tipped-service people (added 2026-09-17) — read: any authenticated
+    staff (needed for the Tip entry form's picker); write (create/deactivate):
+    Floor Manager or Owner, matching CONCEPT.md's framing of "adding these
+    service people" as a Floor Manager function, with the Owner able to do
+    it too as usual.
+    """
+
+    serializer_class = ServiceStaffSerializer
+
+    def get_queryset(self):
+        qs = ServiceStaff.objects.all().order_by('name')
+        if getattr(self.request.user, 'role', None) not in (StaffUser.Role.FLOOR_MANAGER, StaffUser.Role.OWNER):
+            qs = qs.filter(is_active=True)
+        return qs
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsFloorManagerOrOwner()]
 
 
 class PlayerViewSet(viewsets.ModelViewSet):

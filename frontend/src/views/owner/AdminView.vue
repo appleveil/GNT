@@ -80,7 +80,12 @@ async function onSubmitReset(user) {
 // ── Floor Managers ────────────────────────────────────────────────────────
 const floorManagers = ref([])
 const fmLoading = ref(true)
-const newFm = ref({ name: '', pin: '' })
+// staff_user (added 2026-09-17) optionally links this PIN-witness record to
+// that same person's real Floor Manager login — created separately, above,
+// via the Staff accounts section (role: Floor Manager); '' = unlinked,
+// same as before.
+const newFm = ref({ name: '', pin: '', staff_user: '' })
+const floorManagerLogins = computed(() => staff.value.filter(u => u.role === 'FLOOR_MANAGER'))
 const fmCreating = ref(false)
 const fmError = ref('')
 const fmResetTargetId = ref(null)
@@ -103,8 +108,8 @@ async function onCreateFm() {
   fmError.value = ''
   fmCreating.value = true
   try {
-    await api.post('/floor-managers/', newFm.value)
-    newFm.value = { name: '', pin: '' }
+    await api.post('/floor-managers/', { ...newFm.value, staff_user: newFm.value.staff_user || null })
+    newFm.value = { name: '', pin: '', staff_user: '' }
     await loadFloorManagers()
     toast.success('Floor Manager added.')
   } catch (err) {
@@ -244,6 +249,7 @@ function formatDate(iso) {
             <option value="CASHIER">Cashier</option>
             <option value="ACCOUNTANT">Accountant</option>
             <option value="OWNER">Owner</option>
+            <option value="FLOOR_MANAGER">Floor Manager</option>
           </select>
           <input v-model="newStaff.password" type="password" placeholder="Password" required class="ff" />
           <button class="btn btn--primary" type="submit" :disabled="staffCreating">{{ staffCreating ? 'Adding…' : '+ Add staff' }}</button>
@@ -254,11 +260,16 @@ function formatDate(iso) {
 
     <div class="card section-card">
       <div class="section-title">Floor Managers</div>
+      <p class="section-note">
+        This is the physical-count PIN-witness credential — separate from a Floor Manager's own login
+        (create that above, role: Floor Manager), optionally linked to it below for the same person.
+      </p>
       <p v-if="fmLoading" class="muted">Loading…</p>
       <template v-else>
         <div v-for="fm in floorManagers" :key="fm.id" class="row">
           <div class="row-info">
             <div class="row-name">{{ fm.name }}</div>
+            <div v-if="fm.staff_user" class="row-sub">linked to {{ staff.find(u => u.id === fm.staff_user)?.username || 'a login' }}</div>
           </div>
           <span class="badge" :class="fm.is_active ? 'badge--approved' : 'badge--closed'">{{ fm.is_active ? 'active' : 'inactive' }}</span>
           <button class="link-btn" type="button" @click="onToggleFmActive(fm)">{{ fm.is_active ? 'Deactivate' : 'Activate' }}</button>
@@ -275,6 +286,10 @@ function formatDate(iso) {
         <form class="create-form" @submit.prevent="onCreateFm">
           <input v-model="newFm.name" type="text" placeholder="Name" required class="ff" />
           <input v-model="newFm.pin" type="password" placeholder="PIN (4-8 chars)" required class="ff" />
+          <select v-model="newFm.staff_user" class="ff">
+            <option value="">No linked login</option>
+            <option v-for="u in floorManagerLogins" :key="u.id" :value="u.id">Link to {{ u.username }}</option>
+          </select>
           <button class="btn btn--primary" type="submit" :disabled="fmCreating">{{ fmCreating ? 'Adding…' : '+ Add Floor Manager' }}</button>
         </form>
         <p v-if="fmError" class="form-error">{{ fmError }}</p>
@@ -331,6 +346,7 @@ function formatDate(iso) {
 .section-card { padding: 18px 20px; margin-bottom: 16px; }
 .section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin-bottom: 12px; }
 
+.section-note { font-size: 12px; color: var(--text-tertiary); margin-bottom: 12px; line-height: 1.5; }
 .row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .row-info { flex-grow: 1; min-width: 0; }
 .row-name { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }

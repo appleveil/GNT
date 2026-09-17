@@ -3,7 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import FloorManager, Player, PlayerBankAccount, StaffUser
+from .models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
 
 
 class StaffLoginSerializer(TokenObtainPairSerializer):
@@ -62,10 +62,17 @@ class StaffPasswordResetSerializer(serializers.Serializer):
 
 class FloorManagerSerializer(serializers.ModelSerializer):
     pin = serializers.CharField(write_only=True, required=False, min_length=4, max_length=8)
+    # Links this PIN-witness record to that same person's real login
+    # (StaffUser.Role.FLOOR_MANAGER) — optional, added 2026-09-17. AdminView.vue's
+    # combined create-form sets this to the StaffUser it just created in the
+    # same submit, via two sequential calls.
+    staff_user = serializers.PrimaryKeyRelatedField(
+        queryset=StaffUser.objects.filter(role=StaffUser.Role.FLOOR_MANAGER), required=False, allow_null=True,
+    )
 
     class Meta:
         model = FloorManager
-        fields = ['id', 'name', 'is_active', 'created_by', 'created_at', 'pin']
+        fields = ['id', 'name', 'is_active', 'created_by', 'created_at', 'pin', 'staff_user']
         read_only_fields = ['id', 'created_by', 'created_at']
 
     def create(self, validated_data):
@@ -85,6 +92,16 @@ class FloorManagerSerializer(serializers.ModelSerializer):
             instance.set_pin(pin)
         instance.save()
         return instance
+
+
+class ServiceStaffSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ServiceStaff
+        fields = ['id', 'name', 'is_active', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def create(self, validated_data):
+        return ServiceStaff.objects.create(**validated_data, created_by=self.context['request'].user)
 
 
 class PlayerBankAccountSerializer(serializers.ModelSerializer):

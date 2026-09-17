@@ -26,6 +26,7 @@ export const useAuthStore = defineStore('auth', () => {
   const isOwner = computed(() => user.value?.role === 'OWNER')
   const isAccountant = computed(() => user.value?.role === 'ACCOUNTANT')
   const isCashier = computed(() => user.value?.role === 'CASHIER')
+  const isFloorManager = computed(() => user.value?.role === 'FLOOR_MANAGER')
 
   // ── Restore session on app boot from a still-valid stored access token ───
   function init() {
@@ -76,5 +77,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, loading, isAuthenticated, isOwner, isAccountant, isCashier, init, login, logout }
+  return { user, loading, isAuthenticated, isOwner, isAccountant, isCashier, isFloorManager, init, login, logout }
 })

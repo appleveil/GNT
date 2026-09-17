@@ -217,6 +217,42 @@ Confirmed zero seat-position concept existed anywhere before this —
   leave and being reused, and a same-game-day swap all confirmed correct;
   real game-day history untouched.
 
+### Floor Manager becomes a real logged-in role, plus a Service Staff roster (2026-09-17)
+Confirmed Floor Manager had zero login/account of its own before this —
+CONCEPT.md was explicit ("not a role with its own account or interface"),
+purely a name+PIN witness credential entered inline on whoever's device.
+Per the user's decision, that changes: Floor Manager now ALSO gets a real
+login, on top of (not instead of) that existing PIN — a Service Staff
+roster (named people Service tips get attributed to) is the first thing
+that login is for.
+- [x] `StaffUser.Role.FLOOR_MANAGER` — a real login (username/password,
+  JWT), migration, new `IsFloorManager`/`IsFloorManagerOrOwner`
+  permissions. The existing `FloorManager` model (name + PIN) is
+  unchanged — still looked up directly by `_resolve_floor_manager` for the
+  inline physical-count witnessing, completely unaffected by a Floor
+  Manager also having a login. New `FloorManager.staff_user` (nullable
+  OneToOne) optionally links the two records for the same real person.
+- [x] New `ServiceStaff` model (mirrors `FloorManager`'s shape minus the
+  PIN — a named recipient, not a witness) + `ServiceStaffViewSet`
+  (read: any staff; write: Floor Manager or Owner) + new
+  `views/floor-manager/ServiceStaffView.vue` (copies `AdminView.vue`'s
+  Floor-Managers-section list/toggle/create pattern) as the Floor
+  Manager's own home screen/nav tab.
+- [x] `AdminView.vue`'s existing "Staff accounts" role picker gains
+  "Floor Manager" as a selectable role (creates the login); its separate
+  "Floor Managers" section (the PIN-witness records) gains an optional
+  "Link to login" dropdown, sourced from the staff list already fetched
+  there — two sequential existing-endpoint calls, no new combined
+  endpoint needed.
+- `seed_demo_data.py` gains a demo `floormanager1` login, linked to the
+  existing demo "Femi Floor" PIN record.
+- 7 new backend tests (142/142 passing, was 135). `npm run build` clean.
+  Verified live: migrated the real dev DB (additive, nullable columns
+  only); a disposable throwaway Floor Manager login could log in via real
+  HTTP, list/create Service Staff (200/201), and was correctly refused
+  `/api/dashboard/` (403, not Accountant/Owner) — all cleaned up after,
+  real staff/game-day data confirmed untouched.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`
