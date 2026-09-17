@@ -321,6 +321,43 @@ class AuthorizationTests(TestCase):
         self.assertEqual(payout.status, Transaction.Status.APPROVED)
         self.assertEqual(payout.external_reference, 'TRF_test')
 
+    def test_payout_approval_blocked_by_insufficient_main_account_balance(self):
+        """The club's own bank balance can't go negative on a payout — checked
+        at approval time (Owner-only visibility), leaves the transaction fully
+        untouched (still PENDING_APPROVAL, not TRANSFER_FAILED) so it can be
+        retried once funds arrive."""
+        gd = services.open_game_day(30, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 16', display_name='Test16')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test16', is_default=True,
+        )
+        self._seat_and_leave(gd, player)
+        # The player has won 50,000 (satisfies the player-side cap), but
+        # nothing has ever actually deposited into the Main Account — it's
+        # still at 0, so a 50,000 payout can't be sent regardless of what
+        # the player personally won tonight.
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_DEAL, amount=Decimal(50000),
+        )
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
+        with self.assertRaises(InvalidStateError):
+            services.approve_payout(payout, self.owner)
+        payout.refresh_from_db()
+        self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
+        self.assertIsNone(payout.approved_by)
+
+        # Once real funds land in the Main Account, the same payout approves normally.
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        with patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_x'}), \
+             patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_x'}):
+            services.approve_payout(payout, self.owner)
+        payout.refresh_from_db()
+        self.assertEqual(payout.status, Transaction.Status.APPROVED)
+
     def test_payout_blocked_while_still_seated(self):
         """Revised 2026-09-17: a player can't cash out while still seated —
         leaving and paying out are independent, but a payout now requires it."""

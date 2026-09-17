@@ -6,6 +6,7 @@ and "Floor Manager" sections for the rules encoded here.
 
 from decimal import Decimal
 
+from django.db import transaction as db_transaction
 from django.utils import timezone
 
 from accounts.models import FloorManager, Player, StaffUser
@@ -404,32 +405,55 @@ def approve_payout(transaction_obj, operator):
     visibly stuck rather than silently "approved" with nothing moving.
     TRANSFER_FAILED can be retried by calling this again once the underlying
     issue is fixed (e.g. a bank account is added).
+
+    Revised 2026-09-17: also guards against the club's Main Account balance
+    itself going negative — checked first, before approved_by/approved_at
+    are ever touched, so an insufficient-funds rejection leaves the
+    transaction completely untouched and retryable once funds arrive
+    (distinct from TRANSFER_FAILED, which means a transfer was actually
+    attempted and failed). Placed here rather than at initiate_payout
+    because the Main Account balance is Owner-only visibility (CONCEPT.md) —
+    a Cashier requesting a payout shouldn't learn anything about club-wide
+    funds. The whole function now runs inside one atomic, row-locked block:
+    previously two concurrent approvals of the SAME transaction (double-
+    click, two tabs) had a bare TOCTOU race on the status check alone;
+    select_for_update() serializes that plus this new funds check.
     """
     if operator.role != StaffUser.Role.OWNER:
         raise AuthorizationError('Only the Owner can approve a payout.')
     if transaction_obj.type != Transaction.Type.PAYOUT:
         raise ValueError('Not a payout transaction.')
-    if transaction_obj.status not in (Transaction.Status.PENDING_APPROVAL, Transaction.Status.TRANSFER_FAILED):
-        raise InvalidStateError('Only a pending or previously failed payout can be approved.')
 
-    # Deferred import: payments.services imports gaming.services (record_transaction)
-    # at module level, so importing it back at module level here would be circular.
-    from payments.services import PaystackAPIError, initiate_payout_transfer
+    with db_transaction.atomic():
+        transaction_obj = Transaction.objects.select_for_update().get(pk=transaction_obj.pk)
+        if transaction_obj.status not in (Transaction.Status.PENDING_APPROVAL, Transaction.Status.TRANSFER_FAILED):
+            raise InvalidStateError('Only a pending or previously failed payout can be approved.')
+        # main_account_balance() already has THIS payout's own debit baked in
+        # (it's status-agnostic, same as the player-side balance check — a
+        # pending payout already reserves its amount) — so the right test is
+        # "would honoring every currently-reserved obligation, including this
+        # one, push the account negative," not amount-vs-balance directly.
+        if selectors.main_account_balance() < 0:
+            raise InvalidStateError('Insufficient Main Account balance to complete this payout.')
 
-    transaction_obj.approved_by = operator
-    transaction_obj.approved_at = timezone.now()
-    try:
-        transfer_code = initiate_payout_transfer(transaction_obj)
-    except PaystackAPIError as exc:
-        transaction_obj.status = Transaction.Status.TRANSFER_FAILED
-        transaction_obj.notes = f'{transaction_obj.notes}\nTransfer failed: {exc}'.strip()
-        transaction_obj.save(update_fields=['status', 'notes', 'approved_by', 'approved_at'])
+        # Deferred import: payments.services imports gaming.services (record_transaction)
+        # at module level, so importing it back at module level here would be circular.
+        from payments.services import PaystackAPIError, initiate_payout_transfer
+
+        transaction_obj.approved_by = operator
+        transaction_obj.approved_at = timezone.now()
+        try:
+            transfer_code = initiate_payout_transfer(transaction_obj)
+        except PaystackAPIError as exc:
+            transaction_obj.status = Transaction.Status.TRANSFER_FAILED
+            transaction_obj.notes = f'{transaction_obj.notes}\nTransfer failed: {exc}'.strip()
+            transaction_obj.save(update_fields=['status', 'notes', 'approved_by', 'approved_at'])
+            return transaction_obj
+
+        transaction_obj.status = Transaction.Status.APPROVED
+        transaction_obj.external_reference = transfer_code
+        transaction_obj.save(update_fields=['status', 'approved_by', 'approved_at', 'external_reference'])
         return transaction_obj
-
-    transaction_obj.status = Transaction.Status.APPROVED
-    transaction_obj.external_reference = transfer_code
-    transaction_obj.save(update_fields=['status', 'approved_by', 'approved_at', 'external_reference'])
-    return transaction_obj
 
 
 def reject_payout(transaction_obj, operator, reason):
