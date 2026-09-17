@@ -73,10 +73,23 @@ class GameDayPlayer(models.Model):
     # shown differently in the Cashier UI. Re-seating them (seat_player /
     # _ensure_seated) clears this back to null. Added 2026-09-14.
     left_at = models.DateTimeField(null=True, blank=True)
+    # A real numbered seat at the table (1..MAX_ACTIVE_PLAYERS_PER_GAME_DAY),
+    # added 2026-09-17 — separate from the mere presence this model already
+    # tracked. Null = seated but not assigned a specific seat yet (e.g. added
+    # via the bulk "+ Add Player" flow) — assignable later via
+    # gaming.services.move_seat. Leaving the table frees the seat number
+    # automatically: the partial unique constraint below only applies while
+    # left_at IS NULL, so a departed row's seat_number stops blocking reuse
+    # without any code needing to clear it.
+    seat_number = models.PositiveSmallIntegerField(null=True, blank=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=['game_day', 'player'], name='unique_player_per_game_day_seat'),
+            models.UniqueConstraint(
+                fields=['game_day', 'seat_number'], condition=models.Q(left_at__isnull=True, seat_number__isnull=False),
+                name='unique_active_seat_per_game_day',
+            ),
         ]
 
     def __str__(self):

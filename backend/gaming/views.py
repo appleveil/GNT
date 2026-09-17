@@ -144,6 +144,7 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
                     {'account_code': data['account_code'], 'display_name': data['display_name']}
                     if 'player' not in data else None
                 ),
+                seat_number=data.get('seat_number'),
             )
         except TableFullError as exc:
             # Caught here (not left to the global handler) so the response can
@@ -181,6 +182,26 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         game_day = self.get_object()
         player = get_object_or_404(Player, pk=player_pk)
         seat = services.leave_table(game_day, player, operator=request.user)
+        return Response(GameDaySeatedPlayerSerializer(seat).data)
+
+    @action(detail=True, methods=['post'], url_path=r'players/(?P<player_pk>\d+)/move-seat')
+    def player_move_seat(self, request, pk=None, player_pk=None):
+        """
+        Relocates a still-seated player to a different numbered seat —
+        either into a free one, or swapping with whoever's currently there
+        (gaming.services.move_seat handles both). Cashier or Owner only,
+        same as seating/leaving — not a physical count or financial action.
+        Added 2026-09-17.
+        """
+        if not IsCashierOrOwner().has_permission(request, self):
+            return Response({'detail': 'Only a Cashier or the Owner can do this.'}, status=403)
+        game_day = self.get_object()
+        player = get_object_or_404(Player, pk=player_pk)
+        try:
+            seat_number = int(request.data.get('seat_number'))
+        except (TypeError, ValueError):
+            return Response({'detail': 'seat_number is required.'}, status=400)
+        seat = services.move_seat(game_day, player, seat_number, operator=request.user)
         return Response(GameDaySeatedPlayerSerializer(seat).data)
 
 

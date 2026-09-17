@@ -146,14 +146,74 @@ const selectedPlayer = computed(() => players.value.find(p => p.id === selectedP
 const activeCount = computed(() => players.value.filter(p => !p.left_at).length)
 const departedCount = computed(() => players.value.length - activeCount.value)
 
+// Numbered seats (2026-09-17) — mirrors gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY.
+// Every seat 1..MAX renders as its own pill, occupied or empty, so the
+// Cashier can tell at a glance who's where and which seats are free; a
+// still-active player with no seat_number yet (e.g. seated via the bulk
+// "+ Add Player" flow) shows separately as "unassigned" until moved into one.
+const MAX_SEATS = 9
+const seatSlots = computed(() => {
+  const bySeat = new Map()
+  for (const p of players.value) {
+    if (!p.left_at && p.seat_number) bySeat.set(p.seat_number, p)
+  }
+  return Array.from({ length: MAX_SEATS }, (_, i) => {
+    const seatNumber = i + 1
+    return { seatNumber, player: bySeat.get(seatNumber) || null }
+  })
+})
+const unassignedPlayers = computed(() => players.value.filter(p => !p.left_at && !p.seat_number))
+const departedPlayers = computed(() => players.value.filter(p => p.left_at))
+
 function selectPlayer(p) {
   selectedPlayerId.value = p.id
 }
 
-// Add-player modal
+// Add-player modal — seatTarget set means it was opened by tapping a
+// specific empty seat pill, rather than the generic "+ Add Player" button.
 const addPlayerOpen = ref(false)
+const seatTarget = ref(null)
+function onAddPlayerClick() {
+  seatTarget.value = null
+  addPlayerOpen.value = true
+}
+function onEmptySeatClick(seatNumber) {
+  seatTarget.value = seatNumber
+  addPlayerOpen.value = true
+}
+function onAddPlayerClosed() {
+  addPlayerOpen.value = false
+  seatTarget.value = null
+}
 function onPlayerAdded() {
   refreshAll()
+}
+
+// Move/swap seat
+const moveSeatTarget = ref(null) // the player being moved, or null
+function onMoveSeatClick() {
+  moveSeatTarget.value = selectedPlayer.value
+}
+const moveSeatOptions = computed(() => {
+  if (!moveSeatTarget.value) return []
+  return seatSlots.value.map(s => ({
+    seatNumber: s.seatNumber,
+    isCurrent: s.player?.id === moveSeatTarget.value.id,
+    label: s.player
+      ? (s.player.id === moveSeatTarget.value.id ? 'Current seat' : `Swap with ${s.player.display_name}`)
+      : 'Empty',
+  }))
+})
+async function onPickMoveSeat(seatNumber) {
+  const player = moveSeatTarget.value
+  moveSeatTarget.value = null
+  try {
+    await api.post(`/game-days/${gameDay.current.id}/players/${player.id}/move-seat/`, { seat_number: seatNumber })
+    toast.success(`${player.display_name} moved to Seat ${seatNumber}.`)
+    refreshAll()
+  } catch (err) {
+    toast.error(err.response?.data?.detail || 'Could not move this player.')
+  }
 }
 
 // Entry sheet
@@ -271,24 +331,51 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
       <div class="picker-row">
         <div>
-          <div class="lbl">Tonight's players</div>
-          <div v-if="departedCount" class="picker-sub">{{ activeCount }} active &middot; {{ departedCount }} left tonight</div>
+          <div class="lbl">Tonight's table</div>
+          <div class="picker-sub">
+            {{ activeCount }} active &middot; {{ MAX_SEATS - activeCount }} seats free
+            <template v-if="departedCount">&middot; {{ departedCount }} left tonight</template>
+          </div>
         </div>
-        <button class="new-btn" type="button" @click="addPlayerOpen = true">+ Add Player</button>
+        <button class="new-btn" type="button" @click="onAddPlayerClick">+ Add Player</button>
       </div>
 
       <p v-if="playersLoading && !players.length" class="muted">Loading…</p>
-      <p v-else-if="!players.length" class="muted empty-players">No players yet tonight — add one to get started.</p>
-      <div v-else class="pills">
-        <button
-          v-for="p in players" :key="p.id" type="button" class="pill"
-          :class="{ 'pill--active': p.id === selectedPlayerId, 'pill--departed': p.left_at }"
-          @click="selectPlayer(p)"
-        >
-          {{ p.display_name }} &middot; {{ p.account_code }}
-          <span v-if="p.left_at" class="pill-tag">left</span>
-        </button>
-      </div>
+      <template v-else>
+        <div class="pills">
+          <button
+            v-for="s in seatSlots" :key="s.seatNumber" type="button" class="pill"
+            :class="s.player ? { 'pill--active': s.player.id === selectedPlayerId } : 'pill--empty'"
+            @click="s.player ? selectPlayer(s.player) : onEmptySeatClick(s.seatNumber)"
+          >
+            <span class="pill-seat">{{ s.seatNumber }}</span>
+            {{ s.player ? `${s.player.display_name} · ${s.player.account_code}` : 'Empty' }}
+          </button>
+        </div>
+
+        <div v-if="unassignedPlayers.length" class="pills pills--secondary">
+          <div class="pills-label">Unassigned</div>
+          <button
+            v-for="p in unassignedPlayers" :key="p.id" type="button" class="pill"
+            :class="{ 'pill--active': p.id === selectedPlayerId }"
+            @click="selectPlayer(p)"
+          >
+            {{ p.display_name }} &middot; {{ p.account_code }}
+          </button>
+        </div>
+
+        <div v-if="departedPlayers.length" class="pills pills--secondary">
+          <div class="pills-label">Left tonight</div>
+          <button
+            v-for="p in departedPlayers" :key="p.id" type="button" class="pill pill--departed"
+            :class="{ 'pill--active': p.id === selectedPlayerId }"
+            @click="selectPlayer(p)"
+          >
+            {{ p.display_name }} &middot; {{ p.account_code }}
+            <span class="pill-tag">left</span>
+          </button>
+        </div>
+      </template>
 
       <div v-if="selectedPlayer" class="card section player-panel">
         <div class="panel-head">
@@ -310,6 +397,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <button class="action-btn" type="button" @click="openEntry('PAYMENT_TRANSFER')">Transfer<br>(manual)</button>
           <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">Payout</button>
           <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">View Player</button>
+          <button v-if="!selectedPlayer.left_at" class="action-btn" type="button" @click="onMoveSeatClick">Move Seat</button>
           <button
             v-if="!selectedPlayer.left_at" class="action-btn action-btn--warn" type="button"
             @click="onLeaveClick"
@@ -397,7 +485,25 @@ const N = n => `₦${Number(n).toLocaleString()}`
       :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
     />
 
-    <AddPlayerModal v-if="addPlayerOpen" @close="addPlayerOpen = false" @added="onPlayerAdded" />
+    <!-- Move/swap seat -->
+    <div v-if="moveSeatTarget" class="overlay">
+      <div class="dialog card">
+        <div class="eyebrow">Move {{ moveSeatTarget.display_name }}</div>
+        <p class="muted">Pick a seat — an occupied one swaps places, an empty one just moves them.</p>
+        <div class="seat-options">
+          <button
+            v-for="opt in moveSeatOptions" :key="opt.seatNumber" type="button" class="seat-option"
+            :disabled="opt.isCurrent"
+            @click="onPickMoveSeat(opt.seatNumber)"
+          >
+            <span class="pill-seat">{{ opt.seatNumber }}</span> {{ opt.label }}
+          </button>
+        </div>
+        <button class="link-btn leave-cancel" type="button" @click="moveSeatTarget = null">Cancel</button>
+      </div>
+    </div>
+
+    <AddPlayerModal v-if="addPlayerOpen" :seat-number="seatTarget" @close="onAddPlayerClosed" @added="onPlayerAdded" />
   </div>
 </template>
 
@@ -478,7 +584,38 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .pill--active { border-color: var(--accent); background: var(--accent); color: #fff; }
 .pill--departed { background: var(--status-voided-bg); color: var(--status-voided-text); border-color: transparent; }
+.pill--empty { border-style: dashed; color: var(--text-tertiary); background: var(--bg); }
 .pill-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; margin-left: 4px; opacity: 0.8; }
+.pill-seat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.08);
+  font-size: 10.5px;
+  font-weight: 700;
+  margin-right: 6px;
+}
+.pill--active .pill-seat { background: rgba(255, 255, 255, 0.25); }
+.pills--secondary { margin-top: -4px; }
+.pills-label { flex: 0 0 100%; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: -2px; }
+
+.seat-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 14px 0 4px; }
+.seat-option {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 10px 8px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: center;
+}
+.seat-option:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .player-panel--empty { text-align: center; }
 .player-panel--empty .muted { margin: 4px 0; }

@@ -191,6 +191,32 @@ on the backend, just never wired to a screen.
   `chips_variance` sign confirmed on a deliberately unbalanced day. Real
   game-day history (#1–#6) confirmed untouched throughout.
 
+### Numbered seats, free-seat visibility, and moving/swapping seats (2026-09-17)
+Confirmed zero seat-position concept existed anywhere before this —
+`GameDayPlayer` only ever tracked presence (`left_at` null/set),
+`MAX_ACTIVE_PLAYERS_PER_GAME_DAY = 9` was a pure headcount cap.
+- [x] `GameDayPlayer.seat_number` (nullable — unassigned until placed) +
+  a partial unique constraint (`unique_active_seat_per_game_day`, only
+  while `left_at IS NULL`) — leaving the table frees the seat number
+  automatically, no extra code needed for that part.
+- [x] `seat_player` gains an optional `seat_number`; new `move_seat`
+  (handles both a plain move into a free seat and a swap with whoever's
+  in the destination seat — nulls both rows first inside one atomic
+  block, sidestepping the unique constraint portably); new
+  `free_seat_numbers` selector; new `POST .../players/{id}/move-seat/`.
+- [x] `ActiveGameDayView.vue`'s player pills are now seat-ordered 1–9,
+  empty seats shown as their own pill (tapping one opens `AddPlayerModal`
+  pre-targeted at that seat — now single-select when opened this way,
+  still bulk multi-select from the generic "+ Add Player" button);
+  players seated without a specific seat show under "Unassigned"; the
+  action grid gains "Move Seat" (a small picker of every other seat,
+  free ones move, occupied ones swap).
+- 8 new backend tests (135/135 passing, was 127). `npm run build` clean.
+  Verified live against the real dev DB (migration applied) via disposable
+  throwaway players: seating into specific seats, a seat freeing on
+  leave and being reused, and a same-game-day swap all confirmed correct;
+  real game-day history untouched.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

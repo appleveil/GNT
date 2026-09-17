@@ -10,6 +10,13 @@ import { useToast } from '@/composables/useToast'
 // player selection is multi-select (a cashier often needs to seat several
 // returning players in one go); a new player is still exactly one at a
 // time. The two modes stay mutually exclusive, same as before.
+//
+// `seatNumber` (added 2026-09-17) — set when opened by tapping a specific
+// empty seat pill on ActiveGameDayView.vue, rather than the generic
+// "+ Add Player" button. Forces existing-player selection down to one
+// (this one seat can only take one person) and threads seat_number through
+// on either mode's submit — everything else about the modal is unchanged.
+const props = defineProps({ seatNumber: { type: Number, default: null } })
 const emit = defineEmits(['close', 'added'])
 
 const gameDay = useGameDayStore()
@@ -69,6 +76,11 @@ async function loadRoster() {
 onMounted(loadRoster)
 
 function toggleSelect(id) {
+  if (props.seatNumber) {
+    // One seat, one person — picking a different row replaces the selection.
+    selectedIds.value = selectedIds.value.includes(id) ? [] : [id]
+    return
+  }
   selectedIds.value = selectedIds.value.includes(id)
     ? selectedIds.value.filter(x => x !== id)
     : [...selectedIds.value, id]
@@ -80,7 +92,9 @@ async function onSubmitExisting() {
   submitting.value = true
   const ids = selectedIds.value
   const results = await Promise.allSettled(
-    ids.map(id => api.post(`/game-days/${gameDay.current.id}/players/`, { player_id: id })),
+    ids.map(id => api.post(`/game-days/${gameDay.current.id}/players/`, {
+      player_id: id, ...(props.seatNumber ? { seat_number: props.seatNumber } : {}),
+    })),
   )
   submitting.value = false
 
@@ -113,6 +127,7 @@ async function onSubmitNew() {
     const { data: seated } = await api.post(`/game-days/${gameDay.current.id}/players/`, {
       account_code: accountCode.value,
       display_name: displayName.value,
+      ...(props.seatNumber ? { seat_number: props.seatNumber } : {}),
     })
     if (bank.value.account_number.length === 10 && bank.value.bank_code) {
       await api.post(`/players/${seated.id}/bank-accounts/`, {
@@ -157,7 +172,9 @@ function onModeChange(next) {
     <div class="sheet">
       <div class="grip" />
       <div class="head">
-        <div class="sheet-title">Add Player &mdash; Game-Day #{{ gameDay.current?.number ?? '—' }}</div>
+        <div class="sheet-title">
+          {{ seatNumber ? `Seat ${seatNumber}` : 'Add Player' }} &mdash; Game-Day #{{ gameDay.current?.number ?? '—' }}
+        </div>
         <button class="close-btn" type="button" @click="emit('close')">&times;</button>
       </div>
 
@@ -203,7 +220,7 @@ function onModeChange(next) {
           class="btn btn--primary" type="button" :disabled="isFull || !selectedIds.length || submitting"
           @click="onSubmitExisting"
         >
-          {{ submitting ? 'Adding…' : `Add ${selectedIds.length || ''} Selected`.trim() }}
+          {{ submitting ? 'Adding…' : seatNumber ? `Seat in Seat ${seatNumber}` : `Add ${selectedIds.length || ''} Selected`.trim() }}
         </button>
       </template>
 
@@ -226,7 +243,7 @@ function onModeChange(next) {
         <p v-if="error" class="form-error">{{ error }}</p>
 
         <button class="btn btn--primary" type="submit" :disabled="submitting">
-          {{ submitting ? 'Adding…' : 'Add to tonight' }}
+          {{ submitting ? 'Adding…' : seatNumber ? `Seat in Seat ${seatNumber}` : 'Add to tonight' }}
         </button>
       </form>
     </div>

@@ -157,6 +157,9 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
     # Null = still active at the table; set = "left the table" — see
     # gaming.services.leave_table. Added 2026-09-14.
     left_at = serializers.DateTimeField(allow_null=True)
+    # Null = seated but not assigned a specific numbered seat yet — see
+    # gaming.services.seat_player/move_seat. Added 2026-09-17.
+    seat_number = serializers.IntegerField(allow_null=True)
 
     def get_balance(self, obj):
         from . import selectors
@@ -190,6 +193,9 @@ class SeatPlayerSerializer(serializers.Serializer):
     player_id = serializers.PrimaryKeyRelatedField(source='player', queryset=Player.objects.all(), required=False)
     account_code = serializers.CharField(required=False)
     display_name = serializers.CharField(required=False)
+    # Optional — the specific seat tapped on the Cashier's screen. Omitted
+    # (e.g. the bulk "+ Add Player" flow) leaves the player unassigned.
+    seat_number = serializers.IntegerField(required=False, allow_null=True)
 
     def validate(self, data):
         has_existing = 'player' in data

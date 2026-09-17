@@ -192,7 +192,23 @@ def _ensure_seated(game_day, player, operator=None, revive=False):
         seat.save(update_fields=['left_at'])
 
 
-def seat_player(game_day, operator, player=None, player_fields=None):
+def _validate_seat_number(game_day, seat_number, exclude_player=None):
+    """
+    Raises a clean InvalidStateError for an out-of-range or already-taken
+    seat, rather than letting the DB's partial-unique constraint (see
+    GameDayPlayer.Meta) surface as a raw IntegrityError. `exclude_player`
+    lets a player "take" the seat they're already sitting in (a no-op move).
+    """
+    if not (1 <= seat_number <= MAX_ACTIVE_PLAYERS_PER_GAME_DAY):
+        raise InvalidStateError(f'Seat number must be between 1 and {MAX_ACTIVE_PLAYERS_PER_GAME_DAY}.')
+    occupied = GameDayPlayer.objects.filter(game_day=game_day, seat_number=seat_number, left_at__isnull=True)
+    if exclude_player is not None:
+        occupied = occupied.exclude(player=exclude_player)
+    if occupied.exists():
+        raise InvalidStateError(f'Seat {seat_number} is already taken.')
+
+
+def seat_player(game_day, operator, player=None, player_fields=None, seat_number=None):
     """
     The explicit "add a player for tonight" action — see CONCEPT.md's Buy-in
     flow. Either pass an existing `player`, or `player_fields` to create a new
@@ -204,6 +220,11 @@ def seat_player(game_day, operator, player=None, player_fields=None):
     _ensure_seated). Revised 2026-09-15: this can no longer revive a departed
     player at all — that's issue-chips-only now — so a departed player_id
     raises a clear InvalidStateError instead of silently re-seating them.
+
+    `seat_number` (added 2026-09-17, optional) assigns a specific numbered
+    seat at the same time — used when the Cashier taps an empty seat
+    directly. Left null (e.g. the bulk "+ Add Player" flow), the player is
+    seated "unassigned" and can be placed into a seat later via move_seat.
     """
     _require_open_game_day(game_day)
     if player is None:
@@ -216,8 +237,49 @@ def seat_player(game_day, operator, player=None, player_fields=None):
         raise InvalidStateError(
             f'{player.display_name} left the table tonight — issue them chips to bring them back, not re-seat.'
         )
+    if seat_number is not None:
+        _validate_seat_number(game_day, seat_number, exclude_player=player)
     _ensure_seated(game_day, player, operator)  # raises TableFullError for a brand-new seat at cap
+    if seat_number is not None:
+        GameDayPlayer.objects.filter(game_day=game_day, player=player).update(seat_number=seat_number)
     return player
+
+
+def move_seat(game_day, player, seat_number, operator=None):
+    """
+    Relocates an already-seated, still-active player into `seat_number` —
+    the Cashier just picks a destination; this figures out whether that's a
+    plain move (seat is free) or a SWAP (occupied by someone else) and
+    handles both identically from the caller's point of view. Added
+    2026-09-17.
+
+    Swapping nulls both rows' seat_number first, inside one atomic block,
+    before setting final values — sidesteps the partial-unique constraint
+    (GameDayPlayer.Meta) without needing a DB-specific deferrable
+    constraint, so it works the same on every backend.
+    """
+    _require_open_game_day(game_day)
+    if not (1 <= seat_number <= MAX_ACTIVE_PLAYERS_PER_GAME_DAY):
+        raise InvalidStateError(f'Seat number must be between 1 and {MAX_ACTIVE_PLAYERS_PER_GAME_DAY}.')
+    seat = GameDayPlayer.objects.filter(game_day=game_day, player=player, left_at__isnull=True).first()
+    if seat is None:
+        raise InvalidStateError(f"{player.display_name} isn't currently seated at tonight's table.")
+
+    with db_transaction.atomic():
+        occupant = GameDayPlayer.objects.filter(
+            game_day=game_day, seat_number=seat_number, left_at__isnull=True,
+        ).exclude(pk=seat.pk).first()
+        previous_seat_number = seat.seat_number
+        seat.seat_number = None
+        seat.save(update_fields=['seat_number'])
+        if occupant is not None:
+            occupant.seat_number = None
+            occupant.save(update_fields=['seat_number'])
+            occupant.seat_number = previous_seat_number
+            occupant.save(update_fields=['seat_number'])
+        seat.seat_number = seat_number
+        seat.save(update_fields=['seat_number'])
+    return seat
 
 
 def leave_table(game_day, player, operator=None):

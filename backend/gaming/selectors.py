@@ -181,6 +181,26 @@ def active_game_day_players_count(game_day):
     return GameDayPlayer.objects.filter(game_day=game_day, left_at__isnull=True).count()
 
 
+# Mirrors gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY — same duplicated-
+# constant convention already used by AddPlayerModal.vue's MAX_ACTIVE_PLAYERS,
+# to avoid a circular import (services.py already imports this module).
+_MAX_SEAT_NUMBER = 9
+
+
+def free_seat_numbers(game_day):
+    """
+    Every seat number (1..MAX) NOT currently held by an active (left_at is
+    null) seat — what the Cashier's "empty seat" pills are built from, and
+    what a move/swap picker offers as valid destinations. Added 2026-09-17.
+    """
+    occupied = set(
+        GameDayPlayer.objects.filter(
+            game_day=game_day, left_at__isnull=True, seat_number__isnull=False,
+        ).values_list('seat_number', flat=True)
+    )
+    return sorted(set(range(1, _MAX_SEAT_NUMBER + 1)) - occupied)
+
+
 PAYMENT_TYPES = {
     Transaction.Type.PAYMENT_CASH,
     Transaction.Type.PAYMENT_TRANSFER,

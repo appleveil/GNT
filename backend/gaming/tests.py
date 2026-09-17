@@ -856,6 +856,76 @@ class GameDaySeatingTests(APITestCase):
         self.assertEqual(response.data['player_id'], Player.objects.get(account_code='WWI APIFULL').id)
 
 
+class SeatNumberTests(APITestCase):
+    """
+    Numbered seats on top of GameDayPlayer's plain presence-tracking (added
+    2026-09-17) — see gaming.services.seat_player/move_seat and
+    selectors.free_seat_numbers.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.game_day = services.open_game_day(31, timezone.now(), self.owner)
+        self.a = Player.objects.create(account_code='WWI SEAT-A', display_name='Seat A')
+        self.b = Player.objects.create(account_code='WWI SEAT-B', display_name='Seat B')
+
+    def test_seat_number_out_of_range_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            services.seat_player(self.game_day, self.owner, player=self.a, seat_number=10)
+        with self.assertRaises(InvalidStateError):
+            services.seat_player(self.game_day, self.owner, player=self.a, seat_number=0)
+
+    def test_seat_number_already_taken_rejected(self):
+        services.seat_player(self.game_day, self.owner, player=self.a, seat_number=3)
+        with self.assertRaises(InvalidStateError):
+            services.seat_player(self.game_day, self.owner, player=self.b, seat_number=3)
+
+    def test_seat_number_is_optional(self):
+        player = services.seat_player(self.game_day, self.owner, player=self.a)
+        seat = GameDayPlayer.objects.get(game_day=self.game_day, player=player)
+        self.assertIsNone(seat.seat_number)
+        self.assertEqual(selectors.free_seat_numbers(self.game_day), list(range(1, 10)))
+
+    def test_seat_number_freed_on_leave(self):
+        services.seat_player(self.game_day, self.owner, player=self.a, seat_number=5)
+        self.assertNotIn(5, selectors.free_seat_numbers(self.game_day))
+        services.leave_table(self.game_day, self.a, operator=self.cashier)
+        self.assertIn(5, selectors.free_seat_numbers(self.game_day))
+        # And the freed number can immediately be taken by someone else.
+        services.seat_player(self.game_day, self.owner, player=self.b, seat_number=5)
+        self.assertEqual(
+            GameDayPlayer.objects.get(game_day=self.game_day, player=self.b).seat_number, 5,
+        )
+
+    def test_move_seat_into_a_free_seat(self):
+        services.seat_player(self.game_day, self.owner, player=self.a, seat_number=1)
+        services.move_seat(self.game_day, self.a, 7, operator=self.cashier)
+        seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.a)
+        self.assertEqual(seat.seat_number, 7)
+        self.assertIn(1, selectors.free_seat_numbers(self.game_day))
+
+    def test_move_seat_swaps_two_occupied_seats(self):
+        services.seat_player(self.game_day, self.owner, player=self.a, seat_number=1)
+        services.seat_player(self.game_day, self.owner, player=self.b, seat_number=2)
+        services.move_seat(self.game_day, self.a, 2, operator=self.cashier)
+        self.assertEqual(GameDayPlayer.objects.get(game_day=self.game_day, player=self.a).seat_number, 2)
+        self.assertEqual(GameDayPlayer.objects.get(game_day=self.game_day, player=self.b).seat_number, 1)
+
+    def test_move_seat_requires_currently_seated(self):
+        with self.assertRaises(InvalidStateError):
+            services.move_seat(self.game_day, self.a, 4, operator=self.cashier)
+
+    def test_move_seat_via_api(self):
+        services.seat_player(self.game_day, self.owner, player=self.a, seat_number=1)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(
+            f'/api/game-days/{self.game_day.id}/players/{self.a.id}/move-seat/', {'seat_number': 9},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['seat_number'], 9)
+
+
 class LeaveTableTests(APITestCase):
     """gaming.services.leave_table — see PLAN.md's "leave the table" entry."""
 
