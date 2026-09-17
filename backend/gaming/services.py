@@ -356,11 +356,29 @@ def initiate_payout(player, amount, operator, game_day=None):
     as the only guard. A pending payout already reduces this figure for any
     payout requested after it (balance selectors don't filter by status), so
     two payouts can't double-spend the same winnings.
+
+    Revised 2026-09-17, two more upfront gates: a player can't cash out while
+    still seated (leaving doesn't itself trigger a payout — the two stay
+    independent — but a payout now requires it); and a payout can't even be
+    requested without a default bank account on file, not just discovered
+    later as TRANSFER_FAILED at approval time (that approval-time check in
+    payments.services.initiate_payout_transfer stays too, as defense in
+    depth — e.g. the account being removed between request and approval).
     """
     game_day = game_day or selectors.current_open_game_day()
     if game_day is None:
         raise InvalidStateError('A game-day must be open to initiate a payout.')
     _require_open_game_day(game_day)
+
+    seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
+    if seat is None or seat.left_at is None:
+        raise InvalidStateError(
+            f'{player.display_name} must leave the table before a payout can be requested.'
+        )
+    if not player.bank_accounts.filter(is_default=True).exists():
+        raise InvalidStateError(
+            f'{player.display_name} has no bank account on file — add one before requesting a payout.'
+        )
 
     available = max(selectors.player_game_day_balance(player, game_day), Decimal('0'))
     if amount > available:

@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
+import { describeChipsVariance } from '@/utils/chipsVariance'
 import { useToast } from '@/composables/useToast'
 
 // The club-wide Game-Day Ledger (per CONCEPT.md's "Game-day ledger" worked
@@ -38,6 +39,14 @@ const voidTarget = ref(null)
 const displayStats = computed(() => {
   if (gameDay.value?.status === 'CLOSED' && gameDay.value.summary) return gameDay.value.summary
   return stats.value
+})
+// Same "pending until close" treatment as Rake — chips_variance depends on
+// both rake_total and a chips_in_total that can still change while the
+// night's open, so it's not meaningfully final until CLOSED either.
+const chipsVariance = computed(() => (displayStats.value ? describeChipsVariance(displayStats.value.chips_variance) : null))
+const chipsVarianceShortLabel = computed(() => {
+  const v = Number(displayStats.value?.chips_variance)
+  return v > 0 ? 'Deficit' : v < 0 ? 'Excess' : 'Balanced'
 })
 
 async function load() {
@@ -128,6 +137,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <div class="stat-label">Balance <span class="stat-label-note">{{ gameDay.status === 'OPEN' ? '(live)' : '' }}</span></div>
           <div class="stat-value">{{ N(displayStats.game_balance) }}</div>
         </div>
+        <div class="stat">
+          <div class="stat-label">Chips</div>
+          <div v-if="gameDay.status === 'OPEN'" class="stat-pending">pending &mdash; at close</div>
+          <div v-else class="stat-value" :class="chipsVariance.className" :title="chipsVariance.label">
+            {{ chipsVarianceShortLabel }} {{ N(chipsVariance.amount) }}
+          </div>
+        </div>
       </div>
       <p v-if="gameDay.status === 'OPEN'" class="stats-note">
         This game-day is still OPEN — rake isn't known until the rake-box is counted at close, and the balance shown is live/provisional.
@@ -169,9 +185,10 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .ledger-card { padding: 20px 24px 8px; }
 .date-line { font-size: 12px; color: var(--text-tertiary); margin-bottom: 12px; }
 
-.stats-row { display: flex; gap: 8px; margin-bottom: 6px; }
+.stats-row { display: flex; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .stat {
   flex: 1;
+  min-width: 90px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 8px 10px;
@@ -180,6 +197,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .stat-label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 2px; }
 .stat-label-note { text-transform: none; font-weight: 400; }
 .stat-value { font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.stat-value.variance--deficit { color: var(--warning-text); }
+.stat-value.variance--excess { color: var(--accent-text); }
+.stat-value.variance--balanced { color: var(--text-tertiary); }
 .stat-pending { font-size: 11.5px; font-weight: 600; color: var(--text-tertiary); }
 .stats-note { font-size: 11px; color: var(--text-tertiary); margin: 4px 0 12px; }
 

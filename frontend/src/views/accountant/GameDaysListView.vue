@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useToast } from '@/composables/useToast'
+import { describeChipsVariance } from '@/utils/chipsVariance'
 
 // Game-day history (Phase B, 2026-09-14) — GET /api/game-days/ is
 // IsAuthenticated-only (gaming/views.py's GameDayViewSet), newest first per
@@ -33,6 +34,19 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// A compact per-row read of the same signed chips_variance shown in full
+// on the detail page — lets an Accountant/Owner spot a problem night while
+// just scanning history, without opening each one. Short label only (the
+// full "Chips deficit"/"Chips excess returned" wording is used where there's
+// more room, e.g. the close dialog and the detail page's stat card).
+function chipsBadge(gd) {
+  if (!gd.summary) return null
+  const v = Number(gd.summary.chips_variance)
+  const { amount, className } = describeChipsVariance(v)
+  const label = v > 0 ? 'Deficit' : v < 0 ? 'Excess' : 'Balanced'
+  return { label, amount, className }
+}
+
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
 
@@ -48,7 +62,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
     <div v-else class="table">
       <div class="t-head">
-        <span>#</span><span>Date</span><span>Status</span><span>Rake</span><span>Game balance</span><span>Players</span><span></span>
+        <span>#</span><span>Date</span><span>Status</span><span>Rake</span><span>Chips</span><span>Game balance</span><span>Players</span><span></span>
       </div>
       <div
         v-for="gd in gameDays" :key="gd.id" class="t-row"
@@ -60,6 +74,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <span class="badge" :class="gd.status === 'OPEN' ? 'badge--open' : 'badge--closed'">{{ gd.status }}</span>
         </span>
         <span class="money">{{ gd.summary ? N(gd.summary.rake_total) : '—' }}</span>
+        <span class="money chips-cell" :class="chipsBadge(gd)?.className">
+          {{ chipsBadge(gd) ? `${chipsBadge(gd).label} ${N(chipsBadge(gd).amount)}` : '—' }}
+        </span>
         <span class="money">{{ gd.summary ? N(gd.summary.game_balance) : '—' }}</span>
         <span>{{ gd.summary ? gd.summary.num_players : '—' }}</span>
         <span class="view-link">View &rarr;</span>
@@ -78,7 +95,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }
 .t-head, .t-row {
   display: grid;
-  grid-template-columns: 60px 130px 100px 1fr 1fr 90px 70px;
+  grid-template-columns: 60px 130px 100px 1fr 1fr 1fr 90px 70px;
   align-items: center;
   padding: 0 20px;
   gap: 8px;
@@ -90,6 +107,10 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .t-row:hover { background: var(--bg); }
 .mono { font-family: var(--font-mono); color: var(--text-secondary); }
 .view-link { font-size: 12.5px; font-weight: 600; color: var(--accent-text); text-align: right; }
+.chips-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chips-cell.variance--deficit { color: var(--warning-text); }
+.chips-cell.variance--excess { color: var(--accent-text); }
+.chips-cell.variance--balanced { color: var(--text-tertiary); }
 
 @media (max-width: 860px) {
   .t-head { display: none; }

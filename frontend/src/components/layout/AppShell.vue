@@ -29,6 +29,7 @@ const tabs = computed(() => {
   if (role === 'OWNER') {
     base.push(
       { name: 'payouts', label: 'Payouts', path: '/payouts' },
+      { name: 'main-account', label: 'Main Account', path: '/main-account' },
       { name: 'admin', label: 'Admin', path: '/admin' },
     )
   }

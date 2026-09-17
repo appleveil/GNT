@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
+import { describeChipsVariance } from '@/utils/chipsVariance'
 import { useToast } from '@/composables/useToast'
 
 // Read-only game-day detail (Phase B, 2026-09-14) — same data sources as
@@ -35,6 +36,12 @@ const voidTarget = ref(null)
 const displayStats = computed(() => {
   if (gameDay.value?.status === 'CLOSED' && gameDay.value.summary) return gameDay.value.summary
   return stats.value
+})
+// Same "pending until close" treatment as Rake — see GameDayLedgerView.vue's identical note.
+const chipsVariance = computed(() => (displayStats.value ? describeChipsVariance(displayStats.value.chips_variance) : null))
+const chipsVarianceShortLabel = computed(() => {
+  const v = Number(displayStats.value?.chips_variance)
+  return v > 0 ? 'Deficit' : v < 0 ? 'Excess' : 'Balanced'
 })
 
 async function load() {
@@ -126,6 +133,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <div class="stat-label">Balance <span v-if="gameDay.status === 'OPEN'">(live)</span></div>
           <div class="stat-value">{{ N(displayStats.game_balance) }}</div>
         </div>
+        <div class="card stat-card">
+          <div class="stat-label">Chips</div>
+          <div v-if="gameDay.status === 'OPEN'" class="stat-pending">pending &mdash; at close</div>
+          <div v-else class="stat-value" :class="chipsVariance.className" :title="chipsVariance.label">
+            {{ chipsVarianceShortLabel }} {{ N(chipsVariance.amount) }}
+          </div>
+        </div>
       </div>
 
       <div class="grid-two">
@@ -169,10 +183,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .page-header h1 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0; }
 .date-line { font-size: 12.5px; color: var(--text-tertiary); margin: 0 0 20px; }
 
-.stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 20px; }
 .stat-card { padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
 .stat-label { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
 .stat-value { font-family: var(--font-mono); font-weight: 600; font-size: 19px; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.stat-value.variance--deficit { color: var(--warning-text); }
+.stat-value.variance--excess { color: var(--accent-text); }
+.stat-value.variance--balanced { color: var(--text-tertiary); }
 .stat-pending { font-size: 12px; font-weight: 600; color: var(--text-tertiary); }
 
 .grid-two { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }

@@ -138,6 +138,59 @@ to manually reselect the very game-day they just came from.
   param) is unchanged.
 - Pure frontend routing change. `npm run build` clean.
 
+### Chip variance flagging, payout sequencing, and a Main Account ledger page (2026-09-17)
+Five related reconciliation-correctness items from the user. Investigated
+each against the actual code before changing anything — two were already
+built with only a display gap, two were real gaps, one was already correct
+by design (confirmed, no change), and the last turned out to already exist
+on the backend, just never wired to a screen.
+- [x] **Chip deficit/excess flagging** — `GameDaySummary.chips_variance`
+  (signed: out − in − rake − tips) was already computed and already shown
+  in the close-confirmation dialog, but always labeled "Unreturned chips"
+  regardless of sign. New `utils/chipsVariance.js` (`describeChipsVariance`)
+  gives every screen the same sign-aware "Chips deficit" (positive, warn) /
+  "Chips excess returned" (negative, informational) / "Chips balanced"
+  (zero) treatment. Applied to `ActiveGameDayView.vue`'s close dialog (both
+  tonight's variance and the club-wide `outstanding_chips_after_close`);
+  added as a 5th stat (same "pending — at close" treatment as Rake while
+  OPEN) to `GameDayLedgerView.vue` and `GameDayDetailView.vue`, which had
+  the data already but never displayed `chips_in_total`/`chips_variance` at
+  all; added a compact "Chips" column to `GameDaysListView.vue`'s history
+  table so a problem night is visible while just scanning history.
+- [x] **A payout requires the player to have left the table** —
+  `gaming/services.py::initiate_payout` had no such check at all. Added one
+  (the seat's `left_at` must be set), before the existing balance-cap check.
+  `leave_table` itself is unchanged — leaving still doesn't trigger a
+  payout, the two stay independent. Mirrored in `PlayerDetailView.vue`'s
+  Payout button (disabled + explanatory note).
+- [x] **A bank account is required before a payout can even be requested** —
+  previously only discovered at Owner-approval time (`TRANSFER_FAILED`).
+  Added an upfront check to `initiate_payout` (a default `PlayerBankAccount`
+  must exist); kept the approval-time check too, as defense in depth for an
+  account removed between request and approval. Mirrored in
+  `PlayerDetailView.vue`'s Payout button/note.
+- Confirmed correct, no change: balances are deliberately debited at
+  payout-**request** time (not on transfer success) to prevent two pending
+  requests from double-spending the same winnings; a failed transfer stays
+  debited until an Owner retries or explicitly rejects it (which reverses
+  it) — already correct and already re-surfaces in `PayoutsView.vue`'s
+  Pending queue automatically.
+- [x] **Main Account ledger page** — `GET /api/main-account/ledger/`
+  (`gaming/views.py`'s `MainAccountLedgerView`, `IsOwner`-gated) already
+  existed and already excluded every chip transaction (only DVA sweep-ins
+  and payouts) — it simply had no frontend page. New Owner-only
+  `views/owner/MainAccountLedgerView.vue` (reuses `LedgerTable.vue`),
+  defaulting to `status === 'POSTED'` rows only with a "Show all statuses"
+  toggle; new `/main-account` route + nav tab. Payout rows stay on the
+  Game-Day ledger too (its `game_balance` total already includes them) —
+  this is a second, focused view, not a replacement.
+- 8 new/replaced backend tests (126/126 passing, was 122). `npm run build`
+  clean. Verified live via a disposable throwaway player + game-day
+  (deleted after): payout correctly blocked while seated, then blocked
+  again with no bank account, then succeeds once both are satisfied;
+  `chips_variance` sign confirmed on a deliberately unbalanced day. Real
+  game-day history (#1–#6) confirmed untouched throughout.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

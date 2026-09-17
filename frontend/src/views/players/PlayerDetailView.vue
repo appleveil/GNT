@@ -41,6 +41,24 @@ const payouts = computed(() => ledger.value.filter(r => r.type === 'PAYOUT').sli
 const payoutSubmitting = ref(false)
 const payoutError = ref('')
 
+// Revised 2026-09-17: a payout now requires the player to have left the
+// table AND have a default bank account on file (both enforced server-side
+// in gaming.services.initiate_payout) — mirror both here so the button
+// explains why it's disabled instead of just failing on click.
+const payoutBlockedReason = computed(() => {
+  if (!player.value) return ''
+  if (!(player.value.balance > 0)) {
+    return `Not available — ${player.value.display_name} owes the club, the club doesn't owe them`
+  }
+  if (!player.value.left_at) {
+    return `${player.value.display_name} must leave the table before a payout can be requested`
+  }
+  if (!(player.value.bank_accounts || []).some(b => b.is_default)) {
+    return `${player.value.display_name} has no bank account on file — add one below first`
+  }
+  return ''
+})
+
 const voidTarget = ref(null)
 function canVoid(row) {
   return canVoidTransaction(row, auth.user, gameDay.current?.status)
@@ -234,14 +252,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div class="section-title">Payout</div>
         <button
           class="btn btn--primary payout-btn" type="button"
-          :disabled="!(player.balance > 0) || payoutSubmitting"
+          :disabled="!!payoutBlockedReason || payoutSubmitting"
           @click="onPayOut"
         >
           {{ payoutSubmitting ? 'Requesting…' : 'Pay Out Balance' }}
         </button>
-        <p v-if="!(player.balance > 0)" class="payout-note">
-          Not available — {{ player.display_name }} owes the club, the club doesn't owe them
-        </p>
+        <p v-if="payoutBlockedReason" class="payout-note">{{ payoutBlockedReason }}</p>
         <p v-if="payoutError" class="form-error">{{ payoutError }}</p>
 
         <div class="payouts-list">

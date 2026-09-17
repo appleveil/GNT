@@ -49,6 +49,12 @@ const RosterDetailView = () => import('@/views/accountant/RosterDetailView.vue')
 // Owner-only additions (Phase C, 2026-09-14).
 const AdminView = () => import('@/views/owner/AdminView.vue')
 const PayoutsView = () => import('@/views/owner/PayoutsView.vue')
+// Main Account ledger (2026-09-17) — a second, focused view of real bank-
+// account activity (deposits sweeping in, payouts going out), separate from
+// the Game-Day ledger's own narrative of a night. Owner-only, matching
+// gaming/views.py's MainAccountLedgerView permission and CONCEPT.md's rule
+// that Main Account visibility excludes the Accountant.
+const MainAccountLedgerView = () => import('@/views/owner/MainAccountLedgerView.vue')
 
 const BACK_OFFICE_ROLES = ['ACCOUNTANT', 'OWNER']
 const OWNER_ONLY_ROLES = ['OWNER']
@@ -77,6 +83,7 @@ const routes = [
 
       { path: 'admin', name: 'admin', component: AdminView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'main-account', name: 'main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
     ],
   },
 

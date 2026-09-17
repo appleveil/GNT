@@ -9,6 +9,7 @@ import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
 import AddPlayerModal from '@/components/shared/AddPlayerModal.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
+import { describeChipsVariance } from '@/utils/chipsVariance'
 import { useToast } from '@/composables/useToast'
 import api from '@/api/axios'
 
@@ -24,6 +25,8 @@ const openError = ref('')
 const closePreview = ref(null) // null = confirm dialog closed
 const closing = ref(false)
 const closeError = ref('')
+const tonightsVariance = computed(() => closePreview.value ? describeChipsVariance(closePreview.value.chips_variance) : null)
+const outstandingAfterClose = computed(() => closePreview.value ? describeChipsVariance(closePreview.value.outstanding_chips_after_close) : null)
 
 async function nextGameDayNumber() {
   const { data } = await api.get('/game-days/')
@@ -347,12 +350,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <div class="stat-row"><span>Payments received</span><span class="money">{{ N(closePreview.total_payments) }}</span></div>
           <div class="stat-row"><span>Rake / Tips</span><span class="money">{{ N(closePreview.rake_total) }} / {{ N(closePreview.tips_total) }}</span></div>
           <div class="stat-row">
-            <span>Unreturned chips tonight <small>(out − in − rake − tips)</small></span>
-            <span class="money warn">{{ N(closePreview.chips_variance) }}</span>
+            <span>{{ tonightsVariance.label }} tonight <small>(out − in − rake − tips)</small></span>
+            <span class="money" :class="tonightsVariance.className">{{ N(tonightsVariance.amount) }}</span>
           </div>
           <div class="stat-row">
-            <span>Outstanding chips <small>(club-wide, after this close)</small></span>
-            <span class="money warn">{{ N(closePreview.outstanding_chips_after_close) }}</span>
+            <span>{{ outstandingAfterClose.label }} <small>(club-wide, after this close)</small></span>
+            <span class="money" :class="outstandingAfterClose.className">{{ N(outstandingAfterClose.amount) }}</span>
           </div>
           <div class="stat-row stat-row--total"><span>Game balance</span><span class="money">{{ N(closePreview.game_balance) }}</span></div>
         </div>
@@ -551,7 +554,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .stat-row small { font-size: 10.5px; color: var(--text-tertiary); }
 .stat-row--total { border-bottom: none; font-weight: 700; color: var(--text-primary); }
 .money { font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); }
-.money.warn { color: var(--warning-text); }
+.money.variance--deficit { color: var(--warning-text); }
+.money.variance--excess { color: var(--accent-text); }
+.money.variance--balanced { color: var(--text-tertiary); }
 .actions { display: flex; gap: 14px; margin-top: 16px; }
 .actions .btn { flex: 1; }
 

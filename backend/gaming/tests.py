@@ -153,6 +153,30 @@ class LedgerMathTests(TestCase):
         self.assertEqual(by_player[(self.moses.id, T.CHIPS_OUT)], Decimal(-100000))  # unaffected by Marco's rows
         self.assertEqual(by_player[(self.marco.id, T.PAYMENT_CASH)], Decimal(-300000))  # Marco's own balance only
 
+    def test_chips_variance_is_positive_when_chips_are_unreturned(self):
+        """More chips issued than accounted for by returns/rake/tips this
+        game-day — a deficit, taken off-site or simply not yet cashed back in."""
+        T, C = Transaction.Type, Transaction.Channel
+        self._txn(self.marco, T.CHIPS_OUT, 500000, C.CASHIER)
+        self._txn(self.marco, T.CHIPS_IN, 200000, C.CHIPS)
+        Transaction.objects.create(
+            game_day=self.game_day, player=None, type=T.RAKE, amount=Decimal(50000),
+            channel=C.CASHIER, recorded_by=self.cashier,
+        )
+        data = selectors.game_day_summary_data(self.game_day)
+        # 500,000 out - 200,000 in - 50,000 rake - 0 tips = 250,000 unreturned.
+        self.assertEqual(data['chips_variance'], Decimal(250000))
+
+    def test_chips_variance_is_negative_when_excess_chips_are_returned(self):
+        """More chips returned than were issued this game-day — chips that
+        went off-site on an earlier day coming back into play tonight."""
+        T, C = Transaction.Type, Transaction.Channel
+        self._txn(self.marco, T.CHIPS_OUT, 200000, C.CASHIER)
+        self._txn(self.marco, T.CHIPS_IN, 500000, C.CHIPS)
+        data = selectors.game_day_summary_data(self.game_day)
+        # 200,000 out - 500,000 in = -300,000 — excess, not a deficit.
+        self.assertEqual(data['chips_variance'], Decimal(-300000))
+
 
 class AuthorizationTests(TestCase):
     def setUp(self):
@@ -163,6 +187,13 @@ class AuthorizationTests(TestCase):
         self.fm = FloorManager(name='Floor Boss', created_by=self.owner)
         self.fm.set_pin('4321')
         self.fm.save()
+
+    def _seat_and_leave(self, gd, player):
+        """A payout now requires the player to have left the table (2026-09-17) —
+        shared setup for every payout test below that isn't specifically testing
+        that gate itself."""
+        services.seat_player(gd, self.owner, player=player)
+        services.leave_table(gd, player, operator=self.cashier)
 
     # --- game-day open/close ---
 
@@ -274,6 +305,7 @@ class AuthorizationTests(TestCase):
             player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
             account_name='Test4', is_default=True,
         )
+        self._seat_and_leave(gd, player)
         # Gives the player 50,000 in winnings this game-day — a payout is now
         # capped at what's actually been won tonight, not unlimited.
         Transaction.objects.create(
@@ -289,15 +321,52 @@ class AuthorizationTests(TestCase):
         self.assertEqual(payout.status, Transaction.Status.APPROVED)
         self.assertEqual(payout.external_reference, 'TRF_test')
 
-    def test_payout_approval_fails_without_bank_account(self):
-        """No bank account on file — Paystack transfer can't proceed, lands TRANSFER_FAILED, not silently APPROVED."""
+    def test_payout_blocked_while_still_seated(self):
+        """Revised 2026-09-17: a player can't cash out while still seated —
+        leaving and paying out are independent, but a payout now requires it."""
         gd = services.open_game_day(21, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 8', display_name='Test8')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test8', is_default=True,
+        )
+        services.seat_player(gd, self.owner, player=player)  # seated, but never left
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        with self.assertRaises(InvalidStateError):
+            services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
+
+    def test_payout_request_blocked_without_bank_account(self):
+        """Revised 2026-09-17: the bank-account gate is now enforced at
+        REQUEST time, not just discovered later at approval as TRANSFER_FAILED."""
+        gd = services.open_game_day(28, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 14', display_name='Test14')
+        self._seat_and_leave(gd, player)  # left the table, but still no bank account on file
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        with self.assertRaises(InvalidStateError):
+            services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
+
+    def test_payout_approval_fails_if_bank_account_removed_after_request(self):
+        """The approval-time check stays too, as defense in depth — e.g. the
+        bank account is removed between request and approval."""
+        gd = services.open_game_day(29, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 15', display_name='Test15')
+        bank = PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test15', is_default=True,
+        )
+        self._seat_and_leave(gd, player)
         Transaction.objects.create(
             game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
             channel=Transaction.Channel.TRANSFER_DVA,
         )
         payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=gd)
+        bank.delete()
         services.approve_payout(payout, self.owner)
         payout.refresh_from_db()
         self.assertEqual(payout.status, Transaction.Status.TRANSFER_FAILED)
@@ -306,6 +375,11 @@ class AuthorizationTests(TestCase):
         """A payout can't exceed what the player has actually won this game-day."""
         gd = services.open_game_day(22, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 9', display_name='Test9')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test9', is_default=True,
+        )
+        self._seat_and_leave(gd, player)
         Transaction.objects.create(
             game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(10000),
             channel=Transaction.Channel.TRANSFER_DVA,
@@ -323,6 +397,11 @@ class AuthorizationTests(TestCase):
     def test_owner_can_reject_a_pending_payout(self):
         gd = services.open_game_day(24, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 11', display_name='Test11')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test11', is_default=True,
+        )
+        self._seat_and_leave(gd, player)
         Transaction.objects.create(
             game_day=gd, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
             channel=Transaction.Channel.TRANSFER_DVA,
@@ -340,6 +419,11 @@ class AuthorizationTests(TestCase):
     def test_cashier_cannot_reject_a_payout(self):
         gd = services.open_game_day(25, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 12', display_name='Test12')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test12', is_default=True,
+        )
+        self._seat_and_leave(gd, player)
         payout = services.initiate_payout(player, Decimal(0), self.cashier, game_day=gd)
         with self.assertRaises(AuthorizationError):
             services.reject_payout(payout, self.cashier, 'No.')
@@ -347,6 +431,11 @@ class AuthorizationTests(TestCase):
     def test_cannot_reject_an_already_approved_payout(self):
         gd = services.open_game_day(26, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 13', display_name='Test13')
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test13', is_default=True,
+        )
+        self._seat_and_leave(gd, player)
         payout = services.initiate_payout(player, Decimal(0), self.cashier, game_day=gd)
         payout.status = Transaction.Status.APPROVED
         payout.save(update_fields=['status'])
@@ -491,6 +580,8 @@ class GameDayAndTransactionAPITests(APITestCase):
             account_name='Test Player', is_default=True,
         )
         gd = services.open_game_day(23, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        services.leave_table(gd, self.player, operator=self.cashier)  # a payout now requires this
         Transaction.objects.create(
             game_day=gd, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
             channel=Transaction.Channel.TRANSFER_DVA,
@@ -512,6 +603,12 @@ class GameDayAndTransactionAPITests(APITestCase):
 
     def test_payout_reject_flow_via_api(self):
         gd = services.open_game_day(27, timezone.now(), self.owner)
+        PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Test Player', is_default=True,
+        )
+        services.seat_player(gd, self.owner, player=self.player)
+        services.leave_table(gd, self.player, operator=self.cashier)  # a payout now requires this
         Transaction.objects.create(
             game_day=gd, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
             channel=Transaction.Channel.TRANSFER_DVA,
