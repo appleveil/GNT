@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import FloorManager, Player, PlayerBankAccount, StaffUser
+from accounts.models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
@@ -1106,3 +1106,82 @@ class DealOnClosedGameDayTests(APITestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(selectors.player_game_day_balance(self.player, self.last_closed_gd), Decimal(750))
+
+
+class TipCategoryTests(APITestCase):
+    """
+    Dealer/Service tip categorization (added 2026-09-17) — Dealer stays
+    anonymous/aggregate exactly as every Tip did before this; Service
+    requires a named, active ServiceStaff recipient. See PLAN.md's entry
+    and gaming.services.record_transaction.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner5', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier5', password='x', role=StaffUser.Role.CASHIER)
+        self.game_day = services.open_game_day(40, timezone.now(), self.owner)
+        self.fm = FloorManager(name='Floor Boss 2', created_by=self.owner)
+        self.fm.set_pin('4321')
+        self.fm.save()
+        self.person = ServiceStaff.objects.create(name='Blessing', created_by=self.owner)
+
+    def _tip(self, **kwargs):
+        return services.record_transaction(
+            type=Transaction.Type.TIP, amount=Decimal(1000), recorded_by=self.cashier,
+            game_day=self.game_day, floor_manager_id=self.fm.pk, floor_manager_pin='4321', **kwargs,
+        )
+
+    def test_dealer_tip_needs_no_recipient(self):
+        txn = self._tip(tip_category=Transaction.TipCategory.DEALER)
+        self.assertIsNone(txn.service_staff)
+        self.assertEqual(txn.tip_category, Transaction.TipCategory.DEALER)
+
+    def test_dealer_tip_rejects_a_recipient(self):
+        with self.assertRaises(InvalidStateError):
+            self._tip(tip_category=Transaction.TipCategory.DEALER, service_staff=self.person)
+
+    def test_service_tip_requires_a_recipient(self):
+        with self.assertRaises(InvalidStateError):
+            self._tip(tip_category=Transaction.TipCategory.SERVICE)
+
+    def test_service_tip_with_a_recipient_succeeds(self):
+        txn = self._tip(tip_category=Transaction.TipCategory.SERVICE, service_staff=self.person)
+        self.assertEqual(txn.service_staff, self.person)
+
+    def test_service_tip_requires_an_active_recipient(self):
+        self.person.is_active = False
+        self.person.save()
+        with self.assertRaises(InvalidStateError):
+            self._tip(tip_category=Transaction.TipCategory.SERVICE, service_staff=self.person)
+
+    def test_tip_without_a_category_is_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            self._tip()
+
+    def test_tip_category_rejected_on_a_non_tip_type(self):
+        with self.assertRaises(InvalidStateError):
+            services.record_transaction(
+                type=Transaction.Type.PAYMENT_CASH, amount=Decimal(1000), recorded_by=self.cashier,
+                game_day=self.game_day, tip_category=Transaction.TipCategory.DEALER,
+                floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            )
+
+    def test_service_tip_via_api(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'type': 'TIP', 'amount': '2000', 'game_day': self.game_day.id,
+            'tip_category': 'SERVICE', 'service_staff': self.person.id,
+            'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['service_staff'], self.person.id)
+
+    def test_dealer_tip_via_api_without_recipient(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'type': 'TIP', 'amount': '2000', 'game_day': self.game_day.id,
+            'tip_category': 'DEALER',
+            'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertIsNone(response.data['service_staff'])

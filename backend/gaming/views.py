@@ -256,6 +256,7 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
             game_day=data.get('game_day'), player=data.get('player'), notes=data.get('notes', ''),
             currency=data.get('currency', 'NGN'), conversion_rate=data.get('conversion_rate'),
             floor_manager_id=data.get('floor_manager_id'), floor_manager_pin=data.get('floor_manager_pin'),
+            tip_category=data.get('tip_category'), service_staff=data.get('service_staff'),
         )
         return Response(TransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
 

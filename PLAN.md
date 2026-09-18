@@ -253,6 +253,34 @@ that login is for.
   `/api/dashboard/` (403, not Accountant/Owner) — all cleaned up after,
   real staff/game-day data confirmed untouched.
 
+### Dealer vs Service tip categorization (2026-09-17)
+Final piece of the Floor-Manager/Service-Staff batch — the actual reason
+that roster exists. Confirmed no chip/tip "category" concept existed
+anywhere before this; `TIP` was always anonymous/aggregate with no
+recipient field, and CONCEPT.md had already flagged this exact gap as
+deliberately deferred ("Worker/Dealer as first-class user-types... will
+likely require a schema change to Transaction.TIP").
+- [x] `Transaction.TipCategory` (`DEALER`/`SERVICE`) + `tip_category` +
+  `service_staff` (FK → `ServiceStaff`, `PROTECT` — a historical tip never
+  loses who it was attributed to even if that person is later deactivated).
+  Both fields are meaningful only for `type=TIP`; validated in
+  `record_transaction` (a TIP requires a category; `SERVICE` requires an
+  active recipient; `DEALER` must not have one) — same pattern as every
+  other type-conditional field on this model.
+- [x] `TransactionEntryModal.vue`'s Tip flow gains a Dealer/Service radio
+  and, only for Service, a select of active Service Staff (fetched from
+  the roster built in the previous entry) — everything else about
+  recording a Tip (amount, FM-PIN confirmation) is unchanged. Dealer tips
+  keep today's exact behavior: anonymous, aggregate, no recipient.
+- No change to `tips_total`/`chips_variance` arithmetic — this is
+  attribution layered on top of the existing sum, not a new figure.
+- 9 new backend tests (151/151 passing, was 142). `npm run build` clean.
+  Verified live against the real dev DB (migration applied) via a
+  disposable throwaway game-day/Floor-Manager/Service-Staff record: a
+  Dealer tip recorded with no recipient, a Service tip recorded with one,
+  and a Service tip missing a recipient correctly rejected — all cleaned
+  up after, real game-day history confirmed untouched.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

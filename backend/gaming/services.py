@@ -363,6 +363,7 @@ DEFAULT_CHANNEL_BY_TYPE = {
 def record_transaction(
     *, type, amount, recorded_by, game_day=None, player=None, notes='', currency='NGN',
     conversion_rate=None, channel=None, floor_manager_id=None, floor_manager_pin=None,
+    tip_category=None, service_staff=None,
 ):
     """
     The general entry point for recording a ledger-affecting event (chips, cash,
@@ -381,8 +382,24 @@ def record_transaction(
     seating (_ensure_seated) is skipped entirely: that night's roster is
     already final, and a retroactive ledger entry shouldn't reopen its
     active-player cap or resurrect anyone into its seated list.
+
+    A TIP requires `tip_category` (added 2026-09-17): DEALER stays anonymous/
+    aggregate exactly as every Tip did before this (no recipient, tips_total
+    arithmetic unaffected — this is attribution layered on top, not a new
+    ledger figure); SERVICE requires an active `service_staff` recipient.
+    Neither field applies to any other type.
     """
     _require_open_game_day(game_day, type)
+    if type == Transaction.Type.TIP:
+        if tip_category not in (Transaction.TipCategory.DEALER, Transaction.TipCategory.SERVICE):
+            raise InvalidStateError('A Tip must specify a category: Dealer or Service.')
+        if tip_category == Transaction.TipCategory.SERVICE:
+            if service_staff is None or not service_staff.is_active:
+                raise InvalidStateError('A Service tip requires an active Service Staff recipient.')
+        elif service_staff is not None:
+            raise InvalidStateError('A Dealer tip cannot have a Service Staff recipient.')
+    elif tip_category is not None or service_staff is not None:
+        raise InvalidStateError('tip_category/service_staff only apply to a Tip.')
     if type == Transaction.Type.CHIPS_OUT and player is not None and player.chips_limit is not None:
         current_balance = selectors.player_game_day_balance(player, game_day) if game_day else Decimal('0')
         debt_after = max(Decimal('0'), amount - current_balance)
@@ -404,6 +421,7 @@ def record_transaction(
         channel=channel or DEFAULT_CHANNEL_BY_TYPE[type], notes=notes,
         recorded_by=recorded_by, floor_manager=fm,
         confirmed_at=timezone.now() if fm else None,
+        tip_category=tip_category, service_staff=service_staff,
     )
 
 

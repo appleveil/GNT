@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.db import models
 
-from accounts.models import FloorManager, Player, StaffUser
+from accounts.models import FloorManager, Player, ServiceStaff, StaffUser
 
 
 class GameDay(models.Model):
@@ -147,6 +147,16 @@ class Transaction(models.Model):
         RAKE = 'RAKE', 'Rake'
         TIP = 'TIP', 'Tip'
 
+    class TipCategory(models.TextChoices):
+        """
+        Added 2026-09-17 — meaningful only when type=TIP. DEALER stays
+        anonymous/aggregate exactly like every Tip did before this (no
+        recipient); SERVICE requires a named service_staff recipient. See
+        gaming.selectors/services for the validation, and accounts.models.ServiceStaff.
+        """
+        DEALER = 'DEALER', 'Dealer'
+        SERVICE = 'SERVICE', 'Service'
+
     class Channel(models.TextChoices):
         CASHIER = 'CASHIER', 'Cashier'
         TRANSFER_DVA = 'TRANSFER_DVA', 'Transfer (DVA)'
@@ -192,6 +202,17 @@ class Transaction(models.Model):
         FloorManager, on_delete=models.PROTECT, null=True, blank=True, related_name='transactions_confirmed',
     )  # set for physical-count types: CHIPS_*, PAYMENT_CASH, RAKE, TIP
     confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    # Meaningful only for type=TIP — see TipCategory. tip_category is required
+    # on every TIP; service_staff is required when tip_category=SERVICE and
+    # must be blank for DEALER (validated in services.record_transaction, not
+    # at the DB level — same pattern as every other type-conditional field
+    # here, e.g. floor_manager/currency). PROTECT so a historical tip never
+    # loses who it was attributed to, even if that person is later deactivated.
+    tip_category = models.CharField(max_length=10, choices=TipCategory.choices, null=True, blank=True)
+    service_staff = models.ForeignKey(
+        ServiceStaff, on_delete=models.PROTECT, null=True, blank=True, related_name='tips_received',
+    )
 
     # Only PAYOUT uses the non-POSTED states — every payout requires Owner approval.
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.POSTED)

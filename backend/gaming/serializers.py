@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from accounts.models import Player
+from accounts.models import Player, ServiceStaff
 from accounts.serializers import PlayerBankAccountSerializer
 
 from .models import ConversionRate, GameDay, GameDaySummary, Transaction
@@ -96,7 +96,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             'id', 'game_day', 'player', 'type', 'amount', 'currency', 'conversion_rate',
             'channel', 'notes', 'recorded_by', 'floor_manager', 'confirmed_at', 'status',
             'approved_by', 'approved_at', 'is_voided', 'voided_by', 'voided_at', 'void_reason',
-            'external_reference', 'created_at',
+            'external_reference', 'created_at', 'tip_category', 'service_staff',
         ]
         read_only_fields = [f for f in fields if f not in ('game_day', 'player', 'type', 'amount', 'notes')]
 
@@ -123,6 +123,15 @@ class RecordTransactionSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, default='')
     floor_manager_id = serializers.IntegerField(required=False, allow_null=True)
     floor_manager_pin = serializers.CharField(required=False, allow_blank=True)
+    # Meaningful only for type=TIP — see Transaction.TipCategory. Further
+    # cross-field validation (required for a TIP, SERVICE needs an active
+    # service_staff, DEALER must not have one) happens in
+    # gaming.services.record_transaction, not here — same pattern as this
+    # serializer's other type-conditional fields.
+    tip_category = serializers.ChoiceField(choices=Transaction.TipCategory.choices, required=False, allow_null=True)
+    service_staff = serializers.PrimaryKeyRelatedField(
+        queryset=ServiceStaff.objects.all(), required=False, allow_null=True,
+    )
 
 
 class VoidTransactionSerializer(serializers.Serializer):

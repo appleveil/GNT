@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
 import { TRANSACTION_TYPES } from '@/constants/transactionTypes'
@@ -31,6 +31,25 @@ const conversionRate = ref('')
 const rateHint = ref('')
 const submitting = ref(false)
 const error = ref('')
+
+// Dealer/Service tip categorization (added 2026-09-17) — Dealer stays
+// anonymous/aggregate (no recipient, same as every Tip before this);
+// Service requires picking a named, active Service Staff person.
+const isTip = computed(() => props.type === 'TIP')
+const tipCategory = ref('DEALER')
+const serviceStaffList = ref([])
+const selectedServiceStaffId = ref('')
+
+onMounted(async () => {
+  if (!isTip.value) return
+  try {
+    const { data } = await api.get('/service-staff/')
+    serviceStaffList.value = data.filter(p => p.is_active)
+  } catch {
+    // Picker just stays empty — the Floor-Manager PIN step still surfaces
+    // any real problem when the entry is actually submitted.
+  }
+})
 
 async function onCurrencyChange() {
   rateHint.value = ''
@@ -75,6 +94,7 @@ const canSubmit = computed(() => {
   if (!amount.value || Number(amount.value) <= 0) return false
   if (exceedsChipsLimit.value) return false
   if (config.value.needsCurrency && currency.value !== 'NGN' && !conversionRate.value) return false
+  if (isTip.value && tipCategory.value === 'SERVICE' && !selectedServiceStaffId.value) return false
   return true
 })
 
@@ -97,6 +117,10 @@ async function doSave(extra = {}) {
   if (config.value.needsCurrency && currency.value !== 'NGN') {
     payload.currency = currency.value
     payload.conversion_rate = conversionRate.value
+  }
+  if (isTip.value) {
+    payload.tip_category = tipCategory.value
+    if (tipCategory.value === 'SERVICE') payload.service_staff = selectedServiceStaffId.value
   }
   await api.post('/transactions/', payload)
 }
@@ -184,6 +208,30 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
       <template v-if="config.needsProvider">
         <div class="lbl">Card reader / provider <span class="opt">(optional)</span></div>
         <input v-model="provider" type="text" placeholder="e.g. Terminal 1 · Moniepoint" />
+      </template>
+
+      <template v-if="isTip">
+        <div class="lbl">Category</div>
+        <div class="tip-category-row">
+          <label class="tip-category">
+            <input v-model="tipCategory" type="radio" value="DEALER" />
+            Dealer
+          </label>
+          <label class="tip-category">
+            <input v-model="tipCategory" type="radio" value="SERVICE" />
+            Service
+          </label>
+        </div>
+        <template v-if="tipCategory === 'SERVICE'">
+          <div class="lbl">Received by</div>
+          <select v-model="selectedServiceStaffId" class="select">
+            <option value="" disabled>Select a person…</option>
+            <option v-for="p in serviceStaffList" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <p v-if="!serviceStaffList.length" class="rate-hint">
+            No Service Staff on file yet — add one first (Floor Manager's "Service Staff" screen).
+          </p>
+        </template>
       </template>
 
       <div class="lbl">Notes <span class="opt">(optional)</span></div>
@@ -289,6 +337,9 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
   margin-bottom: 14px;
 }
 .rate-hint { font-size: 11.5px; color: var(--text-tertiary); margin: -8px 0 14px; }
+
+.tip-category-row { display: flex; gap: 16px; margin-bottom: 14px; }
+.tip-category { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--text-primary); cursor: pointer; }
 
 .notice {
   display: flex;
