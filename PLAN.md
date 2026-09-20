@@ -350,6 +350,66 @@ free (master-ledger pattern) — no reconciliation tooling needed, as usual.
   Slate tokens, no app code yet) for review, then the actual Android/iOS
   Expo app — see the approved plan.
 
+### "Deals" mobile app — real Expo build, v1 kicked off (2026-09-20)
+The HTML mockup above went through many rounds of feedback (sticky
+search/filter headers with a scroll shadow, a bottom tab bar, ineligible
+deal types greyed out, a redesigned Transfer layout, Stake/Payout as
+separate opt-in section cards, a read-only Profit Split history detail
+screen, required/optional field marking) before this started — see the
+artifact history in that conversation for the full trail. Two real
+architecture decisions were made along the way, both deliberate departures
+from "wired into the Django API from day one":
+
+- **Deal writes are local-only for now.** The Owner needs to start using
+  Deals immediately, before the rest of the Owner app exists on mobile —
+  waiting for a real sync/conflict-resolution layer risked exactly the
+  "forgotten deal" problem this exists to prevent. Every Deal (Fixed,
+  Transfer, Profit Split create/end) is saved to an on-device SQLite table
+  and nothing else — no queue, no retry, no backend call at all on that
+  path. **A manual reconciliation into the real system is expected later**,
+  once the rest of the Owner app is ready; an **Export** action on History
+  (CSV via the native share sheet) exists specifically to make that
+  reconciliation less error-prone than transcribing off the phone screen.
+- **Players/balances ARE read from the real backend**, cached locally and
+  falling back to that cache on any failure (offline, expired session,
+  server error) — the one exception to "no network calls," because the
+  Deal-type picker's disabled states and every cap check are meaningless
+  without real balances. Silent auth (no login screen in v1 — see the
+  approved plan): a dedicated Owner login lives in a gitignored
+  `src/api/config.ts` (`config.example.ts` checked in as the template),
+  used only for `GET` requests. Flagged plainly in code comments as a
+  security simplification acceptable only for a single trusted personal
+  device — must become real per-user login before this is ever shared or
+  distributed.
+- Deferred to later, noted but not built: exporting/sharing a Deal
+  **to WhatsApp specifically** to notify the player directly, possibly via
+  a future player-facing app instead of (or alongside) WhatsApp.
+
+Built: Expo (React Native + TypeScript) project at `mobile/`, SDK 57.
+`src/theme/tokens.ts` — Ledger Slate's palette ported from the web app's
+`oklch()` values to plain hex (computed via the standard OKLab conversion
+matrices, not eyeballed). `src/db/` — the local `deals` log (one table,
+JSON payload per kind — deliberately not fully normalized, so a new Deal
+kind never needs a schema migration) plus the CSV export. `src/api/` — the
+read-only players client with local caching. Navigation: a bottom-tab root
+(Deals / History) matching the mockup, each a native-stack for its
+drill-down flow. All seven screens built: Deals home (search, live
+balances, "profit split active" tag), the deal-type picker (disabled
+states), Fixed, Transfer (fixed-top/scroll-middle/fixed-bottom layout),
+Profit Split (Stake/Payout opt-in toggles, an active arrangement's status
+card + End action), History (filter chips + export), and the read-only
+Profit Split detail screen.
+- Verified: `tsc --noEmit` clean across the whole project; `expo export`
+  succeeds for both iOS and Android bundle targets (1000+ modules each,
+  no resolution/native-module errors); a real login against the running
+  dev backend (`owner1`) confirmed working via curl before wiring the
+  client to it.
+- Not yet done: an actual run on a simulator/device (needs an Android AVD
+  created, or Xcode updated past its current stale 13.4.1 for iOS — see
+  the approved plan's tooling notes), IBM Plex Sans/Mono bundled via
+  `expo-font` (currently falls back to the system font), and the
+  WhatsApp-export idea above.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`
