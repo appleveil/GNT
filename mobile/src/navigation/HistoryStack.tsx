@@ -18,7 +18,11 @@ export default function HistoryStack() {
       }}
     >
       <Stack.Screen name="History" component={HistoryScreen} options={{ title: 'History' }} />
-      <Stack.Screen name="ProfitSplitDetail" component={ProfitSplitDetailScreen} options={{ title: 'Profit split' }} />
+      <Stack.Screen
+        name="ProfitSplitDetail"
+        component={ProfitSplitDetailScreen}
+        options={{ title: 'Stake and Profit splits' }}
+      />
     </Stack.Navigator>
   );
 }

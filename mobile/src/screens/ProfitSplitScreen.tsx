@@ -1,11 +1,13 @@
-import React, { useCallback, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useRef, useState } from 'react';
+import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useHeaderHeight } from '@react-navigation/elements';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { DealsStackParamList } from '../navigation/types';
 import type { PayoutBasis, PayoutSplitMethod, ResetCadence } from '../types';
 import {
   Field,
+  KeyboardAvoidingScreen,
   MoneyInput,
   OutlineDangerButton,
   PrimaryButton,
@@ -15,6 +17,7 @@ import {
   naira,
 } from '../components/ui';
 import { getActiveProfitSplit, insertDeal } from '../db/deals';
+import { useKeyboardVisible } from '../hooks/useKeyboardVisible';
 import { colors, radii, spacing } from '../theme/tokens';
 import { PercentCircleIcon, PayoutIcon } from '../components/icons';
 
@@ -30,6 +33,8 @@ const CADENCE_OPTIONS: { label: string; value: ResetCadence }[] = [
 
 export default function ProfitSplitScreen({ route }: Props) {
   const { player } = route.params;
+  const headerHeight = useHeaderHeight();
+  const scrollRef = useRef<ScrollView>(null);
   const [active, setActive] = useState<ActiveArrangement | null>(null);
 
   const [stakeOn, setStakeOn] = useState(false);
@@ -48,6 +53,14 @@ export default function ProfitSplitScreen({ route }: Props) {
   const [fixedOffset, setFixedOffset] = useState('');
 
   const [saving, setSaving] = useState(false);
+  // Extra bottom scroll-slack is only needed while the keyboard is
+  // actually up. Tied to the keyboard itself rather than to which field
+  // is focused — a focus/blur-gated version restores too early (tabbing
+  // between fields) or not at all (keyboard dismissed some other way,
+  // e.g. tapping outside) — and gating it permanently on instead left a
+  // large dead gap at the bottom of the form even at rest.
+  const keyboardVisible = useKeyboardVisible();
+  const onBottomFieldFocus = () => scrollRef.current?.scrollToEnd({ animated: true });
 
   function resetForm() {
     setStakeOn(false);
@@ -80,50 +93,76 @@ export default function ProfitSplitScreen({ route }: Props) {
 
   async function onEnd() {
     if (!active) return;
-    await insertDeal({
-      kind: 'PROFIT_SPLIT_ENDED',
-      playerId: player.id,
-      playerName: player.displayName,
-      arrangementId: active.id,
-    });
-    setActive(null);
+    try {
+      await insertDeal({
+        kind: 'PROFIT_SPLIT_ENDED',
+        playerId: player.id,
+        playerName: player.displayName,
+        arrangementId: active.id,
+      });
+      setActive(null);
+      Alert.alert('Arrangement ended', `${player.displayName}'s Profit Split arrangement has been ended.`);
+    } catch (e: any) {
+      Alert.alert('Failed to end arrangement', e?.message ?? 'Something went wrong. Please try again.');
+    }
+  }
+
+  // Turning the stake off makes "Ratio: according to stake" meaningless —
+  // see the disabled RadioOption below. Switch away from it automatically
+  // so the form never sits on an invalid/inapplicable selection.
+  function onStakeToggle(on: boolean) {
+    setStakeOn(on);
+    if (!on && splitMethod === 'STAKE_RATIO') setSplitMethod('CUSTOM_RATIO');
   }
 
   const stakeValid = !stakeOn || (parseFloat(stakePct) > 0 && cap.trim().length > 0);
+  const splitMethodApplicable = splitMethod !== 'STAKE_RATIO' || stakeOn;
   const payoutValid =
     !payoutOn ||
-    (splitMethod === 'CUSTOM_RATIO' ? customRatioPct.trim().length > 0 : true) &&
-      (splitMethod === 'FIXED' ? fixedAmount.trim().length > 0 : true);
+    (splitMethodApplicable &&
+      (splitMethod === 'CUSTOM_RATIO' ? customRatioPct.trim().length > 0 : true) &&
+      (splitMethod === 'FIXED' ? fixedAmount.trim().length > 0 : true));
   const canSubmit = (stakeOn || payoutOn) && stakeValid && payoutValid;
 
   async function onSubmit() {
     if (!canSubmit) return;
     setSaving(true);
-    await insertDeal({
-      kind: 'PROFIT_SPLIT_CREATED',
-      playerId: player.id,
-      playerName: player.displayName,
-      stakeOn,
-      stakePct: stakeOn ? parseFloat(stakePct) || 0 : null,
-      cap: stakeOn ? parseFloat(cap) || 0 : null,
-      renews: stakeOn ? renews : null,
-      until: stakeOn && renews !== 'ONE_OFF' && until ? until : null,
-      maxTimes: stakeOn && renews !== 'ONE_OFF' && maxTimes ? parseInt(maxTimes, 10) : null,
-      maxValue: stakeOn && renews !== 'ONE_OFF' && maxValue ? parseFloat(maxValue) : null,
-      payoutOn,
-      payoutBasis: payoutOn ? payoutBasis : null,
-      payoutSplitMethod: payoutOn ? splitMethod : null,
-      customRatioPct: payoutOn && splitMethod === 'CUSTOM_RATIO' ? parseFloat(customRatioPct) || 0 : null,
-      fixedAmount: payoutOn && splitMethod === 'FIXED' ? parseFloat(fixedAmount) || 0 : null,
-      fixedOffset: payoutOn && splitMethod === 'FIXED' && fixedOffset ? parseFloat(fixedOffset) : null,
-    });
-    setSaving(false);
-    resetForm();
+    try {
+      await insertDeal({
+        kind: 'PROFIT_SPLIT_CREATED',
+        playerId: player.id,
+        playerName: player.displayName,
+        stakeOn,
+        stakePct: stakeOn ? parseFloat(stakePct) || 0 : null,
+        cap: stakeOn ? parseFloat(cap) || 0 : null,
+        renews: stakeOn ? renews : null,
+        until: stakeOn && renews !== 'ONE_OFF' && until ? until : null,
+        maxTimes: stakeOn && renews !== 'ONE_OFF' && maxTimes ? parseInt(maxTimes, 10) : null,
+        maxValue: stakeOn && renews !== 'ONE_OFF' && maxValue ? parseFloat(maxValue) : null,
+        payoutOn,
+        payoutBasis: payoutOn ? payoutBasis : null,
+        payoutSplitMethod: payoutOn ? splitMethod : null,
+        customRatioPct: payoutOn && splitMethod === 'CUSTOM_RATIO' ? parseFloat(customRatioPct) || 0 : null,
+        fixedAmount: payoutOn && splitMethod === 'FIXED' ? parseFloat(fixedAmount) || 0 : null,
+        fixedOffset: payoutOn && splitMethod === 'FIXED' && fixedOffset ? parseFloat(fixedOffset) : null,
+      });
+      Alert.alert('Arrangement saved', `A Profit Split arrangement has been set up for ${player.displayName}.`);
+      resetForm();
+      getActiveProfitSplit(player.id).then((a) => setActive(a as ActiveArrangement | null));
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message ?? 'Something went wrong saving this arrangement. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.bg }}>
-      <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+    <KeyboardAvoidingScreen verticalOffset={headerHeight}>
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={[styles.scrollContent, keyboardVisible && styles.scrollContentFocused]}
+        keyboardShouldPersistTaps="handled"
+      >
         {active ? (
           <View style={styles.statusCard}>
             <View style={styles.statusTop}>
@@ -152,13 +191,13 @@ export default function ProfitSplitScreen({ route }: Props) {
             title="No stake"
             subtitle="House doesn't cover any of the buy-in — the default."
             checked={!stakeOn}
-            onPress={() => setStakeOn(false)}
+            onPress={() => onStakeToggle(false)}
           />
           <RadioOption
             title="Set a stake"
             subtitle="House covers part of the buy-in, up to a cap."
             checked={stakeOn}
-            onPress={() => setStakeOn(true)}
+            onPress={() => onStakeToggle(true)}
           />
 
           {stakeOn ? (
@@ -185,7 +224,12 @@ export default function ProfitSplitScreen({ route }: Props) {
                     optional
                     helper="Whichever of these is reached first ends the arrangement."
                   >
-                    <MoneyInput value={maxValue} onChangeText={setMaxValue} placeholder="Unlimited" />
+                    <MoneyInput
+                      value={maxValue}
+                      onChangeText={setMaxValue}
+                      placeholder="Unlimited"
+                      onFocus={onBottomFieldFocus}
+                    />
                   </Field>
                 </View>
               ) : null}
@@ -230,10 +274,11 @@ export default function ProfitSplitScreen({ route }: Props) {
               <RadioOption
                 title="Ratio: according to stake"
                 subtitle={
-                  stakeOn ? `Matches the house stake of ${stakePct || 0}% above.` : 'No stake is set above — pick a different method, or set a stake first.'
+                  stakeOn ? `Matches the house stake of ${stakePct || 0}% above.` : "Not applicable — no stake is set above."
                 }
                 checked={splitMethod === 'STAKE_RATIO'}
                 onPress={() => setSplitMethod('STAKE_RATIO')}
+                disabled={!stakeOn}
               />
               <RadioOption
                 title="Ratio: house percentage"
@@ -251,21 +296,35 @@ export default function ProfitSplitScreen({ route }: Props) {
               {splitMethod === 'CUSTOM_RATIO' ? (
                 <View style={styles.conditional}>
                   <Field label="House percentage" required>
-                    <MoneyInput value={customRatioPct} onChangeText={setCustomRatioPct} prefix="" placeholder="0" />
+                    <MoneyInput
+                      value={customRatioPct}
+                      onChangeText={setCustomRatioPct}
+                      prefix=""
+                      placeholder="0"
+                      onFocus={onBottomFieldFocus}
+                    />
                   </Field>
                 </View>
               ) : null}
               {splitMethod === 'FIXED' ? (
                 <View style={styles.conditional}>
                   <Field label="Amount" required>
-                    <MoneyInput value={fixedAmount} onChangeText={setFixedAmount} />
+                    <MoneyInput
+                      value={fixedAmount}
+                      onChangeText={setFixedAmount}
+                      onFocus={onBottomFieldFocus}
+                    />
                   </Field>
                   <Field
                     label="Off-set"
                     optional
                     helper="Player keeps this much first; the house's fixed amount comes out of what's above it."
                   >
-                    <MoneyInput value={fixedOffset} onChangeText={setFixedOffset} />
+                    <MoneyInput
+                      value={fixedOffset}
+                      onChangeText={setFixedOffset}
+                      onFocus={onBottomFieldFocus}
+                    />
                   </Field>
                 </View>
               ) : null}
@@ -280,11 +339,17 @@ export default function ProfitSplitScreen({ route }: Props) {
       <View style={styles.footer}>
         <PrimaryButton title="Save arrangement" onPress={onSubmit} disabled={!canSubmit} loading={saving} />
       </View>
-    </View>
+    </KeyboardAvoidingScreen>
   );
 }
 
 const styles = StyleSheet.create({
+  scrollContent: { padding: spacing.lg },
+  // Slack to scroll into so scrollToEnd (or the OS's own focus-scroll) has
+  // somewhere to actually reveal the focused field — applied only while
+  // one of the form's bottom-most fields is focused (see
+  // keyboardVisible), not permanently.
+  scrollContentFocused: { paddingBottom: spacing.lg + 220 },
   statusCard: {
     borderWidth: 1.5,
     borderColor: colors.accent,

@@ -42,7 +42,7 @@ export default function DealTypePickerScreen({ route, navigation }: Props) {
         onPress={() => navigation.navigate('Transfer', { player })}
       />
       <DealTypeButton
-        title="Profit split"
+        title="Stake and Profit splits"
         description="A standing arrangement — house covers part of buy-in and/or takes a payout cut."
         onPress={() => navigation.navigate('ProfitSplit', { player })}
       />

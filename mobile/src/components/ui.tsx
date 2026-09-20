@@ -1,6 +1,50 @@
 import React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View, ViewStyle } from 'react-native';
+import {
+  ActivityIndicator,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableWithoutFeedback,
+  View,
+  ViewStyle,
+} from 'react-native';
 import { colors, radii, spacing } from '../theme/tokens';
+
+/**
+ * Wraps a form screen with the standard keyboard-avoidance pattern: shifts
+ * content up so the focused field stays above the keyboard (iOS needs
+ * `padding` behavior; Android already resizes the window by default), and
+ * dismisses the keyboard on a tap outside any input. Use for any screen
+ * with a TextInput near the bottom of the screen — see FixedScreen,
+ * TransferScreen, ProfitSplitScreen.
+ */
+export function KeyboardAvoidingScreen({
+  children,
+  verticalOffset = 0,
+}: {
+  children: React.ReactNode;
+  /** Pass useHeaderHeight() here — KeyboardAvoidingView has no way to know
+   * the native-stack header's height on its own, and undercounting it is
+   * exactly the kind of gap that leaves a bottom-of-screen field (like a
+   * Reason textarea) still covered. */
+  verticalOffset?: number;
+}) {
+  return (
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={verticalOffset}
+    >
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <View style={{ flex: 1 }}>{children}</View>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
+  );
+}
 
 /** Formats a Naira amount the same way the mockup does: "₦12,345" — no decimals, sign handled by the caller. */
 export function naira(amount: number): string {
@@ -84,11 +128,15 @@ export function MoneyInput({
   onChangeText,
   placeholder = '0.00',
   prefix = '₦',
+  onFocus,
+  onBlur,
 }: {
   value: string;
   onChangeText: (v: string) => void;
   placeholder?: string;
   prefix?: string;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   return (
     <View style={styles.moneyInput}>
@@ -100,6 +148,8 @@ export function MoneyInput({
         placeholder={placeholder}
         placeholderTextColor={colors.textTertiary}
         keyboardType="decimal-pad"
+        onFocus={onFocus}
+        onBlur={onBlur}
       />
     </View>
   );
@@ -110,11 +160,15 @@ export function TextField({
   onChangeText,
   placeholder,
   multiline,
+  onFocus,
+  onBlur,
 }: {
   value: string;
   onChangeText: (v: string) => void;
   placeholder?: string;
   multiline?: boolean;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   return (
     <TextInput
@@ -124,6 +178,8 @@ export function TextField({
       placeholder={placeholder}
       placeholderTextColor={colors.textTertiary}
       multiline={multiline}
+      onFocus={onFocus}
+      onBlur={onBlur}
     />
   );
 }
@@ -184,20 +240,26 @@ export function RadioOption({
   subtitle,
   checked,
   onPress,
+  disabled,
 }: {
   title: string;
   subtitle: string;
   checked: boolean;
   onPress: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} style={[styles.radioOpt, checked && styles.radioOptChecked]}>
-      <View style={[styles.radioDot, checked && styles.radioDotChecked]}>
-        {checked ? <View style={styles.radioDotInner} /> : null}
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      disabled={disabled}
+      style={[styles.radioOpt, checked && !disabled && styles.radioOptChecked, disabled && styles.radioOptDisabled]}
+    >
+      <View style={[styles.radioDot, checked && !disabled && styles.radioDotChecked]}>
+        {checked && !disabled ? <View style={styles.radioDotInner} /> : null}
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={styles.radioTitle}>{title}</Text>
-        <Text style={styles.radioSubtitle}>{subtitle}</Text>
+        <Text style={[styles.radioTitle, disabled && styles.radioTextDisabled]}>{title}</Text>
+        <Text style={[styles.radioSubtitle, disabled && styles.radioTextDisabled]}>{subtitle}</Text>
       </View>
     </Pressable>
   );
@@ -318,6 +380,8 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   radioOptChecked: { borderColor: colors.accent, backgroundColor: colors.accentBg },
+  radioOptDisabled: { opacity: 0.45 },
+  radioTextDisabled: { color: colors.textTertiary },
   radioDot: {
     width: 16,
     height: 16,

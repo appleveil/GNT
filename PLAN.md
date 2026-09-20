@@ -404,11 +404,77 @@ Profit Split detail screen.
   no resolution/native-module errors); a real login against the running
   dev backend (`owner1`) confirmed working via curl before wiring the
   client to it.
-- Not yet done: an actual run on a simulator/device (needs an Android AVD
-  created, or Xcode updated past its current stale 13.4.1 for iOS — see
-  the approved plan's tooling notes), IBM Plex Sans/Mono bundled via
-  `expo-font` (currently falls back to the system font), and the
-  WhatsApp-export idea above.
+- Not yet done: a real Android AVD/updated-Xcode simulator run (verified
+  instead via Expo Go on a physical device — see the follow-up entry
+  below), IBM Plex Sans/Mono bundled via `expo-font` (currently falls back
+  to the system font), and the WhatsApp-export idea above.
+
+### "Deals" mobile app — first real-device pass: networking, ledger effects, UX fixes (2026-09-20)
+Getting it running in Expo Go on a physical phone surfaced one infra gap,
+then a batch of real usability feedback once players were visible.
+
+- [x] **Django dev server unreachable from the phone** — was bound to
+  `127.0.0.1:8000` (meaningless from any device but the Mac itself).
+  Restarted bound to `0.0.0.0:8000`; added the Mac's LAN IP to
+  `ALLOWED_HOSTS` (`backend/lpc_backend/settings/local.py`); pointed
+  `mobile/src/api/config.ts`'s `API_BASE_URL` at that LAN IP. Noted in
+  code comments that the IP can change if Wi-Fi reconnects.
+- [x] **Local balance overlay** — since Deal writes are local-only (no
+  backend call), the cached backend balance alone would drift stale the
+  moment a Deal is saved. New `src/db/effectiveBalance.ts` computes each
+  player's net local adjustment from the saved Deal log (Fixed: `+amount`;
+  Transfer: `-amount` source / `+amount` destination; Profit Split: no
+  balance effect) and layers it on the cached balance everywhere a balance
+  is shown or capped against (Deals home list, Transfer's source balance
+  and target list).
+- [x] On-screen success/failure feedback (`Alert.alert`) on every Deal
+  save/end, replacing silent navigation.
+  "Ratio: according to stake" — meaningless with no stake set — is now a
+  disabled `RadioOption`; toggling stake off auto-switches away from it if
+  it was selected.
+- [x] History's Profit-Split row summary now shows stake details if a
+  stake is set, else payout details if a payout is set, else neither
+  (`src/db/dealText.ts::dealSummary`) — previously showed nothing useful
+  when only one of the two was configured.
+- [x] Per-Deal share, text or PDF (`src/db/export.ts`: `shareDealAsText`
+  via RN's `Share.share`, `shareDealAsPdf` via `expo-print` +
+  `expo-sharing`) — offered only for Stake/Profit-Split rows in History,
+  since Fixed and Transfer deals have no player-facing notification need.
+- [x] **Renamed "Profit split" → "Stake and Profit splits"** everywhere
+  user-facing (deal-type picker, screen/stack titles, History filter
+  chip, CSV labels) — the sub-concepts "Stake" and "Payout" inside the
+  form keep their own names.
+- [x] Transfer: picking a different recipient after an amount/reason is
+  already entered now confirms first (would otherwise silently
+  misattribute what was typed) rather than switching immediately.
+- [x] Bottom tab bar hidden on every Deals sub-screen except the Deals
+  home list (`RootTabs.tsx`, via `getFocusedRouteNameFromRoute`) — these
+  are single-purpose task flows, and it was one more variable in the
+  keyboard-avoidance math below.
+- [x] **Keyboard covering the bottom-most field in a form — three
+  attempts before landing on a correct fix.** First pass added
+  `KeyboardAvoidingView` + header-height offset generally. Second pass
+  fixed Fixed's Reason field but not Transfer's (its Amount/Reason/Submit
+  footer is pinned below a separately-scrolling player list) or Profit
+  Split's Off-set field (the form's dynamic bottom-most field). Third pass
+  tried permanent extra scroll padding + a permanently-elevated
+  shrink-priority on Transfer's player list — this visibly, permanently
+  shrank the list even with the keyboard down (a ScrollView's un-styled
+  outer container sizes to its own content, so a large static
+  `paddingBottom` inflated its measured size at rest, stealing space from
+  its sibling). Final, correct fix: new `useKeyboardVisible()` hook
+  (`src/hooks/useKeyboardVisible.ts`) tracking actual
+  `keyboardWillShow`/`keyboardWillHide` events — not field focus/blur,
+  which restores too early (tabbing between fields) or not at all
+  (keyboard dismissed by tapping outside, not by blurring the field).
+  Transfer's list-shrink-priority and scroll padding, and Profit Split's
+  scroll padding, now key off that hook: expanded only while the keyboard
+  is actually on screen, restored immediately when it closes, however it
+  closed. User-confirmed fixed on a real device.
+- Verified: `tsc --noEmit` clean and `expo export --platform ios` bundles
+  cleanly after each round; final keyboard fix confirmed working on the
+  user's own device (prior two rounds were not — logged here as the
+  record of what didn't work, not just what did).
 
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:

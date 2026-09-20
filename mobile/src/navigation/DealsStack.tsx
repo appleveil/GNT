@@ -28,7 +28,7 @@ export default function DealsStack() {
       />
       <Stack.Screen name="Fixed" component={FixedScreen} options={{ title: 'Fixed' }} />
       <Stack.Screen name="Transfer" component={TransferScreen} options={{ title: 'Transfer' }} />
-      <Stack.Screen name="ProfitSplit" component={ProfitSplitScreen} options={{ title: 'Profit split' }} />
+      <Stack.Screen name="ProfitSplit" component={ProfitSplitScreen} options={{ title: 'Stake and Profit splits' }} />
     </Stack.Navigator>
   );
 }

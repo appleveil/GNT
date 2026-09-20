@@ -5,8 +5,9 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { HistoryStackParamList } from '../navigation/types';
 import type { DealKindFilter, DealRecord } from '../types';
 import { getAllDeals } from '../db/deals';
-import { exportDealsAsCsv } from '../db/export';
-import { FixedIcon, TransferIcon, PercentCircleIcon } from '../components/icons';
+import { exportDealsAsCsv, shareDealAsPdf, shareDealAsText } from '../db/export';
+import { dealSummary, dealTitle } from '../db/dealText';
+import { FixedIcon, TransferIcon, PercentCircleIcon, ShareIcon } from '../components/icons';
 import { naira } from '../components/ui';
 import { colors, radii, spacing } from '../theme/tokens';
 
@@ -16,7 +17,7 @@ const FILTERS: { label: string; value: DealKindFilter }[] = [
   { label: 'All', value: 'ALL' },
   { label: 'Fixed', value: 'FIXED' },
   { label: 'Transfer', value: 'TRANSFER' },
-  { label: 'Profit split', value: 'PROFIT_SPLIT' },
+  { label: 'Stake and Profit splits', value: 'PROFIT_SPLIT' },
 ];
 
 export default function HistoryScreen({ navigation }: Props) {
@@ -36,7 +37,7 @@ export default function HistoryScreen({ navigation }: Props) {
     return deals.filter((d) => d.kind === filter);
   }, [deals, filter]);
 
-  async function onExport() {
+  async function onExportAll() {
     if (deals.length === 0) {
       Alert.alert('Nothing to export', 'No deals have been saved yet.');
       return;
@@ -49,6 +50,20 @@ export default function HistoryScreen({ navigation }: Props) {
     } finally {
       setExporting(false);
     }
+  }
+
+  function onShareOne(record: DealRecord) {
+    Alert.alert(dealTitle(record), 'Share this deal as…', [
+      {
+        text: 'Text (e.g. WhatsApp)',
+        onPress: () => shareDealAsText(record).catch((e) => Alert.alert('Share failed', e?.message ?? 'Something went wrong.')),
+      },
+      {
+        text: 'PDF',
+        onPress: () => shareDealAsPdf(record).catch((e) => Alert.alert('Share failed', e?.message ?? 'Something went wrong.')),
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   }
 
   return (
@@ -65,8 +80,8 @@ export default function HistoryScreen({ navigation }: Props) {
             </Pressable>
           ))}
         </ScrollView>
-        <Pressable onPress={onExport} disabled={exporting} style={styles.exportBtn}>
-          <Text style={styles.exportBtnText}>{exporting ? 'Exporting…' : 'Export'}</Text>
+        <Pressable onPress={onExportAll} disabled={exporting} style={styles.exportBtn}>
+          <Text style={styles.exportBtnText}>{exporting ? 'Exporting…' : 'Export all'}</Text>
         </Pressable>
       </View>
 
@@ -75,49 +90,56 @@ export default function HistoryScreen({ navigation }: Props) {
         data={filtered}
         keyExtractor={(d) => d.id}
         ListEmptyComponent={<Text style={styles.emptyText}>No deals of this type yet.</Text>}
-        renderItem={({ item }) => (
-          <HistoryRow
-            record={item}
-            onPress={
-              item.kind === 'PROFIT_SPLIT_CREATED'
-                ? () => navigation.navigate('ProfitSplitDetail', { arrangementId: item.id })
-                : undefined
-            }
-          />
-        )}
+        renderItem={({ item }) => {
+          const isProfitSplit = item.kind === 'PROFIT_SPLIT_CREATED' || item.kind === 'PROFIT_SPLIT_ENDED';
+          return (
+            <HistoryRow
+              record={item}
+              onPress={
+                item.kind === 'PROFIT_SPLIT_CREATED'
+                  ? () => navigation.navigate('ProfitSplitDetail', { arrangementId: item.id })
+                  : undefined
+              }
+              onShare={isProfitSplit ? () => onShareOne(item) : undefined}
+            />
+          );
+        }}
       />
     </View>
   );
 }
 
-function HistoryRow({ record, onPress }: { record: DealRecord; onPress?: () => void }) {
+function HistoryRow({
+  record,
+  onPress,
+  onShare,
+}: {
+  record: DealRecord;
+  onPress?: () => void;
+  /** Only Stake and Profit splits are shareable — Fixed/Transfer deals aren't. */
+  onShare?: () => void;
+}) {
   const when = new Date(record.createdAt).toLocaleString();
+  const title = dealTitle(record);
+  const sub = dealSummary(record);
   let icon: React.ReactNode;
   let iconBg: string;
-  let title: string;
-  let sub: string;
   let amountNode: React.ReactNode = null;
 
   switch (record.kind) {
     case 'FIXED':
       icon = <FixedIcon color={colors.dangerText} />;
       iconBg = colors.dangerBg;
-      title = `Fixed — ${record.playerName}`;
-      sub = record.reason;
       amountNode = <Text style={[styles.amount, { color: colors.dangerText }]}>{'−' + naira(record.amount)}</Text>;
       break;
     case 'TRANSFER':
       icon = <TransferIcon color={colors.accentText} />;
       iconBg = colors.accentBg;
-      title = `Transfer — ${record.sourcePlayerName} → ${record.destinationPlayerName}`;
-      sub = record.reason;
       amountNode = <Text style={styles.amount}>{naira(record.amount)}</Text>;
       break;
     case 'PROFIT_SPLIT_CREATED':
       icon = <PercentCircleIcon color={colors.successText} />;
       iconBg = colors.successBg;
-      title = `Profit split — ${record.playerName}`;
-      sub = record.stakeOn ? `${record.stakePct}% stake · ${naira(record.cap ?? 0)} cap · renews ${record.renews}` : 'No stake set';
       amountNode = (
         <View style={styles.tag}>
           <Text style={styles.tagText}>SET UP</Text>
@@ -127,8 +149,6 @@ function HistoryRow({ record, onPress }: { record: DealRecord; onPress?: () => v
     case 'PROFIT_SPLIT_ENDED':
       icon = <PercentCircleIcon color={colors.successText} />;
       iconBg = colors.successBg;
-      title = `Profit split — ${record.playerName}`;
-      sub = 'Arrangement ended';
       amountNode = (
         <View style={[styles.tag, { backgroundColor: colors.disabledSurface }]}>
           <Text style={[styles.tagText, { color: colors.textTertiary }]}>ENDED</Text>
@@ -139,15 +159,22 @@ function HistoryRow({ record, onPress }: { record: DealRecord; onPress?: () => v
 
   const Wrapper = onPress ? Pressable : View;
   return (
-    <Wrapper onPress={onPress} style={styles.row}>
-      <View style={[styles.rowIcon, { backgroundColor: iconBg }]}>{icon}</View>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.rowTitle}>{title}</Text>
-        <Text style={styles.rowSub}>{sub}</Text>
-        <Text style={styles.rowTime}>{when}</Text>
-      </View>
-      {amountNode}
-    </Wrapper>
+    <View style={styles.row}>
+      <Wrapper onPress={onPress} style={styles.rowMain}>
+        <View style={[styles.rowIcon, { backgroundColor: iconBg }]}>{icon}</View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.rowTitle}>{title}</Text>
+          <Text style={styles.rowSub}>{sub}</Text>
+          <Text style={styles.rowTime}>{when}</Text>
+        </View>
+        {amountNode}
+      </Wrapper>
+      {onShare ? (
+        <Pressable onPress={onShare} style={styles.shareBtn} hitSlop={8}>
+          <ShareIcon color={colors.textTertiary} size={16} />
+        </Pressable>
+      ) : null}
+    </View>
   );
 }
 
@@ -176,15 +203,15 @@ const styles = StyleSheet.create({
   emptyText: { textAlign: 'center', color: colors.textTertiary, marginTop: spacing.xl },
   row: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: spacing.md,
+    alignItems: 'stretch',
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radii.md,
-    padding: spacing.md,
     marginBottom: spacing.sm,
+    overflow: 'hidden',
   },
+  rowMain: { flex: 1, flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md, padding: spacing.md },
   rowIcon: { width: 32, height: 32, borderRadius: radii.sm, alignItems: 'center', justifyContent: 'center' },
   rowTitle: { fontSize: 13.5, fontWeight: '600', color: colors.textPrimary },
   rowSub: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
@@ -192,4 +219,5 @@ const styles = StyleSheet.create({
   amount: { fontWeight: '600', fontSize: 13.5 },
   tag: { backgroundColor: colors.successBg, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
   tagText: { fontSize: 10, fontWeight: '700', color: colors.successText },
+  shareBtn: { width: 40, alignItems: 'center', justifyContent: 'center', borderLeftWidth: 1, borderLeftColor: colors.border },
 });

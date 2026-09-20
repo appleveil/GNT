@@ -6,6 +6,7 @@ import type { DealsStackParamList } from '../navigation/types';
 import type { Player } from '../types';
 import { getPlayers, getCacheAge } from '../api/players';
 import { getActiveProfitSplitPlayerIds } from '../db/deals';
+import { withEffectiveBalances } from '../db/effectiveBalance';
 import { colors, radii, spacing } from '../theme/tokens';
 import { balanceColor, signedNaira } from '../components/ui';
 
@@ -22,11 +23,12 @@ export default function DealsHomeScreen({ navigation }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ players, stale }, ids, age] = await Promise.all([
+    const [{ players: fetched, stale }, ids, age] = await Promise.all([
       getPlayers(),
       getActiveProfitSplitPlayerIds(),
       getCacheAge(),
     ]);
+    const players = await withEffectiveBalances(fetched);
     setPlayers(players);
     setStale(stale);
     setActiveIds(ids);
@@ -88,7 +90,7 @@ export default function DealsHomeScreen({ navigation }: Props) {
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.name}>{item.displayName}</Text>
-                {activeIds.has(item.id) ? <Text style={styles.activeTag}>Profit split active</Text> : null}
+                {activeIds.has(item.id) ? <Text style={styles.activeTag}>Stake/Profit split active</Text> : null}
               </View>
               <Text style={[styles.balance, { color: balanceColor(item.balance) }]}>{signedNaira(item.balance)}</Text>
             </Pressable>

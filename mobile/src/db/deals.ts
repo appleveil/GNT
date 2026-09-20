@@ -114,10 +114,10 @@ export function dealsToCsv(deals: DealRecord[]): string {
         const bits = [];
         if (d.stakeOn) bits.push(`${d.stakePct}% stake, cap ${d.cap}, renews ${d.renews}`);
         if (d.payoutOn) bits.push(`payout: ${d.payoutBasis}, ${d.payoutSplitMethod}`);
-        return [date, 'Profit split — set up', d.playerName, '', '', bits.join('; ') || 'no stake or payout set'];
+        return [date, 'Stake and Profit splits — set up', d.playerName, '', '', bits.join('; ') || 'no stake or payout set'];
       }
       case 'PROFIT_SPLIT_ENDED':
-        return [date, 'Profit split — ended', d.playerName, '', '', ''];
+        return [date, 'Stake and Profit splits — ended', d.playerName, '', '', ''];
       default:
         return [date, (d as any).kind, '', '', '', ''];
     }

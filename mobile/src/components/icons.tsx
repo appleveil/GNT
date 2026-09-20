@@ -61,3 +61,14 @@ export function PayoutIcon({ color, size = 16 }: IconProps) {
     </Svg>
   );
 }
+
+export function ShareIcon({ color, size = 16 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2}>
+      <Circle cx={18} cy={5} r={3} />
+      <Circle cx={6} cy={12} r={3} />
+      <Circle cx={18} cy={19} r={3} />
+      <Path d="M8.6 10.5 15.4 6.5M8.6 13.5l6.8 4" />
+    </Svg>
+  );
+}
