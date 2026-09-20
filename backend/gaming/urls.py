@@ -12,4 +12,14 @@ urlpatterns = [
     path('outstanding/', views.OutstandingLedgerView.as_view(), name='outstanding-ledger'),
     path('main-account/ledger/', views.MainAccountLedgerView.as_view(), name='main-account-ledger'),
     path('dashboard/', views.DashboardView.as_view(), name='dashboard'),
+    path('deals/transfer/', views.DealTransferView.as_view(), name='deal-transfer'),
+    path('deals/profit-split/', views.ProfitSplitArrangementView.as_view(), name='profit-split-create'),
+    path(
+        'deals/profit-split/<int:player_pk>/', views.PlayerProfitSplitStatusView.as_view(),
+        name='profit-split-status',
+    ),
+    path(
+        'deals/profit-split/<int:pk>/deactivate/', views.DeactivateProfitSplitArrangementView.as_view(),
+        name='profit-split-deactivate',
+    ),
 ] + router.urls

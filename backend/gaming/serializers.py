@@ -5,7 +5,7 @@ from rest_framework import serializers
 from accounts.models import Player, ServiceStaff
 from accounts.serializers import PlayerBankAccountSerializer
 
-from .models import ConversionRate, GameDay, GameDaySummary, Transaction
+from .models import ConversionRate, GameDay, GameDaySummary, ProfitSplitArrangement, Transaction
 
 
 class GameDaySummarySerializer(serializers.ModelSerializer):
@@ -97,6 +97,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             'channel', 'notes', 'recorded_by', 'floor_manager', 'confirmed_at', 'status',
             'approved_by', 'approved_at', 'is_voided', 'voided_by', 'voided_at', 'void_reason',
             'external_reference', 'created_at', 'tip_category', 'service_staff',
+            'linked_transaction', 'profit_split_arrangement',
         ]
         read_only_fields = [f for f in fields if f not in ('game_day', 'player', 'type', 'amount', 'notes')]
 
@@ -142,6 +143,68 @@ class InitiatePayoutSerializer(serializers.Serializer):
     player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
     amount = serializers.DecimalField(max_digits=14, decimal_places=2)
     game_day = serializers.PrimaryKeyRelatedField(queryset=GameDay.objects.all(), required=False, allow_null=True)
+
+
+class DealTransferSerializer(serializers.Serializer):
+    """Input for the "Deals" Transfer action — see gaming.services.record_deal_transfer."""
+
+    source_player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
+    destination_player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    reason = serializers.CharField()
+
+
+class ProfitSplitArrangementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProfitSplitArrangement
+        fields = [
+            'id', 'player', 'house_stake_pct', 'cap_amount', 'reset_cadence', 'ends_at',
+            'max_resets', 'max_cumulative_value', 'payout_basis', 'payout_split_method',
+            'custom_ratio_pct', 'fixed_amount', 'fixed_offset', 'is_active',
+            'created_by', 'created_at', 'deactivated_at',
+        ]
+        read_only_fields = ['id', 'player', 'is_active', 'created_by', 'created_at', 'deactivated_at']
+
+
+class CreateProfitSplitArrangementSerializer(serializers.Serializer):
+    """Input for setting up a "Deals" Profit Split — see gaming.services.create_profit_split_arrangement."""
+
+    player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
+    house_stake_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
+    cap_amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    reset_cadence = serializers.ChoiceField(
+        choices=ProfitSplitArrangement.ResetCadence.choices,
+        required=False, default=ProfitSplitArrangement.ResetCadence.ONE_OFF,
+    )
+    ends_at = serializers.DateTimeField(required=False, allow_null=True)
+    max_resets = serializers.IntegerField(required=False, allow_null=True)
+    max_cumulative_value = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, allow_null=True,
+    )
+    payout_basis = serializers.ChoiceField(
+        choices=ProfitSplitArrangement.PayoutBasis.choices,
+        required=False, default=ProfitSplitArrangement.PayoutBasis.AFTER_BUYIN,
+    )
+    payout_split_method = serializers.ChoiceField(
+        choices=ProfitSplitArrangement.PayoutSplitMethod.choices,
+        required=False, default=ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO,
+    )
+    custom_ratio_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    fixed_amount = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
+    fixed_offset = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
+
+
+class ProfitSplitStatusSerializer(serializers.Serializer):
+    """What gaming.selectors.profit_split_status computes, plus the arrangement itself."""
+
+    arrangement = ProfitSplitArrangementSerializer()
+    period_start = serializers.DateTimeField()
+    periods_elapsed = serializers.IntegerField()
+    covered_this_period = serializers.DecimalField(max_digits=14, decimal_places=2)
+    cumulative_covered = serializers.DecimalField(max_digits=14, decimal_places=2)
+    is_exhausted = serializers.BooleanField()
+    exhausted_reason = serializers.CharField(allow_null=True)
+    available_stake_this_period = serializers.DecimalField(max_digits=14, decimal_places=2)
 
 
 class GameDaySeatedPlayerSerializer(serializers.Serializer):

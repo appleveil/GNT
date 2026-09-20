@@ -8,8 +8,9 @@ from decimal import Decimal
 
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce
+from django.utils import timezone
 
-from .models import GameDay, GameDayPlayer, GameDaySummary, Transaction
+from .models import GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
 
 ZERO = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
 
@@ -17,6 +18,7 @@ ZERO = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
 DEBIT_TYPES = {
     Transaction.Type.CHIPS_OUT,
     Transaction.Type.PAYOUT,
+    Transaction.Type.DEAL_TRANSFER_OUT,
 }
 # Credits increase a player's balance (chips returned, any form of payment, write-offs).
 CREDIT_TYPES = {
@@ -26,6 +28,7 @@ CREDIT_TYPES = {
     Transaction.Type.PAYMENT_POS,
     Transaction.Type.PAYMENT_DEAL,
     Transaction.Type.WRITE_OFF,
+    Transaction.Type.DEAL_TRANSFER_IN,
 }
 # Rake/tips have no player and never touch a player or game-day balance.
 EXCLUDED_FROM_GAME_DAY_LEDGER = {Transaction.Type.RAKE, Transaction.Type.TIP}
@@ -264,3 +267,82 @@ def dashboard_totals():
     total_credit = sum((row['balance'] for row in per_player if row['balance'] > 0), Decimal('0'))
     debtor_count = sum(1 for row in per_player if row['balance'] < 0)
     return total_debt, total_credit, debtor_count
+
+
+def _profit_split_periods_elapsed(arrangement, now):
+    """
+    How many complete reset-periods have passed since an arrangement was
+    created, and when the CURRENT one started — computed live from
+    created_at + cadence, never stored (see ProfitSplitArrangement's
+    docstring). A ONE_OFF arrangement has exactly one period spanning its
+    whole lifetime. Months are real calendar months (via dateutil), not a
+    fixed 30-day chunk — weeks/days are fixed-length, which is unambiguous
+    for them.
+    """
+    Cadence = ProfitSplitArrangement.ResetCadence
+    start = arrangement.created_at
+    if arrangement.reset_cadence == Cadence.ONE_OFF:
+        return 0, start
+    if arrangement.reset_cadence == Cadence.DAILY:
+        from datetime import timedelta
+        step = timedelta(days=1)
+    elif arrangement.reset_cadence == Cadence.WEEKLY:
+        from datetime import timedelta
+        step = timedelta(weeks=1)
+    elif arrangement.reset_cadence == Cadence.MONTHLY:
+        from dateutil.relativedelta import relativedelta
+        periods, period_start = 0, start
+        while period_start + relativedelta(months=1) <= now:
+            period_start += relativedelta(months=1)
+            periods += 1
+        return periods, period_start
+    else:
+        raise ValueError(f'Unknown reset cadence: {arrangement.reset_cadence}')
+    periods = max(0, (now - start) // step)
+    return periods, start + periods * step
+
+
+def profit_split_status(arrangement, now=None):
+    """
+    Everything needed to enforce/display a Profit Split arrangement,
+    computed live — never stored, matching this file's "balances are
+    computed, not stored" philosophy (SCHEMA.md). "How much the house has
+    covered" is a live SUM over PROFIT_SPLIT_STAKE rows FK'd to this
+    arrangement, never a mutable counter.
+    """
+    now = now or timezone.now()
+    periods_elapsed, period_start = _profit_split_periods_elapsed(arrangement, now)
+
+    stake_qs = Transaction.objects.filter(
+        profit_split_arrangement=arrangement, type=Transaction.Type.PROFIT_SPLIT_STAKE, is_voided=False,
+    )
+    covered_this_period = stake_qs.filter(created_at__gte=period_start).aggregate(
+        total=Coalesce(Sum('amount'), ZERO),
+    )['total']
+    cumulative_covered = stake_qs.aggregate(total=Coalesce(Sum('amount'), ZERO))['total']
+
+    exhausted_reason = None
+    if arrangement.ends_at and now >= arrangement.ends_at:
+        exhausted_reason = 'end date reached'
+    elif arrangement.max_resets is not None and periods_elapsed >= arrangement.max_resets:
+        exhausted_reason = 'max resets reached'
+    elif arrangement.max_cumulative_value is not None and cumulative_covered >= arrangement.max_cumulative_value:
+        exhausted_reason = 'max cumulative value reached'
+
+    if exhausted_reason is not None:
+        available_this_period = Decimal('0')
+    else:
+        available_this_period = max(arrangement.cap_amount - covered_this_period, Decimal('0'))
+        if arrangement.max_cumulative_value is not None:
+            cumulative_remaining = max(arrangement.max_cumulative_value - cumulative_covered, Decimal('0'))
+            available_this_period = min(available_this_period, cumulative_remaining)
+
+    return {
+        'period_start': period_start,
+        'periods_elapsed': periods_elapsed,
+        'covered_this_period': covered_this_period,
+        'cumulative_covered': cumulative_covered,
+        'is_exhausted': exhausted_reason is not None,
+        'exhausted_reason': exhausted_reason,
+        'available_stake_this_period': available_this_period,
+    }

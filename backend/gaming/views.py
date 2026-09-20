@@ -11,16 +11,20 @@ from accounts.permissions import IsCashierOrOwner, IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
 from .exceptions import TableFullError
-from .models import ConversionRate, GameDay, Transaction
+from .models import ConversionRate, GameDay, ProfitSplitArrangement, Transaction
 from .serializers import (
     CloseGameDaySerializer,
     ConversionRateSerializer,
+    CreateProfitSplitArrangementSerializer,
+    DealTransferSerializer,
     GameDaySeatedPlayerSerializer,
     GameDaySerializer,
     GameDaySummaryPreviewSerializer,
     InitiatePayoutSerializer,
     LedgerEntrySerializer,
     OpenGameDaySerializer,
+    ProfitSplitArrangementSerializer,
+    ProfitSplitStatusSerializer,
     RecordTransactionSerializer,
     SeatPlayerSerializer,
     SetConversionRateSerializer,
@@ -321,6 +325,71 @@ class MainAccountLedgerView(APIView):
     def get(self, request):
         rows = selectors.main_account_ledger()
         return Response(LedgerEntrySerializer(rows, many=True).data)
+
+
+class DealTransferView(APIView):
+    """
+    "Deals" Transfer — Owner-only, added 2026-09-20. See
+    gaming.services.record_deal_transfer for the validation and the
+    linked-pair Transaction rows this creates.
+    """
+
+    permission_classes = [IsOwner]
+
+    def post(self, request):
+        serializer = DealTransferSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        out_txn, in_txn = services.record_deal_transfer(
+            data['source_player'], data['destination_player'], data['amount'], data['reason'], request.user,
+        )
+        return Response(
+            {'out': TransactionSerializer(out_txn).data, 'in': TransactionSerializer(in_txn).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ProfitSplitArrangementView(APIView):
+    """
+    "Deals" Profit Split — Owner-only, added 2026-09-20. Creating one
+    automatically deactivates any previous active arrangement for that
+    player — see gaming.services.create_profit_split_arrangement.
+    """
+
+    permission_classes = [IsOwner]
+
+    def post(self, request):
+        serializer = CreateProfitSplitArrangementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        arrangement = services.create_profit_split_arrangement(operator=request.user, **serializer.validated_data)
+        return Response(ProfitSplitArrangementSerializer(arrangement).data, status=status.HTTP_201_CREATED)
+
+
+class PlayerProfitSplitStatusView(APIView):
+    """The player's current active arrangement plus its live cumulative figures — Owner-only."""
+
+    permission_classes = [IsOwner]
+
+    def get(self, request, player_pk):
+        player = get_object_or_404(Player, pk=player_pk)
+        arrangement = (
+            ProfitSplitArrangement.objects.filter(player=player, is_active=True).order_by('-created_at').first()
+        )
+        if arrangement is None:
+            return Response(None)
+        status_data = selectors.profit_split_status(arrangement)
+        return Response(ProfitSplitStatusSerializer({'arrangement': arrangement, **status_data}).data)
+
+
+class DeactivateProfitSplitArrangementView(APIView):
+    """Owner-only — ends an arrangement early. See gaming.services.deactivate_profit_split_arrangement."""
+
+    permission_classes = [IsOwner]
+
+    def post(self, request, pk):
+        arrangement = get_object_or_404(ProfitSplitArrangement, pk=pk)
+        arrangement = services.deactivate_profit_split_arrangement(arrangement, request.user)
+        return Response(ProfitSplitArrangementSerializer(arrangement).data)
 
 
 class DashboardView(APIView):

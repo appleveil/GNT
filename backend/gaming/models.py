@@ -126,6 +126,87 @@ class ConversionRate(models.Model):
         return f'{self.currency} @ {self.rate_to_naira} ({scope})'
 
 
+class ProfitSplitArrangement(models.Model):
+    """
+    "Deals" Profit Split (added 2026-09-20) — a standing arrangement on one
+    player: the house covers a percentage of their buy-in (capped, on a
+    recurring or one-off basis) and, when they return chips, takes a cut of
+    the payout. See CONCEPT.md's Deals section and PLAN.md's entry.
+
+    History is preserved like everywhere else in this schema — a player can
+    have many arrangements over time; `is_active` marks the current one.
+    Creating a new one for a player automatically deactivates any previous
+    active one (see gaming.services.create_profit_split_arrangement) — only
+    one is meant to apply at a time, though nothing at the DB level forbids
+    two rows both being active, consistent with how this schema generally
+    prefers a service-layer rule over a hard constraint where history must
+    still be preserved.
+
+    "How much the house has covered so far" is deliberately NOT a field
+    here — it's always a live SUM over Transaction rows FK'd to this
+    arrangement (PROFIT_SPLIT_STAKE), matching this codebase's "computed,
+    not stored" balance philosophy (SCHEMA.md). See
+    gaming.selectors.profit_split_status.
+
+    Scope note: only the STAKE side (buy-in funding) is actually applied
+    automatically, in gaming.services.record_transaction's CHIPS_OUT branch.
+    The payout_basis/payout_split_method/custom_ratio_pct/fixed_amount/
+    fixed_offset fields are captured as configuration only for now and are
+    not yet wired into initiate_payout's actual math — the concept doc
+    itself says the Fixed method's off-set is an input to capture, "not
+    actually doing the maths for what goes to whom," and no worked example
+    was given for the ratio methods either. Revisit once that math is
+    actually wanted.
+    """
+
+    class ResetCadence(models.TextChoices):
+        ONE_OFF = 'ONE_OFF', 'One-off'
+        DAILY = 'DAILY', 'Daily'
+        WEEKLY = 'WEEKLY', 'Weekly'
+        MONTHLY = 'MONTHLY', 'Monthly'
+
+    class PayoutBasis(models.TextChoices):
+        BEFORE_BUYIN = 'BEFORE_BUYIN', 'Before buy-in'
+        AFTER_BUYIN = 'AFTER_BUYIN', 'After buy-in'
+
+    class PayoutSplitMethod(models.TextChoices):
+        STAKE_RATIO = 'STAKE_RATIO', 'Ratio: according to stake'
+        CUSTOM_RATIO = 'CUSTOM_RATIO', 'Ratio: house percentage'
+        FIXED = 'FIXED', 'Fixed amount'
+
+    player = models.ForeignKey(Player, on_delete=models.PROTECT, related_name='profit_split_arrangements')
+
+    # Stake — how much of a buy-in the house covers. A cap of 0 effectively
+    # means no real stake even with a nonzero percentage, per the concept doc.
+    house_stake_pct = models.DecimalField(max_digits=5, decimal_places=2)  # 0-100
+    cap_amount = models.DecimalField(max_digits=14, decimal_places=2)  # per-period ceiling
+    reset_cadence = models.CharField(max_length=10, choices=ResetCadence.choices, default=ResetCadence.ONE_OFF)
+    # The following three only apply when reset_cadence != ONE_OFF, and are
+    # all optional — whichever is reached first ends the arrangement.
+    ends_at = models.DateTimeField(null=True, blank=True)
+    max_resets = models.PositiveIntegerField(null=True, blank=True)
+    max_cumulative_value = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+
+    # Payout split — configuration only for now, see docstring above.
+    payout_basis = models.CharField(max_length=15, choices=PayoutBasis.choices, default=PayoutBasis.AFTER_BUYIN)
+    payout_split_method = models.CharField(
+        max_length=15, choices=PayoutSplitMethod.choices, default=PayoutSplitMethod.STAKE_RATIO,
+    )
+    custom_ratio_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    fixed_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    fixed_offset = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='profit_splits_created',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f'Profit split — {self.player.display_name} ({self.house_stake_pct}% stake)'
+
+
 class Transaction(models.Model):
     """
     The master ledger. Every Game-day, Player game-day, Outstanding, and Main
@@ -146,6 +227,18 @@ class Transaction(models.Model):
         WRITE_OFF = 'WRITE_OFF', 'Write-off / credit'
         RAKE = 'RAKE', 'Rake'
         TIP = 'TIP', 'Tip'
+        # Added 2026-09-20 — "Deals" Transfer: an internal move of one
+        # player's positive balance to another. Always created as a linked
+        # pair (see Transaction.linked_transaction) — never one row alone.
+        # See gaming.services.record_deal_transfer.
+        DEAL_TRANSFER_OUT = 'DEAL_TRANSFER_OUT', 'Deal transfer (out)'
+        DEAL_TRANSFER_IN = 'DEAL_TRANSFER_IN', 'Deal transfer (in)'
+        # Added 2026-09-20 — "Deals" Profit Split's stake side: the house's
+        # own contribution toward a buy-in, never a debit against the
+        # player (see selectors.DEBIT_TYPES/CREDIT_TYPES — deliberately in
+        # neither, contributes 0 to player_balance). See
+        # ProfitSplitArrangement's docstring and services.record_transaction.
+        PROFIT_SPLIT_STAKE = 'PROFIT_SPLIT_STAKE', 'Profit split — house stake'
 
     class TipCategory(models.TextChoices):
         """
@@ -232,6 +325,23 @@ class Transaction(models.Model):
 
     # Paystack transaction ID — unique when set, used for webhook idempotency.
     external_reference = models.CharField(max_length=100, null=True, blank=True, unique=True)
+
+    # Set only on a DEAL_TRANSFER_OUT/DEAL_TRANSFER_IN pair (added 2026-09-20)
+    # — each row points at its counterpart so a ledger listing can render
+    # "Transfer to <player>" / "Transfer from <player>". SET_NULL, not
+    # PROTECT: losing the link on deletion would only weaken display, never
+    # the ledger math itself (each row's own amount/type stands alone).
+    linked_transaction = models.OneToOneField(
+        'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    # Set only on a PROFIT_SPLIT_STAKE row (and, for display, on the paired
+    # CHIPS_OUT row it was split from) — see ProfitSplitArrangement.
+    # PROTECT: a historical stake contribution should never lose which
+    # arrangement it came from, even if that arrangement is later deactivated.
+    profit_split_arrangement = models.ForeignKey(
+        ProfitSplitArrangement, on_delete=models.PROTECT, null=True, blank=True, related_name='transactions',
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 

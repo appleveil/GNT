@@ -11,7 +11,7 @@ from accounts.models import FloorManager, Player, PlayerBankAccount, ServiceStaf
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
-from .models import ConversionRate, GameDay, GameDayPlayer, Transaction
+from .models import ConversionRate, GameDay, GameDayPlayer, ProfitSplitArrangement, Transaction
 
 
 class LedgerMathTests(TestCase):
@@ -603,11 +603,61 @@ class GameDayAndTransactionAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_owner_can_record_write_off(self):
+        Transaction.objects.create(
+            player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(150000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '100000',
+            'notes': 'Settled amicably',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_write_off_without_a_reason_is_rejected(self):
+        Transaction.objects.create(
+            player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(150000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
         self.client.force_authenticate(self.owner)
         response = self.client.post('/api/transactions/', {
             'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '100000',
         })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_write_off_cannot_exceed_outstanding_balance(self):
+        Transaction.objects.create(
+            player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '100000',
+            'notes': 'Trying to over-forgive',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_write_off_cannot_push_a_debt_free_player_positive(self):
+        # self.player has no transactions at all yet — balance is 0, not negative.
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '1',
+            'notes': 'No debt to forgive',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_write_off_can_clear_the_full_outstanding_balance_exactly(self):
+        Transaction.objects.create(
+            player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(75000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/transactions/', {
+            'player': self.player.id, 'type': Transaction.Type.WRITE_OFF, 'amount': '75000',
+            'notes': 'Clearing it all',
+        })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(selectors.player_balance(self.player), Decimal('0'))
 
     @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_test'})
     @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_test'})
@@ -1062,6 +1112,10 @@ class DealOnClosedGameDayTests(APITestCase):
         self.assertIsNotNone(txn.game_day_id)
 
     def test_write_off_on_the_just_closed_game_day_is_also_accepted(self):
+        Transaction.objects.create(
+            player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(200),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
         services.record_transaction(
             type=Transaction.Type.WRITE_OFF, amount=Decimal(200), recorded_by=self.owner,
             game_day=self.last_closed_gd, player=self.player, notes='retroactive write-off',
@@ -1185,3 +1239,313 @@ class TipCategoryTests(APITestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertIsNone(response.data['service_staff'])
+
+
+class DealTransferTests(APITestCase):
+    """
+    "Deals" Transfer (added 2026-09-20) — settles one player's debt using
+    another's excess. See gaming.services.record_deal_transfer and
+    PLAN.md's entry.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner6', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier6', password='x', role=StaffUser.Role.CASHIER)
+        self.source = Player.objects.create(account_code='WWI T1', display_name='Source Player')
+        self.dest = Player.objects.create(account_code='WWI T2', display_name='Dest Player')
+
+    def _give_source_credit(self, amount):
+        # A positive lifetime balance — e.g. chips returned exceeding what was
+        # issued, or a straightforward CHIPS_IN credit for test purposes.
+        Transaction.objects.create(
+            player=self.source, type=Transaction.Type.CHIPS_IN, amount=Decimal(amount),
+            channel=Transaction.Channel.CHIPS, recorded_by=self.cashier,
+        )
+
+    def test_transfer_creates_a_linked_debit_and_credit_pair(self):
+        self._give_source_credit(50000)
+        out_txn, in_txn = services.record_deal_transfer(self.source, self.dest, Decimal(20000), 'settling up', self.owner)
+        self.assertEqual(out_txn.type, Transaction.Type.DEAL_TRANSFER_OUT)
+        self.assertEqual(in_txn.type, Transaction.Type.DEAL_TRANSFER_IN)
+        self.assertEqual(out_txn.linked_transaction_id, in_txn.pk)
+        self.assertEqual(in_txn.linked_transaction_id, out_txn.pk)
+        self.assertEqual(selectors.player_balance(self.source), Decimal(30000))
+        self.assertEqual(selectors.player_balance(self.dest), Decimal(20000))
+
+    def test_transfer_cannot_exceed_sources_positive_balance(self):
+        self._give_source_credit(10000)
+        with self.assertRaises(InvalidStateError):
+            services.record_deal_transfer(self.source, self.dest, Decimal(20000), 'too much', self.owner)
+
+    def test_transfer_rejected_when_source_has_no_positive_balance(self):
+        # source has no transactions at all — balance is 0, not positive.
+        with self.assertRaises(InvalidStateError):
+            services.record_deal_transfer(self.source, self.dest, Decimal(1), 'nothing to give', self.owner)
+
+    def test_transfer_rejected_when_source_is_in_debt(self):
+        Transaction.objects.create(
+            player=self.source, type=Transaction.Type.CHIPS_OUT, amount=Decimal(30000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        with self.assertRaises(InvalidStateError):
+            services.record_deal_transfer(self.source, self.dest, Decimal(1000), 'from a debtor', self.owner)
+
+    def test_transfer_can_push_destination_positive(self):
+        # No cap on the destination side beyond the source's own positive balance.
+        self._give_source_credit(50000)
+        services.record_deal_transfer(self.source, self.dest, Decimal(50000), 'full transfer', self.owner)
+        self.assertEqual(selectors.player_balance(self.dest), Decimal(50000))
+
+    def test_transfer_requires_a_reason(self):
+        self._give_source_credit(10000)
+        with self.assertRaises(InvalidStateError):
+            services.record_deal_transfer(self.source, self.dest, Decimal(1000), '', self.owner)
+
+    def test_transfer_to_self_is_rejected(self):
+        self._give_source_credit(10000)
+        with self.assertRaises(InvalidStateError):
+            services.record_deal_transfer(self.source, self.source, Decimal(1000), 'to myself', self.owner)
+
+    def test_cashier_cannot_record_a_transfer(self):
+        self._give_source_credit(10000)
+        with self.assertRaises(AuthorizationError):
+            services.record_deal_transfer(self.source, self.dest, Decimal(1000), 'nice try', self.cashier)
+
+    def test_voiding_one_leg_voids_the_linked_leg_too(self):
+        self._give_source_credit(50000)
+        out_txn, in_txn = services.record_deal_transfer(self.source, self.dest, Decimal(20000), 'settling up', self.owner)
+        services.void_transaction(out_txn, self.owner, 'mistaken transfer')
+        in_txn.refresh_from_db()
+        self.assertTrue(in_txn.is_voided)
+        self.assertEqual(in_txn.void_reason, 'mistaken transfer')
+        self.assertEqual(selectors.player_balance(self.source), Decimal(50000))
+        self.assertEqual(selectors.player_balance(self.dest), Decimal(0))
+
+    def test_cashier_cannot_use_the_transfer_endpoint(self):
+        self._give_source_credit(10000)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/deals/transfer/', {
+            'source_player': self.source.id, 'destination_player': self.dest.id,
+            'amount': '1000', 'reason': 'nice try',
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_transfer_via_api(self):
+        self._give_source_credit(10000)
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/deals/transfer/', {
+            'source_player': self.source.id, 'destination_player': self.dest.id,
+            'amount': '4000', 'reason': 'via api',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['out']['type'], Transaction.Type.DEAL_TRANSFER_OUT)
+        self.assertEqual(response.data['in']['type'], Transaction.Type.DEAL_TRANSFER_IN)
+        self.assertEqual(selectors.player_balance(self.dest), Decimal(4000))
+
+
+class ProfitSplitArrangementTests(APITestCase):
+    """
+    "Deals" Profit Split (added 2026-09-20) — only the stake side (buy-in
+    funding) is actually enforced; the payout-split fields are configuration
+    only for now. See ProfitSplitArrangement's docstring and PLAN.md's entry.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner7', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier7', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI PS1', display_name='Profit Split Player')
+        self.game_day = services.open_game_day(70, timezone.now(), self.owner)
+        self.fm = FloorManager(name='PS Floor Boss', created_by=self.owner)
+        self.fm.set_pin('7777')
+        self.fm.save()
+
+    def _buy_in(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+
+    # --- creation / validation ---
+
+    def test_cashier_cannot_create_an_arrangement(self):
+        with self.assertRaises(AuthorizationError):
+            services.create_profit_split_arrangement(
+                self.player, self.cashier, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+            )
+
+    def test_house_stake_pct_out_of_range_is_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            services.create_profit_split_arrangement(
+                self.player, self.owner, house_stake_pct=Decimal(150), cap_amount=Decimal(100000),
+            )
+
+    def test_negative_cap_is_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            services.create_profit_split_arrangement(
+                self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(-1),
+            )
+
+    def test_one_off_with_an_end_date_is_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            services.create_profit_split_arrangement(
+                self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+                reset_cadence=ProfitSplitArrangement.ResetCadence.ONE_OFF, ends_at=timezone.now(),
+            )
+
+    def test_stake_ratio_payout_method_requires_a_positive_stake(self):
+        with self.assertRaises(InvalidStateError):
+            services.create_profit_split_arrangement(
+                self.player, self.owner, house_stake_pct=Decimal(0), cap_amount=Decimal(0),
+                payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO,
+            )
+
+    def test_custom_ratio_payout_method_requires_a_percentage(self):
+        with self.assertRaises(InvalidStateError):
+            services.create_profit_split_arrangement(
+                self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+                payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.CUSTOM_RATIO,
+            )
+
+    def test_fixed_payout_method_requires_an_amount(self):
+        with self.assertRaises(InvalidStateError):
+            services.create_profit_split_arrangement(
+                self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+                payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.FIXED,
+            )
+
+    def test_creating_a_new_arrangement_deactivates_the_previous_one(self):
+        first = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+        )
+        second = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(30), cap_amount=Decimal(50000),
+        )
+        first.refresh_from_db()
+        self.assertFalse(first.is_active)
+        self.assertIsNotNone(first.deactivated_at)
+        self.assertTrue(second.is_active)
+
+    def test_owner_can_create_via_api(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/deals/profit-split/', {
+            'player': self.player.id, 'house_stake_pct': '50', 'cap_amount': '100000',
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+    def test_cashier_cannot_create_via_api(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/deals/profit-split/', {
+            'player': self.player.id, 'house_stake_pct': '50', 'cap_amount': '100000',
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- buy-in stake application ---
+
+    def test_buy_in_is_split_between_player_and_house(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        txn = self._buy_in(100000)
+        self.assertEqual(txn.amount, Decimal(50000))
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        self.assertEqual(stake_txn.amount, Decimal(50000))
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-50000))
+
+    def test_buy_in_split_is_capped(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(20000),
+        )
+        txn = self._buy_in(100000)
+        # 50% of 100000 = 50000, but capped at 20000.
+        self.assertEqual(txn.amount, Decimal(80000))
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        self.assertEqual(stake_txn.amount, Decimal(20000))
+
+    def test_no_arrangement_means_no_split(self):
+        txn = self._buy_in(100000)
+        self.assertEqual(txn.amount, Decimal(100000))
+        self.assertFalse(Transaction.objects.filter(type=Transaction.Type.PROFIT_SPLIT_STAKE).exists())
+
+    def test_deactivated_arrangement_means_no_split(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        services.deactivate_profit_split_arrangement(arrangement, self.owner)
+        txn = self._buy_in(100000)
+        self.assertEqual(txn.amount, Decimal(100000))
+
+    def test_profit_split_stake_never_touches_player_balance_directly(self):
+        # It's excluded from both DEBIT_TYPES/CREDIT_TYPES by design — see
+        # selectors.py. Confirmed here rather than just by construction.
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(1000000),
+        )
+        self._buy_in(50000)
+        # Entirely house-covered — player's own debt is 0.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+    def test_cumulative_cap_exhausts_the_arrangement(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(1000000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY, max_cumulative_value=Decimal(30000),
+        )
+        first = self._buy_in(20000)
+        self.assertEqual(first.amount, Decimal(0))  # fully house-covered
+        second = self._buy_in(20000)
+        # Only 10000 left of the 30000 cumulative cap; the rest (10000) is on the player.
+        self.assertEqual(second.amount, Decimal(10000))
+        third = self._buy_in(20000)
+        # Cumulative cap fully exhausted — entirely on the player now.
+        self.assertEqual(third.amount, Decimal(20000))
+
+    def test_daily_reset_gives_a_fresh_per_period_cap(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(20000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY,
+        )
+        first = self._buy_in(20000)
+        self.assertEqual(first.amount, Decimal(0))  # today's cap fully used
+
+        # Backdate the arrangement by 2 days so "now" falls in a new period.
+        ProfitSplitArrangement.objects.filter(pk=arrangement.pk).update(
+            created_at=timezone.now() - timedelta(days=2),
+        )
+        second = self._buy_in(20000)
+        self.assertEqual(second.amount, Decimal(0))  # fresh period, fresh cap
+
+    def test_ended_arrangement_means_no_split(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY, ends_at=timezone.now() - timedelta(days=1),
+        )
+        txn = self._buy_in(100000)
+        self.assertEqual(txn.amount, Decimal(100000))
+
+    # --- status endpoint ---
+
+    def test_status_endpoint_returns_none_without_an_arrangement(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/deals/profit-split/{self.player.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data)
+
+    def test_status_endpoint_reflects_cumulative_covered(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        self._buy_in(100000)
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/deals/profit-split/{self.player.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(str(response.data['cumulative_covered'])), Decimal(50000))
+        self.assertFalse(response.data['is_exhausted'])
+
+    def test_deactivate_via_api(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(f'/api/deals/profit-split/{arrangement.pk}/deactivate/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_active'])

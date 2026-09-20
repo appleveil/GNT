@@ -281,6 +281,75 @@ likely require a schema change to Transaction.TIP").
   and a Service tip missing a recipient correctly rejected — all cleaned
   up after, real game-day history confirmed untouched.
 
+### "Deals" backend — Fixed write-off cap, player-to-player Transfer, and Profit Split (2026-09-20)
+New Owner-only "Deals" feature, backend-first per the approved plan (a
+mobile Android/iOS app follows, starting with a visual mockup before any
+app code — not part of this entry). Three deal types, all creating real
+`Transaction` rows so they show up correctly in every existing ledger for
+free (master-ledger pattern) — no reconciliation tooling needed, as usual.
+
+- [x] **Fixed write-off** — reused the existing `WRITE_OFF` type (already
+  Owner-gated) almost as-is; added the two things it was missing: a
+  mandatory reason (`notes`), and a hard cap at the player's current
+  lifetime outstanding balance so a write-off can only relieve debt, never
+  push a player positive. `test_owner_can_record_write_off` (pre-existing)
+  updated to give the player debt first and supply a reason, since both
+  are now enforced.
+- [x] **Transfer** — genuinely new: settles one player's debt using
+  another's excess. Two linked `Transaction` rows (`DEAL_TRANSFER_OUT`/
+  `DEAL_TRANSFER_IN`, `Transaction.linked_transaction` self-FK pointing at
+  each other) created atomically via `record_deal_transfer`. Capped at the
+  source's positive *lifetime* balance (same basis as the write-off cap);
+  no cap on the destination side beyond that. Voiding either leg now voids
+  its linked leg too (`void_transaction` extended) — otherwise one
+  player's debit could be undone without undoing the other's matching
+  credit. New endpoint `POST /api/deals/transfer/`.
+- [x] **Profit Split** — the one genuinely new subsystem, no precedent
+  anywhere in the schema before this. New `ProfitSplitArrangement` model
+  (house stake %, per-period cap, reset cadence One-off/Daily/Weekly/
+  Monthly, optional end date/max resets/max cumulative value — confirmed
+  meaning: cumulative amount the *house has covered*). "How much covered so
+  far" is never stored — always a live `SUM` over new `PROFIT_SPLIT_STAKE`
+  Transaction rows FK'd to the arrangement (`selectors.profit_split_status`),
+  matching this codebase's computed-not-stored balance philosophy. Reset
+  periods are computed live from `created_at` + cadence + `now()` — no
+  Celery job needed (Celery/Beat stay idle, as before), using `dateutil`
+  for real calendar-month boundaries (added `python-dateutil` to
+  `requirements.txt`; days/weeks are fixed-length, unambiguous without it).
+  Wired into the one place it needed to touch existing logic:
+  `record_transaction`'s `CHIPS_OUT` branch now splits a buy-in into a
+  player-owed portion and a house-covered portion (capped by whatever's
+  left of the current period's — and, if set, the lifetime max's —
+  allowance) *before* the existing `chips_limit` check runs, since that
+  limit caps the player's own debt, not the total chips issued.
+  `PROFIT_SPLIT_STAKE` deliberately sits in neither `DEBIT_TYPES` nor
+  `CREDIT_TYPES` — it never touches player_balance, by construction.
+  **Scope decision, matching the concept doc's own wording**: only the
+  stake/buy-in side is actually applied automatically. The payout-split
+  fields (before/after buy-in basis, stake-ratio/custom-ratio/fixed+offset
+  method) are captured as configuration only for now, not yet wired into
+  `initiate_payout` — the concept doc itself says the Fixed method's
+  off-set is "for now... only setting the off-set amount, not actually
+  doing the maths for what goes to whom," and no worked example was given
+  for the ratio methods either. Revisit once that math is actually wanted.
+  New endpoints: `POST /api/deals/profit-split/` (create — auto-deactivates
+  any previous active arrangement for that player), `GET
+  /api/deals/profit-split/<player_id>/` (current arrangement + live
+  figures), `POST /api/deals/profit-split/<id>/deactivate/`.
+- All three: Owner-only at both the DRF permission layer (`IsOwner`) and
+  explicitly in the service layer (`operator.role` check) — Transfer and
+  Profit Split are standalone single-purpose actions with no other
+  legitimate caller, same pattern as `approve_payout`/`reject_payout`.
+- 36 new backend tests across the three units (4 + 11 + 21) — 187/187
+  passing, was 151. Verified live against the real dev DB (all three migrations applied) via
+  disposable throwaway players/game-days/arrangements — write-off cap,
+  transfer cap/void-both-legs, and profit-split per-period/cumulative-cap/
+  deactivation behavior all confirmed, then fully cleaned up; real game-day
+  history confirmed untouched throughout.
+- Next: a phone-frame HTML mockup of the mobile Deals screens (Ledger
+  Slate tokens, no app code yet) for review, then the actual Android/iOS
+  Expo app — see the approved plan.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

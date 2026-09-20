@@ -13,7 +13,7 @@ from accounts.models import FloorManager, Player, StaffUser
 
 from . import selectors
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
-from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, Transaction
+from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
 
 # A real table only has so many seats. Revised 2026-09-15: a departed player
 # returns ONLY by being issued chips (CHIPS_OUT) — never a bare re-add — and
@@ -315,6 +315,14 @@ def void_transaction(transaction_obj, actor, reason):
     Cashier can void their own entry only while its game-day is still open.
     Once closed (or for a between-game-day entry that's otherwise settled),
     only the Owner can amend/void it.
+
+    A Deals Transfer's two legs (DEAL_TRANSFER_OUT/IN, see
+    record_deal_transfer) are voided together, atomically — voiding only
+    one half would leave one player's debit undone without undoing the
+    other's matching credit, an inconsistent ledger. The linked leg is
+    voided with the same actor/reason, no separate authorization check
+    (voiding a transfer at all is already Owner-only in practice, since
+    Transfer creation itself is).
     """
     game_day = transaction_obj.game_day
     is_open = game_day is None or game_day.status == GameDay.Status.OPEN
@@ -328,11 +336,20 @@ def void_transaction(transaction_obj, actor, reason):
             'Only the recording Cashier (while the game-day is open) or the Owner can void this entry.'
         )
 
-    transaction_obj.is_voided = True
-    transaction_obj.voided_by = actor
-    transaction_obj.voided_at = timezone.now()
-    transaction_obj.void_reason = reason
-    transaction_obj.save(update_fields=['is_voided', 'voided_by', 'voided_at', 'void_reason'])
+    with db_transaction.atomic():
+        transaction_obj.is_voided = True
+        transaction_obj.voided_by = actor
+        transaction_obj.voided_at = timezone.now()
+        transaction_obj.void_reason = reason
+        transaction_obj.save(update_fields=['is_voided', 'voided_by', 'voided_at', 'void_reason'])
+
+        linked = transaction_obj.linked_transaction
+        if linked is not None and not linked.is_voided:
+            linked.is_voided = True
+            linked.voided_by = actor
+            linked.voided_at = timezone.now()
+            linked.void_reason = reason
+            linked.save(update_fields=['is_voided', 'voided_by', 'voided_at', 'void_reason'])
     return transaction_obj
 
 
@@ -357,7 +374,33 @@ DEFAULT_CHANNEL_BY_TYPE = {
     Transaction.Type.PAYOUT: Transaction.Channel.CASHIER,
     Transaction.Type.RAKE: Transaction.Channel.CASHIER,
     Transaction.Type.TIP: Transaction.Channel.CASHIER,
+    Transaction.Type.DEAL_TRANSFER_OUT: Transaction.Channel.DEAL,
+    Transaction.Type.DEAL_TRANSFER_IN: Transaction.Channel.DEAL,
 }
+
+
+def _apply_profit_split_stake(player, amount):
+    """
+    Returns (player_portion, house_portion, arrangement_or_None) for a
+    CHIPS_OUT of `amount` — see ProfitSplitArrangement's docstring and
+    record_transaction's CHIPS_OUT branch. No active arrangement, a zero
+    stake %, or an already-exhausted arrangement (end date / max resets /
+    max cumulative value reached) all fall through to "house covers
+    nothing," so this is a no-op for every player without one, by
+    construction.
+    """
+    arrangement = (
+        ProfitSplitArrangement.objects.filter(player=player, is_active=True).order_by('-created_at').first()
+    )
+    if arrangement is None or arrangement.house_stake_pct <= 0:
+        return amount, Decimal('0'), arrangement
+    status = selectors.profit_split_status(arrangement)
+    if status['is_exhausted']:
+        return amount, Decimal('0'), arrangement
+    uncapped_house_share = amount * arrangement.house_stake_pct / Decimal('100')
+    house_portion = min(uncapped_house_share, status['available_stake_this_period'], amount)
+    house_portion = house_portion.quantize(Decimal('0.01'))
+    return amount - house_portion, house_portion, arrangement
 
 
 def record_transaction(
@@ -388,8 +431,28 @@ def record_transaction(
     arithmetic unaffected — this is attribution layered on top, not a new
     ledger figure); SERVICE requires an active `service_staff` recipient.
     Neither field applies to any other type.
+
+    A WRITE_OFF (added 2026-09-20, part of "Deals" — see CONCEPT.md's Deals
+    section) always requires a `notes` reason — it's the one Transaction
+    type presented to the Owner with an on-screen "this can't be reversed"
+    warning, so the audit trail can't be left blank — and can't exceed the
+    player's current outstanding (lifetime) balance: a Deal can only ever
+    relieve debt, never push a player into or further into one. Capped
+    against player_balance (lifetime), not player_game_day_balance, since a
+    write-off is a general debt-relief tool, not scoped to one night's play.
     """
     _require_open_game_day(game_day, type)
+    if type == Transaction.Type.WRITE_OFF:
+        if player is None:
+            raise InvalidStateError('A write-off requires a player.')
+        if not notes.strip():
+            raise InvalidStateError('A reason is required for a write-off.')
+        outstanding = max(-selectors.player_balance(player), Decimal('0'))
+        if amount > outstanding:
+            raise InvalidStateError(
+                f"This exceeds {player.display_name}'s outstanding balance "
+                f'(outstanding: ₦{outstanding:,}).'
+            )
     if type == Transaction.Type.TIP:
         if tip_category not in (Transaction.TipCategory.DEALER, Transaction.TipCategory.SERVICE):
             raise InvalidStateError('A Tip must specify a category: Dealer or Service.')
@@ -400,9 +463,19 @@ def record_transaction(
             raise InvalidStateError('A Dealer tip cannot have a Service Staff recipient.')
     elif tip_category is not None or service_staff is not None:
         raise InvalidStateError('tip_category/service_staff only apply to a Tip.')
+
+    # "Deals" Profit Split stake (added 2026-09-20): if this player has an
+    # active arrangement, part of this buy-in is house-covered rather than
+    # owed by the player — see _apply_profit_split_stake. Computed BEFORE
+    # the chips_limit check below, since chips_limit caps the player's own
+    # debt, not the total chips handed to them at the table.
+    player_portion, house_portion, arrangement = amount, Decimal('0'), None
+    if type == Transaction.Type.CHIPS_OUT and player is not None:
+        player_portion, house_portion, arrangement = _apply_profit_split_stake(player, amount)
+
     if type == Transaction.Type.CHIPS_OUT and player is not None and player.chips_limit is not None:
         current_balance = selectors.player_game_day_balance(player, game_day) if game_day else Decimal('0')
-        debt_after = max(Decimal('0'), amount - current_balance)
+        debt_after = max(Decimal('0'), player_portion - current_balance)
         if debt_after > player.chips_limit:
             raise InvalidStateError(
                 f"This would exceed {player.display_name}'s chips limit for tonight "
@@ -415,14 +488,149 @@ def record_transaction(
             raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
     if game_day is not None and game_day.status == GameDay.Status.OPEN:
         _ensure_seated(game_day, player, recorded_by, revive=(type == Transaction.Type.CHIPS_OUT))
-    return Transaction.objects.create(
-        game_day=game_day, player=player, type=type, amount=amount,
-        currency=currency, conversion_rate=conversion_rate,
-        channel=channel or DEFAULT_CHANNEL_BY_TYPE[type], notes=notes,
-        recorded_by=recorded_by, floor_manager=fm,
-        confirmed_at=timezone.now() if fm else None,
-        tip_category=tip_category, service_staff=service_staff,
+
+    with db_transaction.atomic():
+        txn = Transaction.objects.create(
+            game_day=game_day, player=player, type=type,
+            amount=player_portion if type == Transaction.Type.CHIPS_OUT else amount,
+            currency=currency, conversion_rate=conversion_rate,
+            channel=channel or DEFAULT_CHANNEL_BY_TYPE[type], notes=notes,
+            recorded_by=recorded_by, floor_manager=fm,
+            confirmed_at=timezone.now() if fm else None,
+            tip_category=tip_category, service_staff=service_staff,
+            profit_split_arrangement=arrangement if house_portion > 0 else None,
+        )
+        if house_portion > 0:
+            Transaction.objects.create(
+                game_day=game_day, player=player, type=Transaction.Type.PROFIT_SPLIT_STAKE,
+                amount=house_portion, channel=Transaction.Channel.DEAL,
+                notes=f'House stake ({arrangement.house_stake_pct}%) toward this buy-in',
+                recorded_by=recorded_by, profit_split_arrangement=arrangement,
+            )
+    return txn
+
+
+def record_deal_transfer(source_player, destination_player, amount, reason, operator):
+    """
+    "Deals" Transfer (added 2026-09-20) — settles one player's debt (or tops
+    up their credit) using another player's excess, as a linked pair of
+    Transaction rows: DEAL_TRANSFER_OUT (debit, source) and DEAL_TRANSFER_IN
+    (credit, destination), both game_day=None (an Outstanding-ledger entry,
+    not tied to one night — the source's excess and the destination's debt
+    are both lifetime figures). Owner-only, checked here explicitly (not
+    just at the view layer) since this is a standalone single-purpose
+    action with no other legitimate caller — same pattern as
+    approve_payout/reject_payout.
+
+    Can only ever relieve debt, never create or worsen it: the source must
+    currently have a positive lifetime balance, and the amount can't exceed
+    it — mirrors initiate_payout's `available = max(balance, 0)` capping
+    pattern, but against lifetime player_balance rather than one game-day.
+    """
+    if operator.role != StaffUser.Role.OWNER:
+        raise AuthorizationError('Only the Owner can record a Deals transfer.')
+    if source_player.pk == destination_player.pk:
+        raise InvalidStateError('Cannot transfer a player\'s balance to themselves.')
+    if amount <= 0:
+        raise InvalidStateError('Transfer amount must be greater than zero.')
+    if not reason.strip():
+        raise InvalidStateError('A reason is required for a transfer.')
+
+    available = max(selectors.player_balance(source_player), Decimal('0'))
+    if amount > available:
+        raise InvalidStateError(
+            f"This exceeds {source_player.display_name}'s available balance "
+            f'(available: ₦{available:,}).'
+        )
+
+    with db_transaction.atomic():
+        out_txn = Transaction.objects.create(
+            player=source_player, type=Transaction.Type.DEAL_TRANSFER_OUT, amount=amount,
+            channel=Transaction.Channel.DEAL, notes=reason, recorded_by=operator,
+        )
+        in_txn = Transaction.objects.create(
+            player=destination_player, type=Transaction.Type.DEAL_TRANSFER_IN, amount=amount,
+            channel=Transaction.Channel.DEAL, notes=reason, recorded_by=operator,
+        )
+        out_txn.linked_transaction = in_txn
+        out_txn.save(update_fields=['linked_transaction'])
+        in_txn.linked_transaction = out_txn
+        in_txn.save(update_fields=['linked_transaction'])
+    return out_txn, in_txn
+
+
+def _validate_profit_split_arrangement(
+    house_stake_pct, cap_amount, reset_cadence, ends_at, max_resets, max_cumulative_value,
+    payout_split_method, custom_ratio_pct, fixed_amount,
+):
+    if not (Decimal('0') <= house_stake_pct <= Decimal('100')):
+        raise InvalidStateError('House stake % must be between 0 and 100.')
+    if cap_amount < 0:
+        raise InvalidStateError('Cap amount cannot be negative.')
+    if reset_cadence == ProfitSplitArrangement.ResetCadence.ONE_OFF:
+        if ends_at or max_resets or max_cumulative_value:
+            raise InvalidStateError(
+                'End date / number of times / max value only apply to a recurring reset.'
+            )
+    if max_resets is not None and max_resets <= 0:
+        raise InvalidStateError('Number of times must be a positive number.')
+    if max_cumulative_value is not None and max_cumulative_value < 0:
+        raise InvalidStateError('Max value cannot be negative.')
+    if payout_split_method == ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO and house_stake_pct <= 0:
+        raise InvalidStateError('Ratio-according-to-stake requires a stake percentage greater than zero.')
+    if payout_split_method == ProfitSplitArrangement.PayoutSplitMethod.CUSTOM_RATIO:
+        if custom_ratio_pct is None or not (Decimal('0') <= custom_ratio_pct <= Decimal('100')):
+            raise InvalidStateError('A custom house percentage (0-100) is required for this payout split method.')
+    if payout_split_method == ProfitSplitArrangement.PayoutSplitMethod.FIXED:
+        if fixed_amount is None or fixed_amount < 0:
+            raise InvalidStateError('A fixed amount is required for this payout split method.')
+
+
+def create_profit_split_arrangement(
+    player, operator, house_stake_pct, cap_amount, reset_cadence=ProfitSplitArrangement.ResetCadence.ONE_OFF,
+    ends_at=None, max_resets=None, max_cumulative_value=None,
+    payout_basis=ProfitSplitArrangement.PayoutBasis.AFTER_BUYIN,
+    payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO,
+    custom_ratio_pct=None, fixed_amount=None, fixed_offset=None,
+):
+    """
+    "Deals" Profit Split (added 2026-09-20) — Owner-only, checked here
+    explicitly (not just at the view layer), same pattern as
+    record_deal_transfer/approve_payout: a standalone single-purpose action
+    with no other legitimate caller. Creating a new arrangement for a
+    player automatically deactivates any previous active one for them —
+    see ProfitSplitArrangement's docstring on why only one is meant to
+    apply at a time. Only the stake side is actually enforced automatically
+    (record_transaction's CHIPS_OUT branch); the payout-split fields are
+    captured as configuration only for now.
+    """
+    if operator.role != StaffUser.Role.OWNER:
+        raise AuthorizationError('Only the Owner can set up a Profit Split arrangement.')
+    _validate_profit_split_arrangement(
+        house_stake_pct, cap_amount, reset_cadence, ends_at, max_resets, max_cumulative_value,
+        payout_split_method, custom_ratio_pct, fixed_amount,
     )
+    with db_transaction.atomic():
+        ProfitSplitArrangement.objects.filter(player=player, is_active=True).update(
+            is_active=False, deactivated_at=timezone.now(),
+        )
+        return ProfitSplitArrangement.objects.create(
+            player=player, house_stake_pct=house_stake_pct, cap_amount=cap_amount,
+            reset_cadence=reset_cadence, ends_at=ends_at, max_resets=max_resets,
+            max_cumulative_value=max_cumulative_value, payout_basis=payout_basis,
+            payout_split_method=payout_split_method, custom_ratio_pct=custom_ratio_pct,
+            fixed_amount=fixed_amount, fixed_offset=fixed_offset, created_by=operator,
+        )
+
+
+def deactivate_profit_split_arrangement(arrangement, operator):
+    """Owner-only, ends an arrangement early — the per-period cap simply stops applying to future buy-ins."""
+    if operator.role != StaffUser.Role.OWNER:
+        raise AuthorizationError('Only the Owner can end a Profit Split arrangement.')
+    arrangement.is_active = False
+    arrangement.deactivated_at = timezone.now()
+    arrangement.save(update_fields=['is_active', 'deactivated_at'])
+    return arrangement
 
 
 def initiate_payout(player, amount, operator, game_day=None):
