@@ -11,7 +11,7 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='', cast=lambda v: [h.strip() fo
 _db = urlparse(config('DATABASE_URL'))
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        'ENGINE': 'django_tenants.postgresql_backend',
         'NAME': _db.path[1:],
         'USER': _db.username,
         'PASSWORD': _db.password,

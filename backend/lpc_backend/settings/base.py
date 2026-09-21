@@ -13,16 +13,34 @@ AUTHENTICATION_BACKENDS = ['accounts.backends.CaseInsensitiveModelBackend']
 
 SECRET_KEY = config('SECRET_KEY')
 
-INSTALLED_APPS = [
+# --- Multi-tenancy (django-tenants: one Postgres schema per club) ---
+# SHARED_APPS live once, in the `public` schema — mostly just what's needed
+# to identify a tenant before its own schema can even be switched into.
+# TENANT_APPS are synced into EVERY club's own schema: a club's players,
+# transactions, staff logins, permissions, etc. are physically separate
+# from every other club's, not merely filtered by a foreign key. See
+# tenants/models.py for the Client/Domain models this all pivots on.
+#
+# django.contrib.contenttypes is deliberately listed in both — it's
+# required in SHARED_APPS by django-tenants itself, but several
+# TENANT_APPS models (permissions, admin log entries) hold FKs to
+# ContentType rows that need to resolve within their own schema too.
+SHARED_APPS = [
+    'django_tenants',  # must load before anything else that touches the DB
+    'tenants',
+    'django.contrib.contenttypes',
+    'django.contrib.staticfiles',
+    'corsheaders',
+    'rest_framework',
+]
+
+TENANT_APPS = [
+    'django.contrib.contenttypes',
     'django.contrib.admin',
     'django.contrib.auth',
-    'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'rest_framework',
     'rest_framework_simplejwt.token_blacklist',
-    'corsheaders',
     'django_celery_results',
     'django_celery_beat',
     'accounts',
@@ -30,7 +48,18 @@ INSTALLED_APPS = [
     'payments',
 ]
 
+INSTALLED_APPS = list(SHARED_APPS) + [app for app in TENANT_APPS if app not in SHARED_APPS]
+
+TENANT_MODEL = 'tenants.Client'
+TENANT_DOMAIN_MODEL = 'tenants.Domain'
+
+DATABASE_ROUTERS = ['django_tenants.routers.TenantSyncRouter']
+
 MIDDLEWARE = [
+    # Must run first: resolves the tenant from the request's Host header
+    # and switches the DB connection to that club's schema before any
+    # other middleware or view code runs.
+    'django_tenants.middleware.main.TenantMainMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',

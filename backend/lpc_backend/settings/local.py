@@ -4,11 +4,16 @@ from .base import *
 
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.100.2', '4448-102-88-168-35.ngrok-free.app']
+ALLOWED_HOSTS = [
+    'localhost', '127.0.0.1', '192.168.100.2', '192.168.88.12',
+    '4448-102-88-168-35.ngrok-free.app', 'test1.localhost', 'test2.localhost',
+]
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        # django-tenants' backend wraps the plain postgresql one — it's
+        # what actually switches the connection's search_path per request.
+        'ENGINE': 'django_tenants.postgresql_backend',
         'NAME': config('DB_NAME', default='lpc_reconciliation'),
         'USER': config('DB_USER', default='postgres'),
         'PASSWORD': config('DB_PASSWORD', default='postgres'),

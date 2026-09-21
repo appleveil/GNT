@@ -1,5 +1,6 @@
 from rest_framework import status
-from rest_framework.test import APITestCase
+
+from lpc_backend.testing import APITestCase
 
 from .models import FloorManager, Player, PlayerBankAccount, StaffUser
 

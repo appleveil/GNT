@@ -3,9 +3,10 @@ import hmac
 import json
 from unittest.mock import patch
 
-from django.test import TestCase, override_settings
+from django.test import override_settings
 from rest_framework import status
-from rest_framework.test import APITestCase
+
+from lpc_backend.testing import APITestCase, TestCase
 
 from accounts.models import Player, StaffUser
 from gaming.models import Transaction

@@ -476,6 +476,85 @@ then a batch of real usability feedback once players were visible.
   user's own device (prior two rounds were not — logged here as the
   record of what didn't work, not just what did).
 
+### Multi-tenancy — schema-per-tenant via django-tenants (2026-09-21)
+The user is building this as a product for multiple clubs (2 confirmed,
+possibly 5-20 if it goes well), not just the one club this schema
+implicitly assumed. Decided against both a fork-per-client codebase and
+row-level tenancy (a `club_id` on every table) — for financial/
+reconciliation data specifically, a missed `.filter(club=...)` is a real
+cross-client data leak, not a cosmetic bug. **Schema-per-tenant** instead:
+each club's data lives in its own Postgres schema, physically separate,
+enforced by the database rather than by remembering a filter everywhere.
+Done now, pre-launch, specifically because it's far cheaper before any
+client's real data exists than after.
+
+- [x] **`django-tenants==3.14.0`** added. New `tenants` app: `Client`
+  (`TenantMixin` — one row per club, `auto_create_schema=True` so saving
+  one creates+migrates its schema automatically) and `Domain`
+  (`DomainMixin` — maps a hostname to a Client; tenant resolution is via
+  the request's Host header, stripped of port, exact match required).
+- [x] `INSTALLED_APPS` split into `SHARED_APPS` (public schema:
+  `django_tenants`, `tenants`, `contenttypes`, plus the apps with no
+  models — `staticfiles`/`corsheaders`/`rest_framework`) and
+  `TENANT_APPS` (everything else — `accounts`, `gaming`, `payments`,
+  `admin`, `auth`, `sessions`, `token_blacklist`, both Celery apps —
+  replicated into every club's own schema). `contenttypes` deliberately
+  listed in both, per django-tenants' own requirement.
+  `DATABASE_ROUTERS = ['django_tenants.routers.TenantSyncRouter']`;
+  `TenantMainMiddleware` first in `MIDDLEWARE`; DB engine switched to
+  `django_tenants.postgresql_backend` in both `local.py`/`production.py`.
+- [x] Local dev DB reset clean (pre-launch, disposable demo data) and
+  rebuilt: `migrate_schemas --shared` for the public schema, then a
+  `test1` tenant created and seeded via `seed_demo_data` (wrapped by
+  django-tenants' `tenant_command`) — verified real cross-tenant
+  isolation end to end: `owner1`/`demo-pass-1` logs in successfully
+  against `test1`'s domain and 401s against an empty second tenant with
+  the identical credentials, over real HTTP requests through
+  `TenantMainMiddleware`, not just at the ORM level.
+- [x] New `onboard_club` management command (named to avoid colliding
+  with django-tenants' own built-in `create_tenant` command, confirmed by
+  hitting that collision directly): `manage.py onboard_club <schema_name>
+  <name> <domain...> [--seed]` — creates the Client + Domain rows and
+  optionally seeds demo data, the entire "provision a new client"
+  operation in one command. Deliberately no admin UI for this yet — at
+  2-20 clients, a developer-run command for an infrequent operation is
+  the right amount of tooling; a real platform-admin panel is a later
+  problem, not blocking today.
+- [x] **Full existing test suite (187 tests) migrated and green.** Plain
+  `TestCase`/DRF `APITestCase` can't see any TENANT_APPS table at all
+  (they run against the public schema) — new `lpc_backend/testing.py`
+  provides drop-in `TestCase`/`APITestCase` built on django-tenants'
+  `TenantTestCase`, with two bugs in that base class worked around
+  explicitly (documented in the module): (1) its default test domain
+  doesn't match Django's test client's default `Host: testserver`, so
+  every request 404'd at the tenant-resolution middleware regardless of
+  view correctness; (2) `TenantTestCase.setUpClass` never calls
+  `super().setUpClass()`, which silently skips Django's own activation of
+  a class-level `@override_settings(...)` decorator — surfaced by
+  `payments/tests.py`'s Paystack-signature tests, which run against real
+  settings instead of the overridden test secret with no error, just a
+  wrong result. All three apps' `tests.py` updated to import from
+  `lpc_backend.testing` instead of `django.test`/`rest_framework.test`
+  directly — nothing else about how the tests are written changed.
+- [x] `Procfile`'s release step: `migrate` → `migrate_schemas`.
+- [x] Incidental fix, unrelated to tenancy: the Mac's LAN IP had changed
+  (`192.168.100.2` → `192.168.88.12`, a Wi-Fi reconnect) since the last
+  session, breaking the mobile app's connection to the dev backend
+  independently of this work — caught while verifying the LAN-IP request
+  path still resolves tenants correctly; updated `ALLOWED_HOSTS`,
+  `mobile/src/api/config.ts`, and the `test1` tenant's `Domain` rows to
+  match. Confirmed the exact mobile-app request path (login + players
+  fetch over the LAN IP) still works end to end under the new setup.
+- Not yet done: a real platform-admin surface for onboarding/managing
+  clients (currently the `onboard_club` command, run by a developer —
+  see above); tenant-aware Celery Beat (no periodic tasks exist yet, so
+  nothing depends on this today, but `django-tenants` + scheduled tasks
+  needs its own solution when one is added — plain Beat has no schema
+  concept); the mobile app's "resolve club → API base URL" step (today
+  it hits one fixed `API_BASE_URL`, fine while there's one club to test
+  against, but will need a real "which club" resolution step before a
+  second real club's data needs to be reachable from the app).
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

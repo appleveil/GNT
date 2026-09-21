@@ -2,10 +2,10 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
-from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+
+from lpc_backend.testing import APITestCase, TestCase
 
 from accounts.models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
 
