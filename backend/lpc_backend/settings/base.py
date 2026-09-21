@@ -25,10 +25,26 @@ SECRET_KEY = config('SECRET_KEY')
 # required in SHARED_APPS by django-tenants itself, but several
 # TENANT_APPS models (permissions, admin log entries) hold FKs to
 # ContentType rows that need to resolve within their own schema too.
+#
+# admin/auth/sessions/accounts are ALSO deliberately listed in both: this
+# is what makes a genuine SITE-WIDE Django admin login possible — one not
+# tied to any particular club. The public schema is itself registered as
+# a tenant (see tenants/models.py's "public tenant" — Client with
+# schema_name='public'), so these apps' migrations run there too, giving
+# public its own, separate accounts_staffuser table. A superuser created
+# while connected to public (the default, unless a schema is explicitly
+# selected) exists ONLY there — a real StaffUser row, completely separate
+# from any club's staff, reachable via whatever Domain maps to the public
+# tenant (e.g. admin.localhost in dev). Without this, /admin/ would only
+# ever be reachable per-club, logged in as that club's own staff.
 SHARED_APPS = [
     'django_tenants',  # must load before anything else that touches the DB
     'tenants',
     'django.contrib.contenttypes',
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.sessions',
+    'accounts',
     'django.contrib.staticfiles',
     'corsheaders',
     'rest_framework',

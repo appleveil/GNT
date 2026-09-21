@@ -596,6 +596,51 @@ client's real data exists than after.
   against, but will need a real "which club" resolution step before a
   second real club's data needs to be reachable from the app).
 
+### A genuine site-wide Django admin login, not tied to any club (2026-09-21)
+`django.contrib.admin`/`auth`/`sessions` and `accounts` were TENANT_APPS
+only — every StaffUser, including any superuser, only ever existed inside
+one club's own schema, so `/admin/` was necessarily that club's admin,
+logged in as that club's own staff. Requested explicitly: a real
+platform-wide admin, separate from every client.
+
+- [x] `accounts`, `admin`, `auth`, `sessions` now listed in **both**
+  `SHARED_APPS` and `TENANT_APPS` (same pattern already used for
+  `contenttypes`) — their migrations now also run against the `public`
+  schema, giving it its own, independent `accounts_staffuser` table
+  (and everything else those apps need) separate from every club's.
+- [x] The `public` schema is now itself registered as a tenant (a
+  `Client` row with `schema_name='public'`) with its own `Domain`
+  (`admin.localhost` in dev) — `TenantMainMiddleware` can only route a
+  request into a schema that has a matching Domain row, public included.
+- [x] `manage.py createsuperuser`, run with no tenant specified, now
+  does exactly what's expected: defaults to the `public` schema, so the
+  resulting superuser exists there only. Verified real isolation:
+  `admin` exists in `public`'s `accounts_staffuser` and does **not**
+  exist in `test1`'s.
+- [x] One rough edge, hit and worked around while wiring this up: the
+  first `migrate_schemas --shared` after this change failed
+  (`relation "auth_permission" does not exist`) because the *previous*
+  `--shared` run (before these apps were shared) had already recorded
+  their migrations as "applied" in public — django-tenants' migration
+  executor marks every app's migrations as applied in its bookkeeping
+  table regardless of whether the router actually let the tables get
+  created, so Django's `migrate` saw "already applied" and skipped
+  re-running them for real this time. Fixed by clearing the stale
+  `django_migrations` rows for the newly-shared (and, to keep the
+  ledger internally consistent, the still-tenant-only) apps in `public`
+  before re-running — a one-time fix, not something that recurs.
+- [x] `StaffUser.role` (required, no default) isn't set by
+  `createsuperuser` — it has no opinion on custom fields outside
+  `REQUIRED_FIELDS`. Ends up `''` rather than erroring (Django's
+  `CharField` defaults to an empty string, which satisfies the column's
+  `NOT NULL`). Harmless — `is_superuser` bypasses every permission
+  check this app has, `role` is never consulted for this account — but
+  cosmetic: `StaffUser.__str__`'s `get_role_display()` shows nothing
+  for it. Not fixed; none of the existing Role choices (Cashier/
+  Accountant/Owner/Floor Manager) fit a platform-wide account anyway.
+- Verified: full 187-test suite still green after the SHARED_APPS
+  change.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

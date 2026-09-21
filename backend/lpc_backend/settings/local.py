@@ -7,6 +7,7 @@ DEBUG = True
 ALLOWED_HOSTS = [
     'localhost', '127.0.0.1', '192.168.100.2', '192.168.88.12',
     '4448-102-88-168-35.ngrok-free.app', 'test1.localhost', 'test2.localhost',
+    'admin.localhost',
 ]
 
 DATABASES = {
