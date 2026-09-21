@@ -14,6 +14,7 @@ export type Player = {
 export type ResetCadence = 'ONE_OFF' | 'DAILY' | 'WEEKLY' | 'MONTHLY';
 export type PayoutBasis = 'BEFORE_BUYIN' | 'AFTER_BUYIN';
 export type PayoutSplitMethod = 'STAKE_RATIO' | 'CUSTOM_RATIO' | 'FIXED';
+export type PayoutLifespan = 'INDEFINITE' | 'DEBT_CLEARED' | 'CAPPED';
 
 /**
  * One row in the local Deals log — see src/db/deals.ts. This is the
@@ -61,6 +62,16 @@ export type DealRecord =
       customRatioPct: number | null;
       fixedAmount: number | null;
       fixedOffset: number | null;
+      /** How long the payout split applies. Absent on records saved before
+       * this existed — always treat that as 'INDEFINITE', the prior
+       * behaviour (see dealText.ts::payoutLifespanLabel). */
+      payoutLifespan: PayoutLifespan | null;
+      /** Only meaningful when payoutLifespan is 'CAPPED': the house's
+       * cumulative take across every payout event, before the split
+       * stops. Not enforced anywhere — the app has no record of
+       * individual payout events to sum against this, so it's advisory
+       * only, same as Stake's own Until/Number of times/Max value. */
+      payoutCapAmount: number | null;
     }
   | {
       id: string;
@@ -70,6 +81,7 @@ export type DealRecord =
       playerName: string;
       /** id of the PROFIT_SPLIT_CREATED record this ends. */
       arrangementId: string;
+      reason: string;
     };
 
 export type DealKindFilter = 'ALL' | 'FIXED' | 'TRANSFER' | 'PROFIT_SPLIT';

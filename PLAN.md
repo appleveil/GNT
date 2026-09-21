@@ -476,6 +476,47 @@ then a batch of real usability feedback once players were visible.
   user's own device (prior two rounds were not — logged here as the
   record of what didn't work, not just what did).
 
+### "Deals" mobile app — History cleanup, End confirm+reason, Payout lifespan (2026-09-21)
+- [x] **History rows no longer repeat the deal-type name** ("Fixed —",
+  "Transfer —", "Stake and Profit splits —") — the row's icon plus
+  `dealSummary()` underneath already say what kind of deal it is. New
+  `dealRowTitle()` (`src/db/dealText.ts`) used only for the row itself;
+  Transfer keeps its "source → destination" since that's not inferable
+  from the icon alone. `dealTitle()` (the full type name) is unchanged
+  and still used where there's no icon to lean on — the share action
+  sheet's title, and the first line of shared text/PDF.
+- [x] **Ending an arrangement now requires a reason and a confirmation
+  dialog** — previously a single tap, no undo, no record of why. Tapping
+  "End arrangement" reveals a required Reason field in place; a second
+  tap opens a real confirm dialog ("can't be undone"), only then ends
+  it. The reason is saved on the `PROFIT_SPLIT_ENDED` record and now
+  shows up everywhere that record is referenced: History's summary, the
+  read-only detail screen, the CSV export, and shared text/PDF.
+- [x] **"Until" (Stake's Renews condition) is a real calendar picker** —
+  `@react-native-community/datetimepicker`, `minimumDate` set to today so
+  a past date can't be selected at all. Updated mid-work to the
+  library's current `onValueChange`/`onDismiss` API after `onChange` was
+  flagged deprecated at runtime.
+- [x] **New Payout lifespan** — Indefinite / Until debt clears / Until a
+  set amount is reached, decided via a short design exchange (see that
+  conversation for the fuller reasoning): "debt clears" checks the
+  player's live overall balance (the same figure Fixed write-off already
+  reads), and — because that data already exists — the app can actually
+  *do* something with it: a banner nudges the Owner to end the
+  arrangement once the balance has cleared, checked whenever the screen
+  is opened. The cumulative-cap option is recorded and shown but
+  **can't be enforced or nudged** — the app has no record of individual
+  payout events to sum against it, the same limitation Stake's existing
+  Until/Number of times/Max value already have. The whole Lifespan
+  section is hidden until a real (applicable) split method is chosen,
+  not while the default, possibly-inapplicable selection is still
+  showing.
+- [x] Deals home's "Stake and Profit splits" button shows an ACTIVE
+  badge when the player already has a live arrangement, re-checked on
+  every screen focus.
+- Verified: `tsc --noEmit` clean, `expo export --platform ios` bundles
+  cleanly after each change.
+
 ### Multi-tenancy — schema-per-tenant via django-tenants (2026-09-21)
 The user is building this as a product for multiple clubs (2 confirmed,
 possibly 5-20 if it goes well), not just the one club this schema

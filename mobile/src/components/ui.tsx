@@ -214,10 +214,22 @@ export function LinkButton({ title, onPress }: { title: string; onPress: () => v
   );
 }
 
-export function OutlineDangerButton({ title, onPress }: { title: string; onPress: () => void }) {
+export function OutlineDangerButton({
+  title,
+  onPress,
+  disabled,
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
   return (
-    <Pressable onPress={onPress} style={styles.dangerOutlineButton}>
-      <Text style={styles.dangerOutlineText}>{title}</Text>
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={[styles.dangerOutlineButton, disabled && styles.dangerOutlineButtonDisabled]}
+    >
+      <Text style={[styles.dangerOutlineText, disabled && styles.dangerOutlineTextDisabled]}>{title}</Text>
     </Pressable>
   );
 }
@@ -363,6 +375,8 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
   },
   dangerOutlineText: { color: colors.dangerText, fontSize: 13.5, fontWeight: '600' },
+  dangerOutlineButtonDisabled: { borderColor: colors.border, opacity: 0.6 },
+  dangerOutlineTextDisabled: { color: colors.textTertiary },
   linkButtonText: { color: colors.accentText, fontWeight: '600', fontSize: 13, paddingVertical: spacing.xs },
 
   banner: { borderRadius: radii.sm, padding: spacing.md, marginBottom: spacing.lg },

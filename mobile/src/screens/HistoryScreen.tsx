@@ -6,7 +6,7 @@ import type { HistoryStackParamList } from '../navigation/types';
 import type { DealKindFilter, DealRecord } from '../types';
 import { getAllDeals } from '../db/deals';
 import { exportDealsAsCsv, shareDealAsPdf, shareDealAsText } from '../db/export';
-import { dealSummary, dealTitle } from '../db/dealText';
+import { dealRowTitle, dealSummary, dealTitle } from '../db/dealText';
 import { FixedIcon, TransferIcon, PercentCircleIcon, ShareIcon } from '../components/icons';
 import { naira } from '../components/ui';
 import { colors, radii, spacing } from '../theme/tokens';
@@ -120,7 +120,7 @@ function HistoryRow({
   onShare?: () => void;
 }) {
   const when = new Date(record.createdAt).toLocaleString();
-  const title = dealTitle(record);
+  const title = dealRowTitle(record);
   const sub = dealSummary(record);
   let icon: React.ReactNode;
   let iconBg: string;

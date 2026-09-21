@@ -4,6 +4,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { HistoryStackParamList } from '../navigation/types';
 import type { DealRecord } from '../types';
 import { getAllDeals } from '../db/deals';
+import { payoutLifespanLabel } from '../db/dealText';
 import { Banner, SectionCard, naira } from '../components/ui';
 import { PercentCircleIcon, PayoutIcon } from '../components/icons';
 import { colors, radii, spacing } from '../theme/tokens';
@@ -51,6 +52,7 @@ export default function ProfitSplitDetailScreen({ route }: Props) {
         </View>
         <KvRow k="Set up" v={new Date(created.createdAt).toLocaleString()} />
         {ended ? <KvRow k="Ended" v={new Date(ended.createdAt).toLocaleString()} /> : null}
+        {ended ? <KvRow k="Reason for ending" v={ended.reason} /> : null}
       </View>
 
       <SectionCard icon={<PercentCircleIcon color={colors.accentText} />} title="Stake" subtitle="How much of buy-in the house covered">
@@ -73,6 +75,7 @@ export default function ProfitSplitDetailScreen({ route }: Props) {
           <>
             <KvRow k="Basis" v={created.payoutBasis === 'BEFORE_BUYIN' ? 'Before buy-in' : 'After buy-in'} />
             <KvRow k="Split method" v={splitMethodLabel(created)} />
+            <KvRow k="Lifespan" v={payoutLifespanLabel(created)} />
           </>
         ) : (
           <Text style={styles.emptyNote}>No payout split was set on this arrangement.</Text>

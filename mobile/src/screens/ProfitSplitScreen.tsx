@@ -1,22 +1,27 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { DealsStackParamList } from '../navigation/types';
-import type { PayoutBasis, PayoutSplitMethod, ResetCadence } from '../types';
+import type { PayoutBasis, PayoutLifespan, PayoutSplitMethod, ResetCadence } from '../types';
 import {
+  Banner,
   Field,
   KeyboardAvoidingScreen,
+  LinkButton,
   MoneyInput,
   OutlineDangerButton,
   PrimaryButton,
   RadioOption,
   SectionCard,
   SegmentedControl,
+  TextField,
   naira,
 } from '../components/ui';
 import { getActiveProfitSplit, insertDeal } from '../db/deals';
+import { getEffectiveBalance } from '../db/effectiveBalance';
 import { useKeyboardVisible } from '../hooks/useKeyboardVisible';
 import { colors, radii, spacing } from '../theme/tokens';
 import { PercentCircleIcon, PayoutIcon } from '../components/icons';
@@ -31,17 +36,42 @@ const CADENCE_OPTIONS: { label: string; value: ResetCadence }[] = [
   { label: 'Monthly', value: 'MONTHLY' },
 ];
 
+// `until` is stored as a plain YYYY-MM-DD string (matches the read-only
+// detail screen and every export/share) — these just convert at the edges
+// so the picker can work in real Date objects.
+function toIsoDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function fromIsoDate(iso: string): Date {
+  const d = new Date(iso + 'T00:00:00');
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+function formatIsoDate(iso: string): string {
+  return fromIsoDate(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 export default function ProfitSplitScreen({ route }: Props) {
   const { player } = route.params;
   const headerHeight = useHeaderHeight();
   const scrollRef = useRef<ScrollView>(null);
   const [active, setActive] = useState<ActiveArrangement | null>(null);
+  // Ending is deliberately two-step: revealing the reason field is not
+  // itself the end action, and the reason is required before the final
+  // confirm dialog is even offered — see onConfirmEnd.
+  const [endingOpen, setEndingOpen] = useState(false);
+  const [endReason, setEndReason] = useState('');
 
   const [stakeOn, setStakeOn] = useState(false);
   const [stakePct, setStakePct] = useState('50');
   const [cap, setCap] = useState('20000');
   const [renews, setRenews] = useState<ResetCadence>('ONE_OFF');
   const [until, setUntil] = useState('');
+  const [showUntilPicker, setShowUntilPicker] = useState(false);
   const [maxTimes, setMaxTimes] = useState('');
   const [maxValue, setMaxValue] = useState('');
 
@@ -51,6 +81,12 @@ export default function ProfitSplitScreen({ route }: Props) {
   const [customRatioPct, setCustomRatioPct] = useState('');
   const [fixedAmount, setFixedAmount] = useState('');
   const [fixedOffset, setFixedOffset] = useState('');
+  const [payoutLifespan, setPayoutLifespan] = useState<PayoutLifespan>('INDEFINITE');
+  const [payoutCapAmount, setPayoutCapAmount] = useState('');
+
+  // For the "until debt clears" nudge below — refreshed on every focus,
+  // same as `active`, so it reflects Deals saved elsewhere in the meantime.
+  const [balance, setBalance] = useState(player.balance);
 
   const [saving, setSaving] = useState(false);
   // Extra bottom scroll-slack is only needed while the keyboard is
@@ -68,6 +104,7 @@ export default function ProfitSplitScreen({ route }: Props) {
     setCap('20000');
     setRenews('ONE_OFF');
     setUntil('');
+    setShowUntilPicker(false);
     setMaxTimes('');
     setMaxValue('');
     setPayoutOn(false);
@@ -76,6 +113,8 @@ export default function ProfitSplitScreen({ route }: Props) {
     setCustomRatioPct('');
     setFixedAmount('');
     setFixedOffset('');
+    setPayoutLifespan('INDEFINITE');
+    setPayoutCapAmount('');
   }
 
   useFocusEffect(
@@ -84,14 +123,19 @@ export default function ProfitSplitScreen({ route }: Props) {
       getActiveProfitSplit(player.id).then((a) => {
         if (!cancelled) setActive(a as ActiveArrangement | null);
       });
+      getEffectiveBalance(player).then((b) => {
+        if (!cancelled) setBalance(b);
+      });
       resetForm();
+      setEndingOpen(false);
+      setEndReason('');
       return () => {
         cancelled = true;
       };
     }, [player.id]),
   );
 
-  async function onEnd() {
+  async function onEnd(reason: string) {
     if (!active) return;
     try {
       await insertDeal({
@@ -99,12 +143,30 @@ export default function ProfitSplitScreen({ route }: Props) {
         playerId: player.id,
         playerName: player.displayName,
         arrangementId: active.id,
+        reason,
       });
       setActive(null);
+      setEndingOpen(false);
+      setEndReason('');
       Alert.alert('Arrangement ended', `${player.displayName}'s Profit Split arrangement has been ended.`);
     } catch (e: any) {
       Alert.alert('Failed to end arrangement', e?.message ?? 'Something went wrong. Please try again.');
     }
+  }
+
+  // The reason field's Field-level "required" marker already stops an
+  // empty submit from doing anything visible; this Alert is the actual
+  // confirmation step, since ending an arrangement can't be undone.
+  function onConfirmEnd() {
+    if (!endReason.trim() || !active) return;
+    Alert.alert(
+      'End this arrangement?',
+      `This ends ${player.displayName}'s Stake and Profit splits arrangement. This can't be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'End arrangement', style: 'destructive', onPress: () => onEnd(endReason.trim()) },
+      ],
+    );
   }
 
   // Turning the stake off makes "Ratio: according to stake" meaningless —
@@ -121,7 +183,8 @@ export default function ProfitSplitScreen({ route }: Props) {
     !payoutOn ||
     (splitMethodApplicable &&
       (splitMethod === 'CUSTOM_RATIO' ? customRatioPct.trim().length > 0 : true) &&
-      (splitMethod === 'FIXED' ? fixedAmount.trim().length > 0 : true));
+      (splitMethod === 'FIXED' ? fixedAmount.trim().length > 0 : true) &&
+      (payoutLifespan === 'CAPPED' ? payoutCapAmount.trim().length > 0 : true));
   const canSubmit = (stakeOn || payoutOn) && stakeValid && payoutValid;
 
   async function onSubmit() {
@@ -145,6 +208,8 @@ export default function ProfitSplitScreen({ route }: Props) {
         customRatioPct: payoutOn && splitMethod === 'CUSTOM_RATIO' ? parseFloat(customRatioPct) || 0 : null,
         fixedAmount: payoutOn && splitMethod === 'FIXED' ? parseFloat(fixedAmount) || 0 : null,
         fixedOffset: payoutOn && splitMethod === 'FIXED' && fixedOffset ? parseFloat(fixedOffset) : null,
+        payoutLifespan: payoutOn ? payoutLifespan : null,
+        payoutCapAmount: payoutOn && payoutLifespan === 'CAPPED' ? parseFloat(payoutCapAmount) || 0 : null,
       });
       Alert.alert('Arrangement saved', `A Profit Split arrangement has been set up for ${player.displayName}.`);
       resetForm();
@@ -178,7 +243,42 @@ export default function ProfitSplitScreen({ route }: Props) {
             ) : (
               <Text style={styles.statusRow}>No stake set.</Text>
             )}
-            <OutlineDangerButton title="End arrangement" onPress={onEnd} />
+            {active.payoutOn && active.payoutLifespan === 'DEBT_CLEARED' && balance >= 0 ? (
+              <Banner tone="info">
+                {player.displayName}'s balance has cleared — the payout split was set to run only until then.
+                Consider ending this arrangement below.
+              </Banner>
+            ) : null}
+            {endingOpen ? (
+              <View style={{ marginTop: spacing.sm }}>
+                <Field label="Reason for ending" required>
+                  <TextField
+                    value={endReason}
+                    onChangeText={setEndReason}
+                    placeholder="Why is this arrangement ending?"
+                    multiline
+                  />
+                </Field>
+                <View style={styles.endActions}>
+                  <LinkButton
+                    title="Cancel"
+                    onPress={() => {
+                      setEndingOpen(false);
+                      setEndReason('');
+                    }}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <OutlineDangerButton
+                      title="End arrangement"
+                      onPress={onConfirmEnd}
+                      disabled={!endReason.trim()}
+                    />
+                  </View>
+                </View>
+              </View>
+            ) : (
+              <OutlineDangerButton title="End arrangement" onPress={() => setEndingOpen(true)} />
+            )}
           </View>
         ) : null}
 
@@ -213,8 +313,30 @@ export default function ProfitSplitScreen({ route }: Props) {
               </Field>
               {renews !== 'ONE_OFF' ? (
                 <View style={styles.conditional}>
-                  <Field label="Until" optional>
-                    <MoneyInput value={until} onChangeText={setUntil} prefix="" placeholder="YYYY-MM-DD" />
+                  <Field label="Until" optional helper="Can't be in the past.">
+                    <Pressable onPress={() => setShowUntilPicker(true)} style={styles.dateInput}>
+                      <Text style={until ? styles.dateInputText : styles.dateInputPlaceholder}>
+                        {until ? formatIsoDate(until) : 'No end date'}
+                      </Text>
+                    </Pressable>
+                    {showUntilPicker ? (
+                      <View style={styles.dateInputPickerWrap}>
+                        <DateTimePicker
+                          value={until ? fromIsoDate(until) : new Date()}
+                          mode="date"
+                          minimumDate={new Date()}
+                          display={Platform.OS === 'ios' ? 'inline' : 'calendar'}
+                          onValueChange={(_event, selectedDate) => {
+                            setUntil(toIsoDate(selectedDate));
+                            if (Platform.OS === 'android') setShowUntilPicker(false);
+                          }}
+                          onDismiss={() => setShowUntilPicker(false)}
+                        />
+                        {Platform.OS === 'ios' ? (
+                          <LinkButton title="Done" onPress={() => setShowUntilPicker(false)} />
+                        ) : null}
+                      </View>
+                    ) : null}
                   </Field>
                   <Field label="Number of times" optional>
                     <MoneyInput value={maxTimes} onChangeText={setMaxTimes} prefix="" placeholder="Unlimited" />
@@ -328,6 +450,45 @@ export default function ProfitSplitScreen({ route }: Props) {
                   </Field>
                 </View>
               ) : null}
+
+              {splitMethodApplicable ? (
+                <>
+                  <Text style={styles.subLabel}>Lifespan</Text>
+                  <RadioOption
+                    title="Indefinite"
+                    subtitle="Applies until the arrangement is ended — the default."
+                    checked={payoutLifespan === 'INDEFINITE'}
+                    onPress={() => setPayoutLifespan('INDEFINITE')}
+                  />
+                  <RadioOption
+                    title="Until debt clears"
+                    subtitle={`Stops applying once ${player.displayName}'s balance is no longer negative.`}
+                    checked={payoutLifespan === 'DEBT_CLEARED'}
+                    onPress={() => setPayoutLifespan('DEBT_CLEARED')}
+                  />
+                  <RadioOption
+                    title="Until a set amount is reached"
+                    subtitle="Stops once the house has taken this much in total. Not tracked automatically — a reminder, not a limit the app enforces."
+                    checked={payoutLifespan === 'CAPPED'}
+                    onPress={() => setPayoutLifespan('CAPPED')}
+                  />
+                  {payoutLifespan === 'CAPPED' ? (
+                    <View style={styles.conditional}>
+                      <Field
+                        label="Cap"
+                        required
+                        helper="House's cumulative take across every payout, before the split stops."
+                      >
+                        <MoneyInput
+                          value={payoutCapAmount}
+                          onChangeText={setPayoutCapAmount}
+                          onFocus={onBottomFieldFocus}
+                        />
+                      </Field>
+                    </View>
+                  ) : null}
+                </>
+              ) : null}
             </View>
           ) : null}
         </SectionCard>
@@ -363,6 +524,25 @@ const styles = StyleSheet.create({
   activeBadge: { backgroundColor: colors.success, borderRadius: 20, paddingHorizontal: 8, paddingVertical: 3 },
   activeBadgeText: { color: '#fff', fontSize: 10.5, fontWeight: '700' },
   statusRow: { fontSize: 13, color: colors.accentText, marginBottom: spacing.xs },
+  endActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  dateInput: {
+    borderWidth: 1.5,
+    borderColor: colors.borderStrong,
+    borderRadius: radii.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 11,
+    backgroundColor: colors.surface,
+  },
+  dateInputText: { fontSize: 14.5, color: colors.textPrimary },
+  dateInputPlaceholder: { fontSize: 14.5, color: colors.textTertiary },
+  dateInputPickerWrap: {
+    marginTop: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    padding: spacing.sm,
+    alignItems: 'flex-end',
+  },
   subLabel: { fontSize: 12.5, fontWeight: '600', color: colors.textSecondary, marginTop: spacing.sm, marginBottom: spacing.sm },
   conditional: { borderLeftWidth: 2, borderLeftColor: colors.borderStrong, paddingLeft: spacing.md, marginLeft: 4, marginBottom: spacing.md },
   noopNote: { fontSize: 12, color: colors.textTertiary, textAlign: 'center', marginTop: -4 },

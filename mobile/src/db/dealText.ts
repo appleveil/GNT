@@ -16,6 +16,26 @@ export function dealTitle(d: DealRecord): string {
 }
 
 /**
+ * The row title in History — player-identifying context only, no deal-type
+ * name ("Fixed —", "Transfer —", "Stake and Profit splits —"): the row's
+ * icon plus dealSummary() underneath already say what kind of deal it is,
+ * so repeating the type name here was redundant. Kept separate from
+ * dealTitle(), which still needs the full type name for a shared
+ * text/PDF, where there's no icon or filter chip to lean on.
+ */
+export function dealRowTitle(d: DealRecord): string {
+  switch (d.kind) {
+    case 'FIXED':
+      return d.playerName;
+    case 'TRANSFER':
+      return `${d.sourcePlayerName} → ${d.destinationPlayerName}`;
+    case 'PROFIT_SPLIT_CREATED':
+    case 'PROFIT_SPLIT_ENDED':
+      return d.playerName;
+  }
+}
+
+/**
  * The one-line summary shown under a History row. For a Profit Split,
  * this describes whichever of Stake/Payout is actually set — a stake if
  * one is set, otherwise the payout split if THAT'S set instead, since an
@@ -32,11 +52,15 @@ export function dealSummary(d: DealRecord): string {
         return `${d.stakePct}% stake · ${naira(d.cap ?? 0)} cap · renews ${cadenceLabel(d.renews)}`;
       }
       if (d.payoutOn) {
-        return `Payout only · ${d.payoutBasis === 'BEFORE_BUYIN' ? 'before buy-in' : 'after buy-in'} · ${splitMethodShort(d)}`;
+        const lifespan = payoutLifespanShort(d);
+        return (
+          `Payout only · ${d.payoutBasis === 'BEFORE_BUYIN' ? 'before buy-in' : 'after buy-in'} · ${splitMethodShort(d)}` +
+          (lifespan ? ` · ${lifespan}` : '')
+        );
       }
       return 'No stake or payout set';
     case 'PROFIT_SPLIT_ENDED':
-      return 'Arrangement ended';
+      return d.reason;
   }
 }
 
@@ -49,6 +73,27 @@ function splitMethodShort(d: Extract<DealRecord, { kind: 'PROFIT_SPLIT_CREATED' 
   if (d.payoutSplitMethod === 'STAKE_RATIO') return 'ratio per stake';
   if (d.payoutSplitMethod === 'CUSTOM_RATIO') return `${d.customRatioPct}% to house`;
   if (d.payoutSplitMethod === 'FIXED') return `fixed ${naira(d.fixedAmount ?? 0)}`;
+  return '';
+}
+
+/**
+ * Full label for the payout's lifespan — used on the read-only detail
+ * screen and in the shared/exported full text. Missing on records saved
+ * before this existed; that's treated the same as 'INDEFINITE', which was
+ * the only behaviour before (an arrangement ran until manually ended).
+ */
+export function payoutLifespanLabel(d: Extract<DealRecord, { kind: 'PROFIT_SPLIT_CREATED' }>): string {
+  if (d.payoutLifespan === 'DEBT_CLEARED') return "Until the player's debt clears";
+  if (d.payoutLifespan === 'CAPPED') return `Until the house has taken ${naira(d.payoutCapAmount ?? 0)} total`;
+  return 'Indefinite';
+}
+
+/** Short form for the one-line History summary — omitted entirely for the
+ * default (indefinite) case, since that's not worth a word in a summary
+ * that's already fairly dense. */
+function payoutLifespanShort(d: Extract<DealRecord, { kind: 'PROFIT_SPLIT_CREATED' }>): string {
+  if (d.payoutLifespan === 'DEBT_CLEARED') return 'until debt clears';
+  if (d.payoutLifespan === 'CAPPED') return `up to ${naira(d.payoutCapAmount ?? 0)}`;
   return '';
 }
 
@@ -89,13 +134,14 @@ export function dealFullText(d: DealRecord): string {
           'Payout:',
           `  Basis: ${d.payoutBasis === 'BEFORE_BUYIN' ? 'Before buy-in' : 'After buy-in'}`,
           `  Split method: ${splitMethodShort(d)}`,
+          `  Lifespan: ${payoutLifespanLabel(d)}`,
         );
       } else {
         lines.push('Payout: none set');
       }
       break;
     case 'PROFIT_SPLIT_ENDED':
-      lines.push('This arrangement was ended.');
+      lines.push('This arrangement was ended.', `Reason: ${d.reason}`);
       break;
   }
 
