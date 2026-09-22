@@ -9,11 +9,14 @@ import { canVoidTransaction } from '@/utils/canVoid'
 import { describeChipsVariance } from '@/utils/chipsVariance'
 import { useToast } from '@/composables/useToast'
 
-// Read-only game-day detail (Phase B, 2026-09-14) — same data sources as
-// Cashier's GameDayLedgerView.vue (close-preview while OPEN, frozen
-// GameDaySummary while CLOSED, the club-wide /ledger/ feed), plus a
-// seated-players list, since an Accountant is here to review, not to record
-// or correct anything. Phase C (2026-09-14) adds one exception: a void
+// Read-only game-day detail (Phase B, 2026-09-14) — close-preview while
+// OPEN, frozen GameDaySummary while CLOSED, the club-wide /ledger/ feed
+// (formerly shared with the Cashier's own GameDayLedgerView.vue, removed
+// 2026-09-21 as redundant with the Cashier's main working screen — this
+// back-office view is unaffected, it's the only place this data now
+// surfaces at all), plus a seated-players list, since an Accountant is
+// here to review, not to record or correct anything. Phase C (2026-09-14)
+// adds one exception: a void
 // trigger, shown only for OWNER (canVoidTransaction already returns true
 // unconditionally for that role, including on a CLOSED game-day — this is
 // the real, already-built mechanism behind PLAN.md's "post-close
@@ -37,7 +40,9 @@ const displayStats = computed(() => {
   if (gameDay.value?.status === 'CLOSED' && gameDay.value.summary) return gameDay.value.summary
   return stats.value
 })
-// Same "pending until close" treatment as Rake — see GameDayLedgerView.vue's identical note.
+// Same "pending until close" treatment as Rake — depends on both rake_total
+// and a chips_in_total that can still change while the night's open, so it's
+// not meaningfully final until CLOSED either.
 const chipsVariance = computed(() => (displayStats.value ? describeChipsVariance(displayStats.value.chips_variance) : null))
 const chipsVarianceShortLabel = computed(() => {
   const v = Number(displayStats.value?.chips_variance)

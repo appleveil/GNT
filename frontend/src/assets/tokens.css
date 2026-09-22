@@ -1,87 +1,198 @@
 /* ─────────────────────────────────────────────────────
-   Cashier App — Design tokens
-   "Ledger Slate" — frozen 2026-09-13, extracted verbatim from the design
-   canvas's StyleGuide.dc.html (Direction A). Do not hand-tune a value here
-   without updating that source of truth too.
+   LPC App — Design tokens, for EVERY role
+   "Ledger Book" (2026-09-21) — replaces "Ledger Slate" (frozen
+   2026-09-13) at the user's explicit request after reviewing two fresh
+   directions; see PLAN.md's dated entry and the "Ledger Directions"
+   review artifact it was chosen from.
+
+   Also retires the former Cashier-vs-"back-office" split: Owner,
+   Accountant, and Floor Manager used to share a completely separate
+   token file (accountant-tokens.css, under a .theme-accountant class)
+   with its own palette — and, worse, ALL THREE of those roles shared
+   one identical accent color within it, so nothing distinguished them
+   from each other either. This file is now the ONE system every role
+   uses — see the user's own framing: "the entire app — all users —
+   should have the same styling but differ in just colour, so it's
+   immediately clear where they are."
+
+   SAME TOKEN NAMES throughout — every one of the app's components
+   already consumes these purely via var(--...) (verified: zero
+   hardcoded hex/font-family values anywhere in src/), so this file is
+   the entire visual change; no component markup needed to move.
+
+   Two mechanisms, both set on <html> by App.vue from the logged-in
+   user's role (src/stores/auth.js):
+   - `data-role="..."` — resolves --accent/--accent-bg/--accent-text
+     per role (see the [data-role] blocks below). Everything that
+     already tracked --accent (the game-day OPEN status badge, the
+     chips transaction lane) shifts with it automatically.
+   - `data-density="compact"` — the one deliberate NON-color
+     difference, and it's functional (touch tablet vs desktop mouse),
+     not stylistic — see that block below.
 ───────────────────────────────────────────────────── */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* Core palette */
-  --bg:             #F4F6F8;
-  --surface:        #FFFFFF;
-  --text-primary:   #1C222B;
-  --text-secondary: #5B6572;
-  --text-tertiary:  #8B95A1;
-  --border:         #D7DEE5;
-  --border-strong:  #C6D0DA;
-  --accent:         oklch(0.52 0.14 250);
-  --accent-bg:      oklch(0.94 0.03 250);
-  --accent-text:    oklch(0.4  0.14 250);
+  /* The page's own background, behind the app entirely — a dark stage
+     the app sits on as a framed canvas, not an edge-to-edge fill. Added
+     2026-09-21 to match the review artifact's own page chrome (which
+     the user asked to carry into the real app, not just its screens).
+     Warm near-black, not a cool one, to stay in the same family as
+     --bg/--border below rather than reading as a different product. */
+  --stage: oklch(0.16 0.015 75);
 
-  /* Semantic / status */
-  --success:      oklch(0.55 0.12 145);
-  --success-bg:   oklch(0.94 0.04 145);
-  --success-text: oklch(0.4  0.12 145);
-  --warning:      oklch(0.72 0.14 80);
-  --warning-bg:   oklch(0.95 0.05 80);
-  --warning-text: oklch(0.45 0.13 80);
-  --danger:       oklch(0.55 0.18 25);
-  --danger-bg:    oklch(0.95 0.05 25);
-  --danger-text:  oklch(0.4  0.18 25);
-  --muted:        #C6D0DA; /* voided */
+  /* Core palette — a cool paper ground (not the previous slate-grey,
+     and deliberately not a warm cream either) with ink-navy text */
+  --bg:             #EDF0EE;
+  --surface:        #FFFFFF;
+  --text-primary:   #161A1F;
+  --text-secondary: #545B57;
+  --text-tertiary:  #8B928C;
+  --border:         #D8DED9;
+  --border-strong:  #C3CBC4;
+
+  /* Accent — role-dependent, see the [data-role] blocks below. This is
+     the fallback for when no role is set yet (the logged-out Login
+     screen) — the Owner's oxblood, standing in as the app's own
+     front-door identity color. */
+  --accent:         oklch(0.40 0.13 18);
+  --accent-bg:      oklch(0.93 0.035 18);
+  --accent-text:    oklch(0.36 0.13 18);
+
+  /* Semantic / status — fixed meanings, never role-dependent */
+  --success:      oklch(0.52 0.11 150);
+  --success-bg:   oklch(0.94 0.04 150);
+  --success-text: oklch(0.37 0.10 150);
+  --warning:      oklch(0.68 0.13 78);
+  --warning-bg:   oklch(0.95 0.05 78);
+  --warning-text: oklch(0.44 0.12 78);
+  --danger:       oklch(0.53 0.17 26);
+  --danger-bg:    oklch(0.95 0.05 26);
+  --danger-text:  oklch(0.40 0.17 26);
+  --muted:        #C3CBC4; /* voided */
 
   /* Disabled state — fainter tints of Surface/Border, never a new hue */
-  --disabled-surface: #FAFBFC;
-  --disabled-border:  #E7EBEE;
+  --disabled-surface: #F7F8F6;
+  --disabled-border:  #E5E9E4;
 
-  /* Game-day / entry status badges */
-  --status-open-bg:      oklch(0.94 0.03 250);
-  --status-open-text:    oklch(0.4  0.14 250);
-  --status-closed-bg:    #EDF0F2;
-  --status-closed-text:  #5B6572;
-  --status-pending-bg:   oklch(0.95 0.05 80);
-  --status-pending-text: oklch(0.45 0.13 80);
-  --status-approved-bg:  oklch(0.94 0.04 145);
-  --status-approved-text: oklch(0.4  0.12 145);
-  --status-rejected-bg:  oklch(0.95 0.05 25);
-  --status-rejected-text: oklch(0.4  0.18 25);
-  --status-voided-bg:    #EDF0F2;
-  --status-voided-text:  #B0B8C0;
+  /* Game-day / entry status badges. Same relationships as the
+     original system, preserved exactly: OPEN tracks the viewer's own
+     role accent (so it always shifts consistently with everything
+     else on screen); APPROVED/PENDING/REJECTED are fixed semantic
+     colors, independent of role. */
+  --status-open-bg:       var(--accent-bg);
+  --status-open-text:     var(--accent-text);
+  --status-closed-bg:     #E7EAE6;
+  --status-closed-text:   #5C635F;
+  --status-pending-bg:    var(--warning-bg);
+  --status-pending-text:  var(--warning-text);
+  --status-approved-bg:   var(--success-bg);
+  --status-approved-text: var(--success-text);
+  --status-rejected-bg:   var(--danger-bg);
+  --status-rejected-text: var(--danger-text);
+  --status-voided-bg:     #E7EAE6;
+  --status-voided-text:   #A9B0A6;
 
-  /* Transaction icon lanes */
-  --lane-chips-bg:      oklch(0.94 0.03 250);
-  --lane-chips-icon:    oklch(0.52 0.14 250);
-  --lane-payments-bg:   oklch(0.94 0.04 145);
-  --lane-payments-icon: oklch(0.55 0.12 145);
-  --lane-other-bg:      oklch(0.97 0.02 80);
-  --lane-other-icon:    oklch(0.55 0.13 80);
+  /* Transaction icon lanes — chips tracks the viewer's own role accent
+     (unchanged relationship from before: chips = accent); payments
+     stays tied to success; "other" is its own quiet warm neutral,
+     deliberately more muted than a full warning badge */
+  --lane-chips-bg:      var(--accent-bg);
+  --lane-chips-icon:    var(--accent);
+  --lane-payments-bg:   var(--success-bg);
+  --lane-payments-icon: var(--success);
+  --lane-other-bg:      oklch(0.96 0.02 78);
+  --lane-other-icon:    oklch(0.56 0.11 78);
 
-  /* Radii */
+  /* Radii — a touch softer than before, matching the paper/book feel */
   --radius-sm: 8px;
-  --radius-md: 10px;
+  --radius-md: 12px;
 
-  /* Typography */
-  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
-  --font-mono: 'IBM Plex Mono', monospace; /* all money, PINs, codes */
+  /* Typography — Fraunces carries headings/hero numbers, Public Sans
+     everything else, IBM Plex Mono unchanged for every money/PIN/code
+     figure (already correctly the only thing every component uses it
+     for, so nothing there needed to move either). */
+  --font-sans:    'Public Sans', system-ui, sans-serif;
+  --font-display: 'Fraunces', 'Public Sans', system-ui, serif;
+  --font-mono:    'IBM Plex Mono', monospace;
 
-  /* Touch targets (tablet-first) */
-  --control-height-primary: 56px;   /* primary/secondary buttons */
-  --control-height-keypad:  72px;   /* entry-grid & PIN keypad keys */
-  --control-row-min:        44px;   /* list/table rows — denser, still >=44px */
+  /* Touch targets (tablet-first) — unchanged */
+  --control-height-primary: 56px;
+  --control-height-keypad:  72px;
+  --control-row-min:        44px;
   --control-row-max:        64px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 3px rgba(28,34,43,0.06), 0 1px 2px rgba(28,34,43,0.04);
-  --shadow-md: 0 4px 12px rgba(28,34,43,0.08), 0 2px 4px rgba(28,34,43,0.04);
+  /* Shadows — warmer, ink-tinted rather than cold-grey */
+  --shadow-sm: 0 1px 3px rgba(22,26,31,0.07), 0 1px 2px rgba(22,26,31,0.05);
+  --shadow-md: 0 10px 26px rgba(22,26,31,0.12), 0 2px 6px rgba(22,26,31,0.05);
+}
+
+/* ── Role accents — one shared system, differing only by accent color.
+   Set via <html data-role="..."> by App.vue, read from the logged-in
+   user's role (accounts.StaffUser.Role on the backend). Chosen as
+   colored-ledger-tab hues: brass / ledger-green / oxblood / slate. ── */
+[data-role="CASHIER"] {
+  /* Darker than the review artifact's brass swatch (0.62 -> 0.55
+     lightness) — 0.62 reads fine as a small swatch but fails contrast
+     for white text on a solid fill (.btn--primary, .pill--active, the
+     topbar avatar) — every other role's accent is already dark enough
+     for that; brass was the one outlier. Same hue/family, just deep
+     enough to carry white text properly. Found reviewing the Cashier
+     screen live, 2026-09-21. */
+  --accent:      oklch(0.55 0.14 75);
+  --accent-bg:   oklch(0.95 0.04 75);
+  --accent-text: oklch(0.40 0.12 75);
+}
+[data-role="ACCOUNTANT"] {
+  --accent:      oklch(0.50 0.09 165);
+  --accent-bg:   oklch(0.94 0.035 165);
+  --accent-text: oklch(0.36 0.09 165);
+}
+[data-role="OWNER"] {
+  --accent:      oklch(0.40 0.13 18);
+  --accent-bg:   oklch(0.93 0.035 18);
+  --accent-text: oklch(0.36 0.13 18);
+}
+[data-role="FLOOR_MANAGER"] {
+  --accent:      oklch(0.47 0.075 255);
+  --accent-bg:   oklch(0.94 0.03 255);
+  --accent-text: oklch(0.38 0.09 255);
+}
+
+/* ── Density — the ONE deliberate non-color difference, and it's
+   functional (input device), not stylistic: Cashier runs on a tablet
+   at a cashier desk and needs real touch targets; everyone else works
+   a desktop back-office view with many rows on screen at once and a
+   mouse. Same palette, same type, same radii/shadows, same component
+   shapes everywhere — only these sizes move. Set via <html
+   data-density="compact"> by App.vue, alongside data-role. Replaces
+   the former accountant-tokens.css/.theme-accountant split, which
+   duplicated the ENTIRE token set (including color) for no reason
+   beyond this — retired 2026-09-21. ── */
+[data-density="compact"] {
+  --control-height-primary: 40px;
+  --control-row-min:        40px;
+  --control-row-max:        52px;
 }
 
 html, body {
   height: 100%;
-  background: var(--bg);
+  /* The dark stage, not --bg — the app itself is now a framed canvas
+     inside this (see App.vue's .stage/.canvas/.shell). */
+  background: var(--stage);
   color: var(--text-primary);
   font-family: var(--font-sans);
 }
 
 #app { height: 100%; }
+
+/* Every page title in the app is a plain <h1> inside a .page-header,
+   each component's own scoped style only setting font-size/weight/
+   color/margin (never font-family) — so this one global rule is the
+   entire heading-face change, no component edits needed. */
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}

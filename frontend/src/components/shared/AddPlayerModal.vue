@@ -6,17 +6,16 @@ import BankAccountFields from '@/components/shared/BankAccountFields.vue'
 import { useToast } from '@/composables/useToast'
 
 // Bottom sheet — replaces the old routed /players/new page (2026-09-14) so
-// the cashier never leaves the Game Day screen to seat someone. Existing
-// player selection is multi-select (a cashier often needs to seat several
-// returning players in one go); a new player is still exactly one at a
-// time. The two modes stay mutually exclusive, same as before.
+// the cashier never leaves the Game Day screen to seat someone.
 //
-// `seatNumber` (added 2026-09-17) — set when opened by tapping a specific
-// empty seat pill on ActiveGameDayView.vue, rather than the generic
-// "+ Add Player" button. Forces existing-player selection down to one
-// (this one seat can only take one person) and threads seat_number through
-// on either mode's submit — everything else about the modal is unchanged.
-const props = defineProps({ seatNumber: { type: Number, default: null } })
+// `seatNumber` — always set now (2026-09-21): this is only ever opened by
+// tapping a specific empty seat pill on ActiveGameDayView.vue. The old
+// generic "+ Add Player" button (opened with no seatNumber, multi-select
+// existing-player mode, unassigned seating) was removed as redundant —
+// every empty seat is already its own "add here" tap target — so this
+// modal no longer needs to support a seat-less, multi-person case at all:
+// one seat, one player, exactly like tapping the seat physically would be.
+const props = defineProps({ seatNumber: { type: Number, required: true } })
 const emit = defineEmits(['close', 'added'])
 
 const gameDay = useGameDayStore()
@@ -36,14 +35,19 @@ const bank = ref({ bank_name: '', bank_code: '', account_number: '', account_nam
 // Table" was removed 2026-09-15 — a departed player is never re-addable
 // here, only by being issued chips directly (see ActiveGameDayView.vue) —
 // so they must not appear in this list either, closing that side door.
-const MAX_ACTIVE_PLAYERS = 9 // mirrors gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY
+// Per-game now (Texas Hold'em 9, Omaha 8, ...) — gaming.selectors.
+// max_active_players resolves it server-side; GameDaySerializer exposes the
+// resolved number directly as max_players so this never needs its own copy
+// of the game/table lookup. Falls back to 9 only for the brief window before
+// gameDay.current has loaded.
+const maxActivePlayers = computed(() => gameDay.current?.max_players ?? 9)
 
 const roster = ref([])
 const rosterLoading = ref(false)
 const search = ref('')
-const selectedIds = ref([])
+const selectedId = ref(null)
 const activeCount = ref(0)
-const isFull = computed(() => activeCount.value >= MAX_ACTIVE_PLAYERS)
+const isFull = computed(() => activeCount.value >= maxActivePlayers.value)
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return roster.value
@@ -63,9 +67,9 @@ async function loadRoster() {
     const seatedIds = new Set(seatedRes.data.map(p => p.id)) // active + departed — all excluded
     activeCount.value = seatedRes.data.filter(p => !p.left_at).length
     roster.value = allRes.data.filter(p => !seatedIds.has(p.id))
-    // Drop anyone from the current selection who got seated elsewhere
-    // (another cashier device, or a retry after a partial failure below).
-    selectedIds.value = selectedIds.value.filter(id => !seatedIds.has(id))
+    // Drop the current selection if they got seated elsewhere (another
+    // cashier device, or a retry after a failure below).
+    if (selectedId.value && seatedIds.has(selectedId.value)) selectedId.value = null
   } catch {
     toast.error('Could not load the player roster.')
   } finally {
@@ -76,47 +80,26 @@ async function loadRoster() {
 onMounted(loadRoster)
 
 function toggleSelect(id) {
-  if (props.seatNumber) {
-    // One seat, one person — picking a different row replaces the selection.
-    selectedIds.value = selectedIds.value.includes(id) ? [] : [id]
-    return
-  }
-  selectedIds.value = selectedIds.value.includes(id)
-    ? selectedIds.value.filter(x => x !== id)
-    : [...selectedIds.value, id]
+  // One seat, one person — picking a different row replaces the selection.
+  selectedId.value = selectedId.value === id ? null : id
 }
 
 async function onSubmitExisting() {
-  if (!selectedIds.value.length || submitting.value) return
+  if (!selectedId.value || submitting.value) return
   error.value = ''
   submitting.value = true
-  const ids = selectedIds.value
-  const results = await Promise.allSettled(
-    ids.map(id => api.post(`/game-days/${gameDay.current.id}/players/`, {
-      player_id: id, ...(props.seatNumber ? { seat_number: props.seatNumber } : {}),
-    })),
-  )
-  submitting.value = false
-
-  const failures = ids
-    .map((id, i) => ({ id, result: results[i] }))
-    .filter(({ result }) => result.status === 'rejected')
-  if (!failures.length) {
+  try {
+    await api.post(`/game-days/${gameDay.current.id}/players/`, {
+      player_id: selectedId.value, seat_number: props.seatNumber,
+    })
     emit('added')
     emit('close')
-    return
+  } catch (err) {
+    error.value = err.response?.data?.detail || 'Could not seat this player.'
+    await loadRoster() // in case someone else just took this seat/player
+  } finally {
+    submitting.value = false
   }
-
-  emit('added') // the ones that DID succeed are seated — parent's list needs them
-  // Surface the real reason per player (table full vs. anything else) rather
-  // than a generic "still need to retry" for all of them.
-  const lines = failures.map(({ id, result }) => {
-    const name = roster.value.find(p => p.id === id)?.display_name || 'a player'
-    const reason = result.reason?.response?.data?.detail || 'could not be seated'
-    return `${name} — ${reason}`
-  })
-  error.value = `Added ${ids.length - failures.length} of ${ids.length}. ${lines.join(' ')}`
-  await loadRoster() // drops the succeeded ones from the list; failed ones stay selected for a retry
 }
 
 async function onSubmitNew() {
@@ -127,7 +110,7 @@ async function onSubmitNew() {
     const { data: seated } = await api.post(`/game-days/${gameDay.current.id}/players/`, {
       account_code: accountCode.value,
       display_name: displayName.value,
-      ...(props.seatNumber ? { seat_number: props.seatNumber } : {}),
+      seat_number: props.seatNumber,
     })
     if (bank.value.account_number.length === 10 && bank.value.bank_code) {
       await api.post(`/players/${seated.id}/bank-accounts/`, {
@@ -173,7 +156,7 @@ function onModeChange(next) {
       <div class="grip" />
       <div class="head">
         <div class="sheet-title">
-          {{ seatNumber ? `Seat ${seatNumber}` : 'Add Player' }} &mdash; Game-Day #{{ gameDay.current?.number ?? '—' }}
+          Seat {{ seatNumber }} &mdash; Game-Day #{{ gameDay.current?.number ?? '—' }}
         </div>
         <button class="close-btn" type="button" @click="emit('close')">&times;</button>
       </div>
@@ -191,7 +174,7 @@ function onModeChange(next) {
 
       <template v-if="mode === 'existing'">
         <p v-if="isFull" class="dva-note">
-          Table is full ({{ activeCount }}/{{ MAX_ACTIVE_PLAYERS }} active) — seat a player once someone leaves the table.
+          Table is full ({{ activeCount }}/{{ maxActivePlayers }} active) — seat a player once someone leaves the table.
         </p>
         <input
           v-model="search" type="text" placeholder="Search by name or account code…" class="search-input"
@@ -202,11 +185,11 @@ function onModeChange(next) {
           <template v-else>
             <div
               v-for="p in filtered" :key="p.id" class="search-row"
-              :class="{ 'search-row--selected': selectedIds.includes(p.id), 'search-row--disabled': isFull }"
+              :class="{ 'search-row--selected': selectedId === p.id, 'search-row--disabled': isFull }"
               @click="!isFull && toggleSelect(p.id)"
             >
-              <span class="check" :class="{ 'check--on': selectedIds.includes(p.id) }">
-                <span v-if="selectedIds.includes(p.id)">&#10003;</span>
+              <span class="check" :class="{ 'check--on': selectedId === p.id }">
+                <span v-if="selectedId === p.id">&#10003;</span>
               </span>
               {{ p.account_code }} — {{ p.display_name }}
             </div>
@@ -217,10 +200,10 @@ function onModeChange(next) {
         <p v-if="error" class="form-error">{{ error }}</p>
 
         <button
-          class="btn btn--primary" type="button" :disabled="isFull || !selectedIds.length || submitting"
+          class="btn btn--primary" type="button" :disabled="isFull || !selectedId || submitting"
           @click="onSubmitExisting"
         >
-          {{ submitting ? 'Adding…' : seatNumber ? `Seat in Seat ${seatNumber}` : `Add ${selectedIds.length || ''} Selected`.trim() }}
+          {{ submitting ? 'Seating…' : `Seat in Seat ${seatNumber}` }}
         </button>
       </template>
 
@@ -243,7 +226,7 @@ function onModeChange(next) {
         <p v-if="error" class="form-error">{{ error }}</p>
 
         <button class="btn btn--primary" type="submit" :disabled="submitting">
-          {{ submitting ? 'Adding…' : seatNumber ? `Seat in Seat ${seatNumber}` : 'Add to tonight' }}
+          {{ submitting ? 'Seating…' : `Seat in Seat ${seatNumber}` }}
         </button>
       </form>
     </div>

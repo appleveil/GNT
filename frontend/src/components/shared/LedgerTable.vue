@@ -10,10 +10,10 @@ import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transac
 // instead of its own markup. See PLAN.md's "Ledgers: list rows → tabular
 // Ledger Grid" entry for the chosen direction and per-view column mapping.
 //
-// Row height comes from --control-row-min (44px Cashier / 40px Accountant,
-// already themed via :root vs .theme-accountant) — so Cashier's tables stay
-// touch-sized and Accountant's stay desktop-dense with no separate density
-// prop needed here.
+// Row height comes from --control-row-min (44px Cashier / 40px everyone
+// else, via tokens.css's [data-density] — see App.vue) — so Cashier's
+// tables stay touch-sized and back-office tables stay desktop-dense
+// with no separate density prop needed here.
 const props = defineProps({
   rows: { type: Array, required: true },
   // Each row needs a `player_name` field already resolved by the parent
@@ -21,7 +21,7 @@ const props = defineProps({
   // — this component never fetches or looks up a name itself.
   showPlayer: { type: Boolean, default: false },
   // row => path string, or null/undefined to render plain text (Cashier's
-  // GameDayLedgerView has no /roster/:id route to link to).
+  // ActiveGameDayView has no /roster/:id route to link to).
   playerTo: { type: Function, default: null },
   dateFormat: { type: String, default: 'time' }, // 'time' | 'datetime'
   voidable: { type: Boolean, default: false },
@@ -102,7 +102,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
   white-space: nowrap;
 }
 .ledger-table th.num, .ledger-table td.num { text-align: right; }
-.ledger-table th.col-lane, .ledger-table td.col-lane { padding: 0; width: 4px; }
+.ledger-table th.col-lane, .ledger-table td.col-lane { padding: 6px 0 6px 4px; width: 38px; }
 .ledger-table th.col-action, .ledger-table td.col-action { width: 32px; padding: 0; }
 
 .ledger-table tbody td {
@@ -119,10 +119,23 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .ledger-table td.mono, .ledger-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ledger-table td.empty { text-align: center; color: var(--text-secondary); padding: 20px 10px; font-family: var(--font-sans); }
 
-.col-lane span { display: block; height: 100%; min-height: 20px; }
-.col-lane .lane-chips { background: var(--lane-chips-icon); }
-.col-lane .lane-payments { background: var(--lane-payments-icon); }
-.col-lane .lane-other { background: var(--lane-other-icon); }
+/* Was a bare 4px solid-color bar — upgraded 2026-09-21 to a proper
+   tinted swatch (matching the Ledger Directions review artifact's
+   ledger-row treatment) so the lane actually reads as a colored icon
+   moment repeated down the table, not just a thin rule at the edge. */
+.col-lane span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+}
+.col-lane span::before { content: '\25CF'; }
+.col-lane .lane-chips    { background: var(--lane-chips-bg);    color: var(--lane-chips-icon); }
+.col-lane .lane-payments { background: var(--lane-payments-bg); color: var(--lane-payments-icon); }
+.col-lane .lane-other    { background: var(--lane-other-bg);    color: var(--lane-other-icon); }
 
 .player-link { color: var(--text-primary); text-decoration: none; font-weight: 600; }
 .player-link:hover { color: var(--accent-text); text-decoration: underline; }

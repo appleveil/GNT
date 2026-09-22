@@ -28,20 +28,48 @@ export const useAuthStore = defineStore('auth', () => {
   const isCashier = computed(() => user.value?.role === 'CASHIER')
   const isFloorManager = computed(() => user.value?.role === 'FLOOR_MANAGER')
 
-  // ── Restore session on app boot from a still-valid stored access token ───
-  function init() {
+  // ── Restore session on app boot ───────────────────────────────────────
+  // The access token is short-lived (30min, SIMPLE_JWT.ACCESS_TOKEN_LIFETIME)
+  // by design, but the refresh token lasts 7 days — a page refresh should
+  // only ever land on /login once that 7-day window is actually up, not
+  // every time the 30-minute access token happens to have expired since the
+  // last load. Previously this just bailed when the access token was
+  // expired ("the axios interceptor's refresh flow handles it on the first
+  // real API call instead") — but the router guard checks
+  // auth.isAuthenticated synchronously against `user`, BEFORE any API call
+  // ever fires, so that never happened: an expired access token meant an
+  // instant bounce to /login regardless of a perfectly valid refresh token
+  // sitting right next to it. Fixed 2026-09-21 — attempt the same silent
+  // refresh here that the interceptor does mid-session.
+  async function init() {
     const token = localStorage.getItem('access_token')
     if (!token) return
     try {
       const decoded = decodeUser(token)
       if (decoded.exp * 1000 < Date.now()) {
-        // Expired — leave user unset. The axios interceptor's refresh flow
-        // handles this transparently on the first real API call instead.
+        await refreshSession()
         return
       }
       user.value = decoded
     } catch {
+      await refreshSession()
+    }
+  }
+
+  async function refreshSession() {
+    const refresh = localStorage.getItem('refresh_token')
+    if (!refresh) {
       clearAuth()
+      return
+    }
+    try {
+      const { data } = await api.post('/auth/refresh/', { refresh })
+      localStorage.setItem('access_token', data.access)
+      if (data.refresh) localStorage.setItem('refresh_token', data.refresh) // rotated — see axios.js's note
+      user.value = decodeUser(data.access)
+    } catch {
+      clearAuth()
+      user.value = null
     }
   }
 

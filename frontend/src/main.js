@@ -4,7 +4,6 @@ import App from './App.vue'
 import router from './router'
 import '@/assets/tokens.css'
 import '@/assets/common.css'
-import '@/assets/accountant-tokens.css'
 
 const app = createApp(App)
 app.use(createPinia())

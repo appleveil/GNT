@@ -30,7 +30,6 @@ const LoginView = () => import('@/views/auth/LoginView.vue')
 const AppShell = () => import('@/components/layout/AppShell.vue')
 
 const ActiveGameDayView = () => import('@/views/game-day/ActiveGameDayView.vue')
-const GameDayLedgerView = () => import('@/views/game-day/GameDayLedgerView.vue')
 
 // The Players list + "add player" page are gone (2026-09-14) — a Cashier's
 // only screen is Game Day now; players are picked as pills there and added
@@ -80,7 +79,6 @@ const routes = [
     },
     children: [
       { path: 'game-day', name: 'game-day', component: ActiveGameDayView },
-      { path: 'game-day/:id/ledger', name: 'game-day-ledger', component: GameDayLedgerView },
       { path: 'players/:id', name: 'player-detail', component: PlayerDetailView },
 
       { path: 'dashboard', name: 'dashboard', component: DashboardView, meta: { roles: BACK_OFFICE_ROLES } },
@@ -106,12 +104,16 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 })
 
-router.beforeEach(to => {
+router.beforeEach(async to => {
   const auth = useAuthStore()
 
-  // Restore session from a stored token before the very first guarded navigation.
+  // Restore session from a stored token before the very first guarded
+  // navigation. auth.init() is async now (it may silently refresh an
+  // expired access token via the refresh token) — must be awaited, or the
+  // isAuthenticated check right below runs before it's finished and every
+  // refresh looks logged-out for the split second that mattered.
   if (!auth.isAuthenticated && localStorage.getItem('access_token')) {
-    auth.init()
+    await auth.init()
   }
 
   if (to.meta.public) {
