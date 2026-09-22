@@ -5,6 +5,8 @@ from . import views
 
 router = DefaultRouter()
 router.register('game-days', views.GameDayViewSet, basename='gameday')
+router.register('games', views.GameViewSet, basename='game')
+router.register('tables', views.TableViewSet, basename='table')
 router.register('conversion-rates', views.ConversionRateViewSet, basename='conversionrate')
 router.register('transactions', views.TransactionViewSet, basename='transaction')
 

@@ -641,6 +641,136 @@ platform-wide admin, separate from every client.
 - Verified: full 187-test suite still green after the SHARED_APPS
   change.
 
+### Game/Table selection at start + two-step chip custody (2026-09-21)
+New: a real "Start game-day" flow (Game → Table → Buy-in), and a
+two-step model for how chips move — the house issues chips to the player
+(a custody balance, not tied to any table), and separately the player
+puts them into play at a table. Confirmed via a follow-up: buy-in is an
+independent choice each night with a pre-filled default (not baked into
+the table); the default buy-in auto-fires with **no** Floor Manager PIN
+(the one deliberate automation); leaving a table became a 3-way
+disposition, and the counted amount is never capped at the original
+buy-in (winnings/losses). See `SCHEMA.md`'s matching dated entry for the
+full modeling rationale.
+
+- [x] **New `Game`/`Table` models** — `Game(name)`, `Table(game, name,
+  default_buy_in)`. "One table per game, for now" is a seed-data/UI
+  convention, not a DB constraint. `GameDay` gains nullable `game`/`table`/
+  `buy_in_amount` — the last **snapshotted** from `table.default_buy_in` at
+  open time (same precedent as `Transaction.conversion_rate`), editable
+  before confirming. Owner-managed CRUD for games/tables/buy-ins is
+  explicitly parked — the two initial games/tables (Texas Hold'em/Omaha,
+  one table each, ₦500k/₦100k) are seeded via a data migration
+  (`0011_seed_games_and_tables`). New read-only `GET /api/games/` and
+  `GET /api/tables/?game=<id>` back the flow's first two steps.
+- [x] **Chip custody**: two new `Transaction.Type`s, `TABLE_BUY_IN`/
+  `TABLE_CASH_OUT` (new `table` FK, set only on these) — following the
+  exact precedent `PROFIT_SPLIT_STAKE` already established: tracked, but
+  deliberately outside `selectors.DEBIT_TYPES`/`CREDIT_TYPES`, so neither
+  ever touches `player_balance`, `player_game_day_balance`, or
+  `GameDaySummary`'s chips figures (still computed purely from
+  `CHIPS_OUT`/`CHIPS_IN`, unchanged) — explicit regression tests prove
+  this bit-for-bit. New selectors `player_chips_in_hand`/
+  `table_chips_in_play` compute the custody/table-side figures live. A
+  new **Table ledger** (`GET /game-days/<id>/table-ledger/`) is the fifth
+  view over `Transaction`, for physical chip reconciliation — its
+  `running_balance` uses a different sign convention from every other
+  ledger (`TABLE_BUY_IN` adds, `TABLE_CASH_OUT` subtracts) since it means
+  "chips in play here," not a player's owed balance.
+- [x] **Seating auto-issues the default buy-in**: `seat_player`, when the
+  game-day has a table+buy-in set and the player has no `CHIPS_OUT` yet,
+  now auto-creates a `CHIPS_OUT` (house → player) with **no PIN**, wrapped
+  atomically with the seat itself (a rejection — e.g. `chips_limit`
+  exceeded — rolls the seat back too, rather than leaving someone seated
+  but unchipped). `record_transaction`'s `CHIPS_OUT` branch separately
+  auto-links a `TABLE_BUY_IN` for the full amount (player's own portion
+  *plus* any Profit Split house portion — the total chip value actually
+  put into play) whenever the player has an active seat at the game-day's
+  table — this applies to *every* `CHIPS_OUT`, including a manual rebuy
+  through the normal endpoint, which still requires its PIN exactly as
+  before (the linked `TABLE_BUY_IN` just reuses that same witness, no
+  second PIN). A private `_skip_pin_check` param (never exposed via any
+  serializer/view) is the only way to bypass the PIN, used solely by
+  `seat_player`'s automatic path.
+- [x] **Leaving a table is now a 3-way disposition**
+  (`gaming.services.LeaveDisposition`), chosen at the moment the seat is
+  freed: `NO_RETURN` (unchanged — nothing counted, no PIN), `HOLD` (FM-PIN
+  count moves chips off the table into the player's own custody —
+  `TABLE_CASH_OUT` — without reducing what they owe the house), `CASH_OUT`
+  (the same count, chained into `CHIPS_IN`, one PIN covering both linked
+  rows). No new field records which happened — always derivable from which
+  `Transaction` rows (if any) accompany `left_at`, matching this schema's
+  "compute, don't store" convention throughout. The counted amount is
+  never capped at the original buy-in, proven with an explicit
+  winnings-example test (left with *more* than bought in) and a
+  losses-example test (left with *less*).
+- **Deliberately not built this round**: general cross-table chip
+  movement (moving custody chips to a *different* table) — flagged
+  directly by the user as "not fully defined yet." The `player_chips_in_hand`
+  selector and the balance-neutral `TABLE_BUY_IN` type are the foundation
+  for it, but no dedicated endpoint/UI exists yet, since `GameDay.table`
+  is still singular (one table per game-day) — there's nowhere for such a
+  move to go until multi-table support is designed. `TransactionViewSet`
+  explicitly rejects a direct `TABLE_BUY_IN`/`TABLE_CASH_OUT` POST (mirrors
+  the existing `PAYOUT` block) so this stays a clean, fully
+  system-orchestrated pair rather than a half-built public surface.
+- 24 new backend tests (`StartGameDayFlowTests`,
+  `AutomaticTableBuyInTests`, `LeaveTableDispositionTests`) — 211/211
+  passing, was 187. Verified live against the real dev DB (`test1`
+  tenant schema) via a disposable throwaway game-day/player: automatic
+  buy-in issued correctly with no PIN, custody/table-in-play figures
+  correct, and the cash-out disposition correctly rejected an incorrect
+  Floor Manager PIN — then fully cleaned up; real game-day history
+  confirmed untouched throughout.
+- Frontend (Start-game-day flow, 3-way leave UI, Table ledger view) not
+  yet built — backend-first, matching this project's established
+  sequencing convention.
+
+### Revert two-step chip custody back to one step (2026-09-21)
+The Start-game-day flow (previous entry) shipped its frontend half this
+same day — but every normal buy-in fires the auto-pair (`CHIPS_OUT` +
+`TABLE_BUY_IN`) at once, so the Cashier's ledger always showed two rows
+for one buy-in. Reported back as confusing ("what's the difference, why
+are they both there"), and on investigation `HOLD`/`CASH_OUT` (the only
+path that ever creates a `TABLE_CASH_OUT`) turned out to be unreachable
+from the frontend — "Leave Table" always POSTs an empty body, defaulting
+to `NO_RETURN`, and "return chips" happens via a separate, pre-existing
+`CHIPS_IN` call instead. User's call: full removal, not just disabling
+the auto-pairing — `CHIPS_OUT` alone represents a buy-in again, exactly
+like before this feature existed.
+
+- [x] Removed `Transaction.Type.TABLE_BUY_IN`/`TABLE_CASH_OUT` and the
+  `table` FK on `Transaction` (migration `0014`, which also deletes any
+  existing rows of those two types — pure duplicates of information the
+  paired `CHIPS_OUT` already carries, so nothing real is lost).
+- [x] `record_transaction`'s `CHIPS_OUT` branch no longer auto-links a
+  `TABLE_BUY_IN` — seating still auto-issues the default `CHIPS_OUT` with
+  no PIN (that automation was separately requested and stays), just
+  without a second linked row.
+- [x] `leave_table` is back to its pre-feature shape —
+  `leave_table(game_day, player, operator=None)`, just sets `left_at`.
+  `LeaveDisposition`/`LeaveTableSerializer` removed entirely (the frontend
+  never populated them, so this is a no-op from the app's point of view).
+- [x] Removed `player_chips_in_hand`/`table_chips_in_play`/
+  `game_day_table_ledger` selectors and the Table ledger endpoint
+  (`GET /game-days/<id>/table-ledger/`) — back to four ledger views.
+- [x] Removed `TransactionViewSet.create`'s now-pointless
+  `TABLE_BUY_IN`/`TABLE_CASH_OUT` guard, and `chips_in_hand` off
+  `GameDaySeatedPlayerSerializer`.
+- **Unaffected, stays exactly as-is**: `Game`/`Table` models,
+  `Game.max_players`, `GameDay.game`/`table`/`buy_in_amount`, and the
+  "Start game-day" 3-step flow (`StartGameDayModal.vue`) — this revert is
+  only the custody *tracking* layer, not game/table selection itself.
+- Removed the 19 tests that covered only the reverted behavior
+  (`AutomaticTableBuyInTests`, `LeaveTableDispositionTests`) — 136/136
+  passing, was 155. `LeaveTableTests`/`StartGameDayFlowTests` needed no
+  changes, confirming the simplified signatures are drop-in compatible
+  with every existing caller.
+- Frontend: removed the `TABLE_BUY_IN`/`TABLE_CASH_OUT` entries from
+  `constants/transactionTypes.js` (added earlier the same day to label
+  the now-removed rows) — no other frontend change needed, since the
+  Leave Table UI never sent the disposition params this removes.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`

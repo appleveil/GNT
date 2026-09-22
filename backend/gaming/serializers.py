@@ -5,7 +5,22 @@ from rest_framework import serializers
 from accounts.models import Player, ServiceStaff
 from accounts.serializers import PlayerBankAccountSerializer
 
-from .models import ConversionRate, GameDay, GameDaySummary, ProfitSplitArrangement, Transaction
+from . import selectors
+from .models import ConversionRate, Game, GameDay, GameDaySummary, ProfitSplitArrangement, Table, Transaction
+
+
+class GameSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Game
+        fields = ['id', 'name', 'is_active', 'max_players']
+        read_only_fields = fields
+
+
+class TableSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Table
+        fields = ['id', 'game', 'name', 'default_buy_in', 'is_active']
+        read_only_fields = fields
 
 
 class GameDaySummarySerializer(serializers.ModelSerializer):
@@ -20,12 +35,19 @@ class GameDaySummarySerializer(serializers.ModelSerializer):
 class GameDaySerializer(serializers.ModelSerializer):
     # None until the game-day is closed — see gaming.services.close_game_day.
     summary = serializers.SerializerMethodField()
+    # The active-seat cap for tonight's game (selectors.max_active_players —
+    # Texas Hold'em 9, Omaha 8, ...) — exposed directly so the frontend can
+    # size its seat grid without a second round-trip to /games/. Added
+    # 2026-09-21 alongside Game.max_players.
+    max_players = serializers.SerializerMethodField()
 
     class Meta:
         model = GameDay
         fields = [
             'id', 'number', 'started_at', 'ended_at', 'status',
             'opened_by', 'opened_by_floor_manager', 'closed_by', 'closed_by_floor_manager', 'summary',
+            # Added 2026-09-21 — see Game/Table/GameDay.buy_in_amount.
+            'game', 'table', 'buy_in_amount', 'max_players',
         ]
         read_only_fields = fields
 
@@ -34,6 +56,9 @@ class GameDaySerializer(serializers.ModelSerializer):
             return GameDaySummarySerializer(obj.summary).data
         except GameDaySummary.DoesNotExist:
             return None
+
+    def get_max_players(self, obj):
+        return selectors.max_active_players(obj)
 
 
 class GameDaySummaryPreviewSerializer(serializers.Serializer):
@@ -65,6 +90,18 @@ class OpenGameDaySerializer(serializers.Serializer):
     floor_manager_pin = serializers.CharField(required=False, allow_blank=True)
     owner_id = serializers.IntegerField(required=False, allow_null=True)
     owner_pin = serializers.CharField(required=False, allow_blank=True)
+    # Added 2026-09-21 — the "Start game-day" flow's three steps. All
+    # optional so a game-day can still be opened without them, same as
+    # before this change. buy_in_amount defaults server-side to
+    # table.default_buy_in when a table is given but no amount is set —
+    # see gaming.services.open_game_day.
+    game_id = serializers.PrimaryKeyRelatedField(
+        source='game', queryset=Game.objects.all(), required=False, allow_null=True,
+    )
+    table_id = serializers.PrimaryKeyRelatedField(
+        source='table', queryset=Table.objects.all(), required=False, allow_null=True,
+    )
+    buy_in_amount = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
 
 
 class CloseGameDaySerializer(serializers.Serializer):

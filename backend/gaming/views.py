@@ -11,7 +11,7 @@ from accounts.permissions import IsCashierOrOwner, IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
 from .exceptions import TableFullError
-from .models import ConversionRate, GameDay, ProfitSplitArrangement, Transaction
+from .models import ConversionRate, Game, GameDay, ProfitSplitArrangement, Table, Transaction
 from .serializers import (
     CloseGameDaySerializer,
     ConversionRateSerializer,
@@ -20,6 +20,7 @@ from .serializers import (
     GameDaySeatedPlayerSerializer,
     GameDaySerializer,
     GameDaySummaryPreviewSerializer,
+    GameSerializer,
     InitiatePayoutSerializer,
     LedgerEntrySerializer,
     OpenGameDaySerializer,
@@ -28,6 +29,7 @@ from .serializers import (
     RecordTransactionSerializer,
     SeatPlayerSerializer,
     SetConversionRateSerializer,
+    TableSerializer,
     TransactionSerializer,
     VoidTransactionSerializer,
 )
@@ -50,7 +52,11 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['post'])
     def open(self, request):
-        """Owner or a Floor Manager PIN required — see gaming.services.open_game_day."""
+        """
+        Owner or a Floor Manager PIN required — see gaming.services.open_game_day.
+        Added 2026-09-21: optional game_id/table_id/buy_in_amount for the
+        "Start game-day" flow (Game → Table → Buy-in).
+        """
         serializer = OpenGameDaySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -62,6 +68,9 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
             floor_manager_pin=data.get('floor_manager_pin'),
             owner_id=data.get('owner_id'),
             owner_pin=data.get('owner_pin'),
+            game=data.get('game'),
+            table=data.get('table'),
+            buy_in_amount=data.get('buy_in_amount'),
         )
         return Response(GameDaySerializer(game_day).data, status=status.HTTP_201_CREATED)
 
@@ -178,8 +187,9 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Marks a seated player as having left tonight's table — see
         gaming.services.leave_table. Cashier or Owner only, same as seating
-        them; no PIN (leaving isn't a physical count or a financial action —
-        see PLAN.md's "leave the table" entry).
+        them. Not a physical count or financial action on its own —
+        returning chips is its own separate, PIN-witnessed CHIPS_IN entry,
+        recorded before this is called.
         """
         if not IsCashierOrOwner().has_permission(request, self):
             return Response({'detail': 'Only a Cashier or the Owner can do this.'}, status=403)
@@ -207,6 +217,32 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'detail': 'seat_number is required.'}, status=400)
         seat = services.move_seat(game_day, player, seat_number, operator=request.user)
         return Response(GameDaySeatedPlayerSerializer(seat).data)
+
+
+class GameViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only — step one of the "Start game-day" flow (added 2026-09-21).
+    Owner-managed CRUD is explicitly parked for later; rows are seeded via
+    a data migration for now — see PLAN.md's entry.
+    """
+
+    queryset = Game.objects.filter(is_active=True).order_by('name')
+    serializer_class = GameSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class TableViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only — step two of the "Start game-day" flow. Filterable by ?game=<id>."""
+
+    serializer_class = TableSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = Table.objects.filter(is_active=True).order_by('name')
+        game_id = self.request.query_params.get('game')
+        if game_id:
+            qs = qs.filter(game_id=game_id)
+        return qs
 
 
 class ConversionRateViewSet(viewsets.ReadOnlyModelViewSet):

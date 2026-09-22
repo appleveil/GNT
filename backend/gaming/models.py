@@ -4,6 +4,59 @@ from django.db import models
 from accounts.models import FloorManager, Player, ServiceStaff, StaffUser
 
 
+class Game(models.Model):
+    """
+    A game type the club runs (e.g. Texas Hold'em, Omaha) — step one of the
+    "Start game-day" flow (Game → Table → Buy-in). Owner-manageable from a
+    dashboard is a deliberate later step; for now rows are seeded via a data
+    migration. See PLAN.md's "Game/Table selection + two-step chip custody"
+    entry.
+
+    `max_players` (added 2026-09-21) caps active seats at any game-day
+    played as this game — Texas Hold'em seats 9, Omaha 8. Was previously one
+    hard-coded constant shared by every game
+    (gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY, now the FALLBACK for a
+    game-day with no `game` set at all — pre-this-change historical rows
+    only; see gaming.selectors.max_active_players, the one place both live
+    and hard-coded callers resolve the cap through now).
+    """
+
+    name = models.CharField(max_length=100, unique=True)
+    is_active = models.BooleanField(default=True)
+    max_players = models.PositiveSmallIntegerField(default=9)
+
+    def __str__(self):
+        return self.name
+
+
+class Table(models.Model):
+    """
+    A physical table running one Game — step two of the "Start game-day"
+    flow. "One table per game, for now" is a convention, not a DB
+    constraint: a second table for the same game later is just a new row,
+    no schema change.
+
+    `default_buy_in` only PRE-FILLS the flow's Buy-in step (step three) —
+    it's not a hard rule. The amount actually used for a given night is
+    snapshotted onto GameDay.buy_in_amount at open time, so a later edit
+    here never rewrites what a past game-day used (same "copy now, don't
+    re-derive" precedent as Transaction.conversion_rate).
+    """
+
+    game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name='tables')
+    name = models.CharField(max_length=100)
+    default_buy_in = models.DecimalField(max_digits=14, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['game', 'name'], name='unique_table_name_per_game'),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.game.name})'
+
+
 class GameDay(models.Model):
     class Status(models.TextChoices):
         OPEN = 'OPEN', 'Open'
@@ -13,6 +66,15 @@ class GameDay(models.Model):
     started_at = models.DateTimeField()
     ended_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)
+
+    # Which game/table this game-day is running, and the buy-in amount
+    # chosen (or defaulted) for it at open time — added 2026-09-21 for the
+    # "Start game-day" flow. Nullable because every GameDay before this
+    # change predates the concept entirely; every new one going forward is
+    # expected to set all three. See Game/Table above.
+    game = models.ForeignKey(Game, on_delete=models.PROTECT, null=True, blank=True, related_name='game_days')
+    table = models.ForeignKey(Table, on_delete=models.PROTECT, null=True, blank=True, related_name='game_days')
+    buy_in_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
 
     # Opening requires the Owner (login or PIN) or a Floor Manager PIN — a Cashier
     # is never the authorizer, under any circumstance. Nullable because a Floor
@@ -209,8 +271,9 @@ class ProfitSplitArrangement(models.Model):
 
 class Transaction(models.Model):
     """
-    The master ledger. Every Game-day, Player game-day, Outstanding, and Main
-    account ledger is a filtered view over this single table — see SCHEMA.md.
+    The master ledger. Every Game-day, Player game-day, Outstanding, Main
+    account, and Table ledger is a filtered view over this single table —
+    see SCHEMA.md.
     """
 
     class Type(models.TextChoices):
@@ -239,6 +302,10 @@ class Transaction(models.Model):
         # neither, contributes 0 to player_balance). See
         # ProfitSplitArrangement's docstring and services.record_transaction.
         PROFIT_SPLIT_STAKE = 'PROFIT_SPLIT_STAKE', 'Profit split — house stake'
+        # TABLE_BUY_IN/TABLE_CASH_OUT (added 2026-09-21, a second tracked
+        # step between CHIPS_OUT and a Table) were REMOVED 2026-09-21 —
+        # reverted back to one step: CHIPS_OUT alone represents a buy-in.
+        # See PLAN.md's dated revert entry.
 
     class TipCategory(models.TextChoices):
         """

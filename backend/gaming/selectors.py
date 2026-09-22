@@ -180,14 +180,33 @@ def game_day_players(game_day):
 
 def active_game_day_players_count(game_day):
     """Seated AND still at the table (left_at is null) — what
-    gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY caps. Added 2026-09-14."""
+    max_active_players caps. Added 2026-09-14."""
     return GameDayPlayer.objects.filter(game_day=game_day, left_at__isnull=True).count()
 
 
-# Mirrors gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY — same duplicated-
-# constant convention already used by AddPlayerModal.vue's MAX_ACTIVE_PLAYERS,
-# to avoid a circular import (services.py already imports this module).
-_MAX_SEAT_NUMBER = 9
+# Fallback ONLY for a game-day with no `game` set at all — pre-2026-09-21
+# historical rows, from before Game.max_players existed. Every game-day
+# opened through the "Start game-day" flow has a `game`, so this is never
+# hit going forward; kept for the same reason GameDay.game/table are
+# nullable in the first place. Was a single hard-coded 9 shared by every
+# game (gaming.services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY, and a duplicate
+# _MAX_SEAT_NUMBER here) — see Game.max_players' docstring.
+_DEFAULT_MAX_PLAYERS = 9
+
+
+def max_active_players(game_day):
+    """
+    The active-seat cap for THIS game-day — Game.max_players for the game
+    actually being played tonight (Texas Hold'em 9, Omaha 8, ...), or
+    _DEFAULT_MAX_PLAYERS for a legacy game-day with no `game` set. The one
+    place both gaming.services (seating/moving a player) and
+    free_seat_numbers below resolve the cap through, so the two can never
+    drift apart the way the old duplicated constants could. Added
+    2026-09-21.
+    """
+    if game_day.game_id:
+        return game_day.game.max_players
+    return _DEFAULT_MAX_PLAYERS
 
 
 def free_seat_numbers(game_day):
@@ -201,7 +220,7 @@ def free_seat_numbers(game_day):
             game_day=game_day, left_at__isnull=True, seat_number__isnull=False,
         ).values_list('seat_number', flat=True)
     )
-    return sorted(set(range(1, _MAX_SEAT_NUMBER + 1)) - occupied)
+    return sorted(set(range(1, max_active_players(game_day) + 1)) - occupied)
 
 
 PAYMENT_TYPES = {

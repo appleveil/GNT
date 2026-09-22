@@ -19,6 +19,12 @@ from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, Prof
 # returns ONLY by being issued chips (CHIPS_OUT) — never a bare re-add — and
 # that revival is capped exactly like creating a brand-new seat is. See
 # _ensure_seated's `revive` param and PLAN.md's "leave the table" entry.
+#
+# The cap itself is now per-game (Texas Hold'em 9, Omaha 8 — see
+# Game.max_players and selectors.max_active_players, added 2026-09-21); this
+# constant survives ONLY as selectors.max_active_players' fallback for a
+# legacy game-day with no `game` set. Every usage below resolves through
+# that function now, not this constant directly.
 MAX_ACTIVE_PLAYERS_PER_GAME_DAY = 9
 
 # The one exception to "a closed game-day accepts no new entries" — see
@@ -98,19 +104,31 @@ def _resolve_owner_or_floor_manager(
 
 def open_game_day(
     number, started_at, operator, floor_manager_id=None, floor_manager_pin=None,
-    owner_id=None, owner_pin=None,
+    owner_id=None, owner_pin=None, game=None, table=None, buy_in_amount=None,
 ):
     """
     Owner (own login, or PIN) or a Floor Manager PIN authorizes this — a Cashier
     is never the authorizer, under any circumstance. See CONCEPT.md's "Open
     Game-Day flow."
+
+    Added 2026-09-21: optionally records which Game/Table this game-day is
+    running and the Buy-in amount for it — the "Start game-day" flow's
+    three steps (see PLAN.md's "Game/Table selection + two-step chip
+    custody" entry). `buy_in_amount` defaults to `table.default_buy_in`
+    when a table is given but no amount is specified — an independent
+    choice each night, but with a pre-filled default (confirmed). All
+    three stay optional so a game-day can still be opened without them,
+    same as every game-day before this change.
     """
     owner, fm = _resolve_owner_or_floor_manager(
         operator, floor_manager_id, floor_manager_pin, owner_id, owner_pin, action='Opening a game-day',
     )
+    if buy_in_amount is None and table is not None:
+        buy_in_amount = table.default_buy_in
     return GameDay.objects.create(
         number=number, started_at=started_at, status=GameDay.Status.OPEN,
         opened_by=owner, opened_by_floor_manager=fm,
+        game=game, table=table, buy_in_amount=buy_in_amount,
     )
 
 
@@ -173,18 +191,19 @@ def _ensure_seated(game_day, player, operator=None, revive=False):
     if game_day is None or player is None:
         return
     seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
+    max_players = selectors.max_active_players(game_day)
     if seat is None:
-        if selectors.active_game_day_players_count(game_day) >= MAX_ACTIVE_PLAYERS_PER_GAME_DAY:
+        if selectors.active_game_day_players_count(game_day) >= max_players:
             raise TableFullError(
-                f'The table is full ({MAX_ACTIVE_PLAYERS_PER_GAME_DAY} active players right now) — '
+                f'The table is full ({max_players} active players right now) — '
                 f"{player.display_name} wasn't seated. Try again once someone leaves the table.",
                 player=player,
             )
         GameDayPlayer.objects.create(game_day=game_day, player=player, added_by=operator)
     elif revive and seat.left_at is not None:
-        if selectors.active_game_day_players_count(game_day) >= MAX_ACTIVE_PLAYERS_PER_GAME_DAY:
+        if selectors.active_game_day_players_count(game_day) >= max_players:
             raise TableFullError(
-                f'The table is full ({MAX_ACTIVE_PLAYERS_PER_GAME_DAY} active players right now) — '
+                f'The table is full ({max_players} active players right now) — '
                 f"{player.display_name} wasn't seated. Try again once someone leaves the table.",
                 player=player,
             )
@@ -199,8 +218,9 @@ def _validate_seat_number(game_day, seat_number, exclude_player=None):
     GameDayPlayer.Meta) surface as a raw IntegrityError. `exclude_player`
     lets a player "take" the seat they're already sitting in (a no-op move).
     """
-    if not (1 <= seat_number <= MAX_ACTIVE_PLAYERS_PER_GAME_DAY):
-        raise InvalidStateError(f'Seat number must be between 1 and {MAX_ACTIVE_PLAYERS_PER_GAME_DAY}.')
+    max_players = selectors.max_active_players(game_day)
+    if not (1 <= seat_number <= max_players):
+        raise InvalidStateError(f'Seat number must be between 1 and {max_players}.')
     occupied = GameDayPlayer.objects.filter(game_day=game_day, seat_number=seat_number, left_at__isnull=True)
     if exclude_player is not None:
         occupied = occupied.exclude(player=exclude_player)
@@ -225,6 +245,18 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
     seat at the same time — used when the Cashier taps an empty seat
     directly. Left null (e.g. the bulk "+ Add Player" flow), the player is
     seated "unassigned" and can be placed into a seat later via move_seat.
+
+    Added 2026-09-21: if this game-day has a Table and a Buy-in amount set
+    (see GameDay.table/buy_in_amount and the "Start game-day" flow), and
+    this player has no CHIPS_OUT yet tonight, seating them ALSO
+    automatically issues that default buy-in — house to the player — with
+    NO Floor Manager PIN at all. This is the one deliberate automation
+    confirmed for this specific case (see record_transaction's
+    `_skip_pin_check`); a manual top-up beyond this default still requires
+    the PIN, exactly as before. Wrapped in one atomic block with the
+    seating itself: a rejection here (e.g. the default exceeds this
+    player's chips_limit) rolls the seat back too, rather than leaving
+    them seated but unchipped.
     """
     _require_open_game_day(game_day)
     if player is None:
@@ -239,9 +271,23 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
         )
     if seat_number is not None:
         _validate_seat_number(game_day, seat_number, exclude_player=player)
-    _ensure_seated(game_day, player, operator)  # raises TableFullError for a brand-new seat at cap
-    if seat_number is not None:
-        GameDayPlayer.objects.filter(game_day=game_day, player=player).update(seat_number=seat_number)
+
+    with db_transaction.atomic():
+        _ensure_seated(game_day, player, operator)  # raises TableFullError for a brand-new seat at cap
+        if seat_number is not None:
+            GameDayPlayer.objects.filter(game_day=game_day, player=player).update(seat_number=seat_number)
+
+        if (
+            game_day.table_id and game_day.buy_in_amount and
+            not Transaction.objects.filter(
+                game_day=game_day, player=player, type=Transaction.Type.CHIPS_OUT,
+            ).exists()
+        ):
+            record_transaction(
+                type=Transaction.Type.CHIPS_OUT, amount=game_day.buy_in_amount, recorded_by=operator,
+                game_day=game_day, player=player, channel=Transaction.Channel.CASHIER,
+                notes='Default buy-in on seating', _skip_pin_check=True,
+            )
     return player
 
 
@@ -259,8 +305,9 @@ def move_seat(game_day, player, seat_number, operator=None):
     constraint, so it works the same on every backend.
     """
     _require_open_game_day(game_day)
-    if not (1 <= seat_number <= MAX_ACTIVE_PLAYERS_PER_GAME_DAY):
-        raise InvalidStateError(f'Seat number must be between 1 and {MAX_ACTIVE_PLAYERS_PER_GAME_DAY}.')
+    max_players = selectors.max_active_players(game_day)
+    if not (1 <= seat_number <= max_players):
+        raise InvalidStateError(f'Seat number must be between 1 and {max_players}.')
     seat = GameDayPlayer.objects.filter(game_day=game_day, player=player, left_at__isnull=True).first()
     if seat is None:
         raise InvalidStateError(f"{player.display_name} isn't currently seated at tonight's table.")
@@ -289,6 +336,17 @@ def leave_table(game_day, player, operator=None):
     their GameDayPlayer row or touching any transaction history. Idempotent:
     calling this again on an already-departed player just refreshes the
     timestamp. Re-seating them (seat_player / _ensure_seated) clears left_at.
+
+    Not a physical count or financial action on its own — returning chips
+    is its own separate CHIPS_IN entry (PIN-witnessed, same as any other
+    physical count), recorded before this is called, same as it always was.
+
+    Briefly (2026-09-21) became a 3-way disposition (LeaveDisposition:
+    NO_RETURN/HOLD/CASH_OUT) as part of a two-step chip-custody model
+    (TABLE_BUY_IN/TABLE_CASH_OUT) — reverted the same day: HOLD/CASH_OUT
+    were never reachable from the frontend (it always called this with no
+    body), and the custody model itself read as confusing/redundant in the
+    ledger. See PLAN.md's dated revert entry.
     """
     _require_open_game_day(game_day)
     seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
@@ -406,7 +464,7 @@ def _apply_profit_split_stake(player, amount):
 def record_transaction(
     *, type, amount, recorded_by, game_day=None, player=None, notes='', currency='NGN',
     conversion_rate=None, channel=None, floor_manager_id=None, floor_manager_pin=None,
-    tip_category=None, service_staff=None,
+    tip_category=None, service_staff=None, _skip_pin_check=False,
 ):
     """
     The general entry point for recording a ledger-affecting event (chips, cash,
@@ -415,6 +473,14 @@ def record_transaction(
 
     Physical-count types require a valid Floor Manager PIN inline — the entry
     cannot be created without one.
+
+    `_skip_pin_check` (added 2026-09-21, private — never exposed through
+    RecordTransactionSerializer or any view) is set ONLY by seat_player's
+    automatic default buy-in: the one deliberate, explicitly-requested
+    exception where a CHIPS_OUT needs no Floor Manager PIN at all, because
+    it's a known, system-computed default amount, not a manual physical
+    count. Every other CHIPS_OUT — including a manual rebuy through the
+    normal endpoint — keeps requiring the PIN exactly as before.
 
     A CHIPS_OUT that would push the player's current-game-day debt past their
     chips_limit is rejected before the Floor Manager PIN step ever runs — see
@@ -482,7 +548,7 @@ def record_transaction(
                 f'(limit ₦{player.chips_limit:,}, debt after this issuance would be ₦{debt_after:,}).'
             )
     fm = None
-    if type in PHYSICAL_COUNT_TYPES:
+    if not _skip_pin_check and type in PHYSICAL_COUNT_TYPES:
         fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
         if fm is None:
             raise AuthorizationError('A Floor Manager PIN is required to record this entry.')

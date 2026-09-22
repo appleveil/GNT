@@ -11,7 +11,7 @@ from accounts.models import FloorManager, Player, PlayerBankAccount, ServiceStaf
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
-from .models import ConversionRate, GameDay, GameDayPlayer, ProfitSplitArrangement, Transaction
+from .models import ConversionRate, Game, GameDay, GameDayPlayer, ProfitSplitArrangement, Table, Transaction
 
 
 class LedgerMathTests(TestCase):
@@ -1549,3 +1549,58 @@ class ProfitSplitArrangementTests(APITestCase):
         response = self.client.post(f'/api/deals/profit-split/{arrangement.pk}/deactivate/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data['is_active'])
+
+
+class StartGameDayFlowTests(APITestCase):
+    """
+    Game/Table/Buy-in selection at open (added 2026-09-21) — see
+    PLAN.md's "Game/Table selection + two-step chip custody" entry.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='sgd_owner', password='x', role=StaffUser.Role.OWNER)
+        # Distinct from the seeded "Texas Hold'em"/"Omaha" rows (see
+        # gaming/migrations/0011_seed_games_and_tables.py) — Game.name is
+        # globally unique, and those already exist in every test schema.
+        self.game = Game.objects.create(name='Test Game — Start Flow')
+        self.table = Table.objects.create(game=self.game, name='Main Table', default_buy_in=Decimal(500000))
+
+    def test_game_day_can_still_be_opened_without_any_of_the_three(self):
+        """Backward compatible — every game-day before this change had none of these."""
+        game_day = services.open_game_day(100, timezone.now(), self.owner)
+        self.assertIsNone(game_day.game)
+        self.assertIsNone(game_day.table)
+        self.assertIsNone(game_day.buy_in_amount)
+
+    def test_buy_in_amount_defaults_from_the_table_when_omitted(self):
+        game_day = services.open_game_day(101, timezone.now(), self.owner, game=self.game, table=self.table)
+        self.assertEqual(game_day.buy_in_amount, Decimal(500000))
+
+    def test_buy_in_amount_can_override_the_tables_default(self):
+        """Independent choice each night, with a pre-filled default — confirmed, not a hard rule."""
+        game_day = services.open_game_day(
+            102, timezone.now(), self.owner, game=self.game, table=self.table, buy_in_amount=Decimal(100000),
+        )
+        self.assertEqual(game_day.buy_in_amount, Decimal(100000))
+
+    def test_open_via_api_with_game_and_table(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            '/api/game-days/open/', {'number': 103, 'game_id': self.game.id, 'table_id': self.table.id},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['game'], self.game.id)
+        self.assertEqual(response.data['table'], self.table.id)
+        self.assertEqual(Decimal(str(response.data['buy_in_amount'])), Decimal(500000))
+
+    def test_games_and_tables_are_listed_read_only(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/games/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(self.game.name, [row['name'] for row in response.data])
+
+        response = self.client.get(f'/api/tables/?game={self.game.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([row['id'] for row in response.data], [self.table.id])
+
+
