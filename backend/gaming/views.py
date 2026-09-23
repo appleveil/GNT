@@ -7,16 +7,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Player, StaffUser
-from accounts.permissions import IsCashierOrOwner, IsOwner, IsOwnerOrAccountant
+from accounts.permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
 from .exceptions import TableFullError
-from .models import ConversionRate, Game, GameDay, ProfitSplitArrangement, Table, Transaction
+from .models import ClubSettings, ConversionRate, Game, GameDay, ProfitSplitArrangement, Table, Transaction
 from .serializers import (
+    ClubSettingsSerializer,
     CloseGameDaySerializer,
     ConversionRateSerializer,
     CreateProfitSplitArrangementSerializer,
     DealTransferSerializer,
+    GameDayChipsTotalsSerializer,
     GameDaySeatedPlayerSerializer,
     GameDaySerializer,
     GameDaySummaryPreviewSerializer,
@@ -74,6 +76,19 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response(GameDaySerializer(game_day).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get'], url_path='chips-totals')
+    def chips_totals(self, request, pk=None):
+        """
+        Live chips out/in/rake/tip totals — see selectors.game_day_chips_totals
+        and GameDayChipsTotalsSerializer's own comment on why the Cashier's
+        chips-caption needs this dedicated endpoint rather than deriving
+        rake/tips from `ledger`/`activity` (added 2026-09-23, fixing a bug
+        where the caption never picked up rake/tips at all).
+        """
+        game_day = self.get_object()
+        data = selectors.game_day_chips_totals(game_day)
+        return Response(GameDayChipsTotalsSerializer(data).data)
+
     @action(detail=True, methods=['get'], url_path='close-preview')
     def close_preview(self, request, pk=None):
         """
@@ -85,11 +100,16 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         data = selectors.game_day_summary_data(game_day)
         data['num_players_seated'] = selectors.game_day_players(game_day).count()
         data['outstanding_chips_after_close'] = selectors.outstanding_chips_total() + data['chips_variance']
+        data['active_players_count'] = selectors.active_game_day_players_count(game_day)
+        data['close_blocked_reason'] = services.close_blocked_reason(game_day)
+        data['chip_discrepancy'] = services.game_day_chip_discrepancy(game_day)
         return Response(GameDaySummaryPreviewSerializer(data).data)
 
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
-        """Cashier, Owner, or a Floor Manager PIN — any one alone."""
+        """Floor-Manager-PIN-only on an ordinary close; a chip discrepancy
+        widens this to Owner-or-Floor-Manager with a required reason — see
+        gaming.services.close_game_day."""
         game_day = self.get_object()
         serializer = CloseGameDaySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -98,6 +118,9 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
             game_day, operator=request.user,
             floor_manager_id=data.get('floor_manager_id'),
             floor_manager_pin=data.get('floor_manager_pin'),
+            owner_id=data.get('owner_id'),
+            owner_pin=data.get('owner_pin'),
+            discrepancy_reason=data.get('discrepancy_reason', ''),
         )
         return Response(GameDaySerializer(game_day).data)
 
@@ -218,6 +241,27 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         seat = services.move_seat(game_day, player, seat_number, operator=request.user)
         return Response(GameDaySeatedPlayerSerializer(seat).data)
 
+    @action(detail=True, methods=['post'], url_path=r'players/(?P<player_pk>\d+)/rejoin')
+    def player_rejoin(self, request, pk=None, player_pk=None):
+        """
+        Brings a departed player back to the table at an explicitly chosen
+        seat — gaming.services.rejoin_at_seat. Cashier or Owner only, same
+        as every other seating action. Added 2026-09-22: Issue Chips no
+        longer silently revives a departed player (see
+        services._ensure_seated's block_departed) — this is the only way
+        back now, seat first.
+        """
+        if not IsCashierOrOwner().has_permission(request, self):
+            return Response({'detail': 'Only a Cashier or the Owner can do this.'}, status=403)
+        game_day = self.get_object()
+        player = get_object_or_404(Player, pk=player_pk)
+        try:
+            seat_number = int(request.data.get('seat_number'))
+        except (TypeError, ValueError):
+            return Response({'detail': 'seat_number is required.'}, status=400)
+        seat = services.rejoin_at_seat(game_day, player, seat_number, operator=request.user)
+        return Response(GameDaySeatedPlayerSerializer(seat).data)
+
 
 class GameViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -231,11 +275,22 @@ class GameViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
 
-class TableViewSet(viewsets.ReadOnlyModelViewSet):
-    """Read-only — step two of the "Start game-day" flow. Filterable by ?game=<id>."""
+class TableViewSet(viewsets.ModelViewSet):
+    """
+    Reading is step two of the "Start game-day" flow, open to anyone
+    logged in. Writing (added 2026-09-23, the "Settings" screen's Tables
+    section) is Owner-or-Floor-Manager only, same split as
+    StaffMemberViewSet/FloorManagerViewSet — name/game/is_active stay
+    locked via TableSerializer's own read_only_fields; every other field
+    is the actual editable settings surface. Filterable by ?game=<id>.
+    """
 
     serializer_class = TableSerializer
-    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsFloorManagerOrOwner()]
 
     def get_queryset(self):
         qs = Table.objects.filter(is_active=True).order_by('name')
@@ -243,6 +298,31 @@ class TableViewSet(viewsets.ReadOnlyModelViewSet):
         if game_id:
             qs = qs.filter(game_id=game_id)
         return qs
+
+
+class ClubSettingsView(APIView):
+    """
+    Singleton settings resource (see ClubSettings.load()) — added
+    2026-09-23 for the Owner's half of the "Settings" screen (the 5
+    require_approval_* toggles + the payout auto-approval threshold).
+    Reading is open to every role: the frontend needs these flags to
+    decide whether to show the PIN sheet or a plain confirm for each
+    gated action, regardless of who's using it. Writing is Owner-only.
+    """
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [IsAuthenticated()]
+        return [IsOwner()]
+
+    def get(self, request):
+        return Response(ClubSettingsSerializer(ClubSettings.load()).data)
+
+    def patch(self, request):
+        serializer = ClubSettingsSerializer(ClubSettings.load(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class ConversionRateViewSet(viewsets.ReadOnlyModelViewSet):
@@ -296,7 +376,7 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
             game_day=data.get('game_day'), player=data.get('player'), notes=data.get('notes', ''),
             currency=data.get('currency', 'NGN'), conversion_rate=data.get('conversion_rate'),
             floor_manager_id=data.get('floor_manager_id'), floor_manager_pin=data.get('floor_manager_pin'),
-            tip_category=data.get('tip_category'), service_staff=data.get('service_staff'),
+            tip_category=data.get('tip_category'), masseuse=data.get('masseuse'),
         )
         return Response(TransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
 
@@ -429,20 +509,28 @@ class DeactivateProfitSplitArrangementView(APIView):
 
 
 class DashboardView(APIView):
-    """Accountant and Owner only. Main account balance is Owner-only within it."""
+    """
+    Accountant and Owner only. main_account_balance and total_rake_this_month
+    are Owner-only within it — the latter replaced outstanding_chips on the
+    Owner Dashboard's stat grid (2026-09-23); Accountant's own dashboard still
+    gets outstanding_chips, unchanged.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         if request.user.role not in {StaffUser.Role.ACCOUNTANT, StaffUser.Role.OWNER}:
             return Response({'detail': 'Not permitted.'}, status=status.HTTP_403_FORBIDDEN)
-        total_debt, total_credit, debtor_count = selectors.dashboard_totals()
+        total_debt, total_credit, debtor_count, creditor_count = selectors.dashboard_totals()
         data = {
             'total_outstanding_from_players': total_debt,
             'total_outstanding_to_players': total_credit,
             'debtor_count': debtor_count,
-            'outstanding_chips': selectors.outstanding_chips_total(),
+            'creditor_count': creditor_count,
         }
         if request.user.role == StaffUser.Role.OWNER:
             data['main_account_balance'] = selectors.main_account_balance()
+            data['total_rake_this_month'] = selectors.total_rake_this_month()
+        else:
+            data['outstanding_chips'] = selectors.outstanding_chips_total()
         return Response(data)

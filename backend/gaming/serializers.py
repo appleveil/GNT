@@ -2,11 +2,11 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from accounts.models import Player, ServiceStaff
+from accounts.models import Player, StaffMember
 from accounts.serializers import PlayerBankAccountSerializer
 
 from . import selectors
-from .models import ConversionRate, Game, GameDay, GameDaySummary, ProfitSplitArrangement, Table, Transaction
+from .models import ClubSettings, ConversionRate, Game, GameDay, GameDaySummary, ProfitSplitArrangement, Table, Transaction
 
 
 class GameSerializer(serializers.ModelSerializer):
@@ -17,10 +17,29 @@ class GameSerializer(serializers.ModelSerializer):
 
 
 class TableSerializer(serializers.ModelSerializer):
+    """
+    id/game/name/is_active stay locked (row identity — see TableViewSet's
+    own comment); everything else here is the Owner/Floor-Manager-editable
+    "Settings" screen fields added 2026-09-23 — see Table's own docstring.
+    """
+
     class Meta:
         model = Table
-        fields = ['id', 'game', 'name', 'default_buy_in', 'is_active']
-        read_only_fields = fields
+        fields = [
+            'id', 'game', 'name', 'default_buy_in', 'is_active',
+            'rake_percentage', 'small_blind', 'big_blind', 'max_players', 'max_chips_issuable',
+        ]
+        read_only_fields = ['id', 'game', 'name', 'is_active']
+
+
+class ClubSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClubSettings
+        fields = [
+            'require_approval_open_game_day', 'require_approval_close_game_day', 'require_approval_issue_chips',
+            'require_approval_return_chips', 'require_approval_add_tip', 'require_approval_add_rake',
+            'payout_auto_approve_threshold',
+        ]
 
 
 class GameDaySummarySerializer(serializers.ModelSerializer):
@@ -28,8 +47,38 @@ class GameDaySummarySerializer(serializers.ModelSerializer):
         model = GameDaySummary
         fields = [
             'num_players', 'chips_out_total', 'chips_in_total', 'rake_total', 'tips_total',
-            'chips_variance', 'total_payments', 'game_balance', 'created_at',
+            'chips_variance', 'total_payments', 'game_balance', 'chip_discrepancy_reason', 'created_at',
         ]
+
+
+class ChipDiscrepancySerializer(serializers.Serializer):
+    """gaming.services.game_day_chip_discrepancy's return shape — None
+    (omitted) once chips reconcile. Added 2026-09-22."""
+
+    chips_out_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    chips_in_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    rake_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    tips_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=0)
+    direction = serializers.ChoiceField(choices=['short', 'excess'])
+
+
+class GameDayChipsTotalsSerializer(serializers.Serializer):
+    """
+    selectors.game_day_chips_totals' return shape, live (not the frozen
+    close-time summary). Added 2026-09-23 for the Cashier's persistent
+    chips-caption — it needs rake_total/tips_total too (the same figures
+    record_transaction's CHIPS_IN ceiling nets out), which neither `ledger`
+    nor `activity` can supply: both exclude RAKE/TIP rows entirely (see
+    EXCLUDED_FROM_GAME_DAY_LEDGER — they're day-level entries, not scoped to
+    any one player), so a caption built only from those two feeds could
+    never reflect them however it filtered its own data client-side.
+    """
+
+    chips_out_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    chips_in_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    rake_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    tips_total = serializers.DecimalField(max_digits=14, decimal_places=0)
 
 
 class GameDaySerializer(serializers.ModelSerializer):
@@ -73,14 +122,23 @@ class GameDaySummaryPreviewSerializer(serializers.Serializer):
 
     num_players = serializers.IntegerField()
     num_players_seated = serializers.IntegerField()
-    chips_out_total = serializers.DecimalField(max_digits=14, decimal_places=2)
-    chips_in_total = serializers.DecimalField(max_digits=14, decimal_places=2)
-    rake_total = serializers.DecimalField(max_digits=14, decimal_places=2)
-    tips_total = serializers.DecimalField(max_digits=14, decimal_places=2)
-    chips_variance = serializers.DecimalField(max_digits=14, decimal_places=2)
-    total_payments = serializers.DecimalField(max_digits=14, decimal_places=2)
-    game_balance = serializers.DecimalField(max_digits=14, decimal_places=2)
-    outstanding_chips_after_close = serializers.DecimalField(max_digits=14, decimal_places=2)
+    chips_out_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    chips_in_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    rake_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    tips_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    chips_variance = serializers.DecimalField(max_digits=14, decimal_places=0)
+    total_payments = serializers.DecimalField(max_digits=14, decimal_places=0)
+    game_balance = serializers.DecimalField(max_digits=14, decimal_places=0)
+    outstanding_chips_after_close = serializers.DecimalField(max_digits=14, decimal_places=0)
+    # Added 2026-09-22 alongside services.close_game_day's new close-time
+    # rules — lets the Cashier see these up front, in the same words the
+    # service itself would use, rather than only discovering them after
+    # entering a PIN. close_blocked_reason is the HARD block (active
+    # players still seated — not overridable); chip_discrepancy is the
+    # ACKNOWLEDGE-and-sign-off condition (see gaming.services for both).
+    active_players_count = serializers.IntegerField()
+    close_blocked_reason = serializers.CharField(allow_null=True)
+    chip_discrepancy = ChipDiscrepancySerializer(allow_null=True)
 
 
 class OpenGameDaySerializer(serializers.Serializer):
@@ -101,12 +159,20 @@ class OpenGameDaySerializer(serializers.Serializer):
     table_id = serializers.PrimaryKeyRelatedField(
         source='table', queryset=Table.objects.all(), required=False, allow_null=True,
     )
-    buy_in_amount = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
+    buy_in_amount = serializers.DecimalField(max_digits=14, decimal_places=0, required=False, allow_null=True)
 
 
 class CloseGameDaySerializer(serializers.Serializer):
     floor_manager_id = serializers.IntegerField(required=False, allow_null=True)
     floor_manager_pin = serializers.CharField(required=False, allow_blank=True)
+    # owner_id/owner_pin only come into play when there's a chip
+    # discrepancy to acknowledge — an ordinary close stays Floor-Manager-
+    # PIN-only. discrepancy_reason is required server-side (see
+    # services.close_game_day) exactly when a discrepancy exists, not
+    # unconditionally here — this serializer just needs to accept it.
+    owner_id = serializers.IntegerField(required=False, allow_null=True)
+    owner_pin = serializers.CharField(required=False, allow_blank=True)
+    discrepancy_reason = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class ConversionRateSerializer(serializers.ModelSerializer):
@@ -133,7 +199,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             'id', 'game_day', 'player', 'type', 'amount', 'currency', 'conversion_rate',
             'channel', 'notes', 'recorded_by', 'floor_manager', 'confirmed_at', 'status',
             'approved_by', 'approved_at', 'is_voided', 'voided_by', 'voided_at', 'void_reason',
-            'external_reference', 'created_at', 'tip_category', 'service_staff',
+            'external_reference', 'created_at', 'tip_category', 'masseuse',
             'linked_transaction', 'profit_split_arrangement',
         ]
         read_only_fields = [f for f in fields if f not in ('game_day', 'player', 'type', 'amount', 'notes')]
@@ -142,8 +208,8 @@ class TransactionSerializer(serializers.ModelSerializer):
 class LedgerEntrySerializer(TransactionSerializer):
     """A Transaction row annotated with the computed signed amount and running balance."""
 
-    signed_amount = serializers.DecimalField(max_digits=14, decimal_places=2)
-    running_balance = serializers.DecimalField(max_digits=14, decimal_places=2)
+    signed_amount = serializers.DecimalField(max_digits=14, decimal_places=0)
+    running_balance = serializers.DecimalField(max_digits=14, decimal_places=0)
 
     class Meta(TransactionSerializer.Meta):
         fields = TransactionSerializer.Meta.fields + ['signed_amount', 'running_balance']
@@ -153,7 +219,7 @@ class RecordTransactionSerializer(serializers.Serializer):
     game_day = serializers.PrimaryKeyRelatedField(queryset=GameDay.objects.all(), required=False, allow_null=True)
     player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all(), required=False, allow_null=True)
     type = serializers.ChoiceField(choices=Transaction.Type.choices)
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=0)
     currency = serializers.CharField(required=False, default='NGN')
     conversion_rate = serializers.DecimalField(
         max_digits=12, decimal_places=4, required=False, allow_null=True,
@@ -162,13 +228,13 @@ class RecordTransactionSerializer(serializers.Serializer):
     floor_manager_id = serializers.IntegerField(required=False, allow_null=True)
     floor_manager_pin = serializers.CharField(required=False, allow_blank=True)
     # Meaningful only for type=TIP — see Transaction.TipCategory. Further
-    # cross-field validation (required for a TIP, SERVICE needs an active
-    # service_staff, DEALER must not have one) happens in
+    # cross-field validation (required for a TIP, MASSEUSE needs an active
+    # masseuse, SERVICE_STAFF must not have one) happens in
     # gaming.services.record_transaction, not here — same pattern as this
     # serializer's other type-conditional fields.
     tip_category = serializers.ChoiceField(choices=Transaction.TipCategory.choices, required=False, allow_null=True)
-    service_staff = serializers.PrimaryKeyRelatedField(
-        queryset=ServiceStaff.objects.all(), required=False, allow_null=True,
+    masseuse = serializers.PrimaryKeyRelatedField(
+        queryset=StaffMember.objects.filter(role=StaffMember.Role.MASSEUSE), required=False, allow_null=True,
     )
 
 
@@ -178,7 +244,7 @@ class VoidTransactionSerializer(serializers.Serializer):
 
 class InitiatePayoutSerializer(serializers.Serializer):
     player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=0)
     game_day = serializers.PrimaryKeyRelatedField(queryset=GameDay.objects.all(), required=False, allow_null=True)
 
 
@@ -187,7 +253,7 @@ class DealTransferSerializer(serializers.Serializer):
 
     source_player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
     destination_player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=14, decimal_places=0)
     reason = serializers.CharField()
 
 
@@ -208,7 +274,7 @@ class CreateProfitSplitArrangementSerializer(serializers.Serializer):
 
     player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
     house_stake_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
-    cap_amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+    cap_amount = serializers.DecimalField(max_digits=14, decimal_places=0)
     reset_cadence = serializers.ChoiceField(
         choices=ProfitSplitArrangement.ResetCadence.choices,
         required=False, default=ProfitSplitArrangement.ResetCadence.ONE_OFF,
@@ -216,7 +282,7 @@ class CreateProfitSplitArrangementSerializer(serializers.Serializer):
     ends_at = serializers.DateTimeField(required=False, allow_null=True)
     max_resets = serializers.IntegerField(required=False, allow_null=True)
     max_cumulative_value = serializers.DecimalField(
-        max_digits=14, decimal_places=2, required=False, allow_null=True,
+        max_digits=14, decimal_places=0, required=False, allow_null=True,
     )
     payout_basis = serializers.ChoiceField(
         choices=ProfitSplitArrangement.PayoutBasis.choices,
@@ -227,8 +293,8 @@ class CreateProfitSplitArrangementSerializer(serializers.Serializer):
         required=False, default=ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO,
     )
     custom_ratio_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
-    fixed_amount = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
-    fixed_offset = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
+    fixed_amount = serializers.DecimalField(max_digits=14, decimal_places=0, required=False, allow_null=True)
+    fixed_offset = serializers.DecimalField(max_digits=14, decimal_places=0, required=False, allow_null=True)
 
 
 class ProfitSplitStatusSerializer(serializers.Serializer):
@@ -237,11 +303,11 @@ class ProfitSplitStatusSerializer(serializers.Serializer):
     arrangement = ProfitSplitArrangementSerializer()
     period_start = serializers.DateTimeField()
     periods_elapsed = serializers.IntegerField()
-    covered_this_period = serializers.DecimalField(max_digits=14, decimal_places=2)
-    cumulative_covered = serializers.DecimalField(max_digits=14, decimal_places=2)
+    covered_this_period = serializers.DecimalField(max_digits=14, decimal_places=0)
+    cumulative_covered = serializers.DecimalField(max_digits=14, decimal_places=0)
     is_exhausted = serializers.BooleanField()
     exhausted_reason = serializers.CharField(allow_null=True)
-    available_stake_this_period = serializers.DecimalField(max_digits=14, decimal_places=2)
+    available_stake_this_period = serializers.DecimalField(max_digits=14, decimal_places=0)
 
 
 class GameDaySeatedPlayerSerializer(serializers.Serializer):
@@ -256,7 +322,7 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
     account_code = serializers.CharField(source='player.account_code')
     display_name = serializers.CharField(source='player.display_name')
     chips_limit = serializers.DecimalField(
-        source='player.chips_limit', max_digits=14, decimal_places=2, allow_null=True,
+        source='player.chips_limit', max_digits=14, decimal_places=0, allow_null=True,
     )
     bank_accounts = PlayerBankAccountSerializer(source='player.bank_accounts', many=True)
     balance = serializers.SerializerMethodField()
@@ -269,6 +335,15 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
     # Null = seated but not assigned a specific numbered seat yet — see
     # gaming.services.seat_player/move_seat. Added 2026-09-17.
     seat_number = serializers.IntegerField(allow_null=True)
+    # True while this player has a payout stuck at TRANSFER_FAILED tonight
+    # — see selectors.player_has_failed_payout's own comment. Added
+    # 2026-09-23 so the Cashier isn't the last to know a payout they
+    # initiated didn't actually go through.
+    payout_failed = serializers.SerializerMethodField()
+
+    def get_payout_failed(self, obj):
+        from . import selectors
+        return selectors.player_has_failed_payout(obj.player, obj.game_day)
 
     def get_balance(self, obj):
         from . import selectors

@@ -4,7 +4,12 @@
  * Single source of truth for how each Transaction.Type renders and behaves
  * in the Cashier UI — label (ledger rows), actionLabel (entry-grid buttons
  * and the entry sheet's title), which --lane-* token family it draws its
- * icon/dot color from (tokens.css), and which extra rules apply.
+ * icon/dot color from (tokens.css), which extra rules apply, and
+ * `amountTone` — colors the ledger's own Amount figure red ('debit', chips
+ * going out) or green ('credit', money coming back in), per the ledger
+ * design review. Only CHIPS_OUT and the PAYMENT_* types carry a tone;
+ * everything else (CHIPS_IN, PAYOUT, WRITE_OFF, RAKE, TIP) stays neutral —
+ * not asked for, and their sign is less clear-cut as a pure debit/credit.
  *
  * Mirrors backend/gaming/models.py's Transaction.Type and gaming/services.py's
  * PHYSICAL_COUNT_TYPES/DEFAULT_CHANNEL_BY_TYPE — keep in sync if either
@@ -14,16 +19,20 @@
  * from GET /game-days/{id}/ledger/, only from their own entry action.
  */
 export const TRANSACTION_TYPES = {
-  CHIPS_OUT: { label: 'Chips Out', actionLabel: 'Issue Chips', lane: 'chips', physicalCount: true },
+  CHIPS_OUT: { label: 'Chips Out', actionLabel: 'Issue Chips', lane: 'chips', physicalCount: true, amountTone: 'debit' },
   CHIPS_IN: { label: 'Return Chips', actionLabel: 'Return Chips', lane: 'chips', physicalCount: true },
   PAYMENT_CASH: {
     label: 'Cash Payment', actionLabel: 'Cash Payment', lane: 'payments', physicalCount: true, needsCurrency: true,
+    amountTone: 'credit',
   },
-  PAYMENT_TRANSFER: { label: 'Transfer', actionLabel: 'Transfer (manual)', lane: 'payments', physicalCount: false },
+  PAYMENT_TRANSFER: {
+    label: 'Transfer', actionLabel: 'Transfer (manual)', lane: 'payments', physicalCount: false, amountTone: 'credit',
+  },
   PAYMENT_POS: {
     label: 'POS Payment', actionLabel: 'POS Payment', lane: 'payments', physicalCount: false, needsProvider: true,
+    amountTone: 'credit',
   },
-  PAYMENT_DEAL: { label: 'Deal', actionLabel: 'Deal', lane: 'other', physicalCount: false },
+  PAYMENT_DEAL: { label: 'Deal', actionLabel: 'Deal', lane: 'other', physicalCount: false, amountTone: 'credit' },
   PAYOUT: { label: 'Payout', actionLabel: 'Payout', lane: 'other', physicalCount: false },
   WRITE_OFF: { label: 'Write-off', actionLabel: 'Write-off', lane: 'other', physicalCount: false },
   RAKE: { label: 'Rake', actionLabel: 'Rake', lane: 'other', physicalCount: true, general: true },

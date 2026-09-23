@@ -1,6 +1,5 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
 import TransactionEntryModal from '@/components/shared/TransactionEntryModal.vue'
@@ -8,25 +7,18 @@ import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
 import AddPlayerModal from '@/components/shared/AddPlayerModal.vue'
 import StartGameDayModal from '@/components/shared/StartGameDayModal.vue'
+import PlayerBankAccountModal from '@/components/shared/PlayerBankAccountModal.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 import api from '@/api/axios'
 
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
-const router = useRouter()
 const toast = useToast()
 
 const opening = ref(false)
 const openError = ref('')
 
-// "Start game-day" flow (2026-09-21) — Select game → Select table → confirm
-// buy-in, THEN the Owner/FM PIN (still handled inside StartGameDayModal via
-// the shared useAuthorizerConfirm). Replaces the old flow, which skipped
-// straight from this button to the PIN modal with no game/table selection
-// at all — the backend (open_game_day's game_id/table_id/buy_in_amount)
-// already supported this; only the frontend step was missing. See
-// PLAN.md's "Game/Table selection at start" entry.
 const startFlowOpen = ref(false)
 const startFlowNumber = ref(null)
 
@@ -57,12 +49,12 @@ function onGameDayStarted(data) {
   gameDay.current = data
 }
 
-// ── Players (seated tonight) + the entry-recording working screen ─────────
-
 const players = ref([])
 const playersLoading = ref(false)
 const ledger = ref([])
 const ledgerLoading = ref(false)
+// rake/tips are excluded from `ledger`/`activity`, so they need their own fetch.
+const chipsTotals = ref(null)
 
 async function loadPlayers() {
   if (!gameDay.current) {
@@ -85,9 +77,7 @@ async function loadLedger() {
   }
   ledgerLoading.value = true
   try {
-    // `activity` (not `ledger`) — running_balance here is scoped per-player,
-    // not the club-wide cumulative total `ledger` returns. See
-    // gaming.selectors.game_day_activity_feed's docstring.
+    // running_balance here is per-player, unlike `ledger`'s club-wide cumulative total
     const { data } = await api.get(`/game-days/${gameDay.current.id}/activity/`)
     ledger.value = data.slice().reverse() // most recent first
   } finally {
@@ -95,41 +85,42 @@ async function loadLedger() {
   }
 }
 
-function refreshAll() {
-  return Promise.all([loadPlayers(), loadLedger()])
+async function loadChipsTotals() {
+  if (!gameDay.current) {
+    chipsTotals.value = null
+    return
+  }
+  try {
+    const { data } = await api.get(`/game-days/${gameDay.current.id}/chips-totals/`)
+    chipsTotals.value = data
+  } catch {
+    // silent — caption just shows '--'
+  }
 }
 
-// Player picker — pills only (2026-09-14): every seated player is shown at
-// once, no search. A real game-day never has more than ~10 people at the
-// table, so browsing beats typing. Tapping a pill just selects it directly.
-const selectedPlayerId = ref(null)
+function refreshAll() {
+  return Promise.all([loadPlayers(), loadLedger(), loadChipsTotals()])
+}
 
-// Refetch whenever the open game-day changes (open, close, or the very first
-// time AppShell's own fetchCurrent() resolves after this view has mounted).
+const selectedPlayerId = ref(null)
+const seatColumnTab = ref('seats')
+
 watch(() => gameDay.current?.id, id => {
   selectedPlayerId.value = null
+  seatColumnTab.value = 'seats'
   if (id) refreshAll()
   else {
     players.value = []
     ledger.value = []
+    chipsTotals.value = null
   }
 }, { immediate: true })
 
 const selectedPlayer = computed(() => players.value.find(p => p.id === selectedPlayerId.value) || null)
 
-// "Active" vs "total" seated — total is every GameDayPlayer row for tonight
-// (players.value, unchanged); active is those still at the table (left_at
-// null). Only active counts toward MAX_ACTIVE_PLAYERS (see AddPlayerModal).
 const activeCount = computed(() => players.value.filter(p => !p.left_at).length)
 const departedCount = computed(() => players.value.length - activeCount.value)
 
-// Numbered seats (2026-09-17) — per-game now (Texas Hold'em 9, Omaha 8, ...),
-// via gaming.selectors.max_active_players, exposed directly on the game-day
-// as max_players (2026-09-21) so this never needs its own game/table lookup.
-// Every seat 1..MAX renders as its own pill, occupied or empty, so the
-// Cashier can tell at a glance who's where and which seats are free; a
-// still-active player with no seat_number yet (e.g. seated via the bulk
-// "+ Add Player" flow) shows separately as "unassigned" until moved into one.
 const maxSeats = computed(() => gameDay.current?.max_players ?? 9)
 const seatSlots = computed(() => {
   const bySeat = new Map()
@@ -148,28 +139,31 @@ function selectPlayer(p) {
   selectedPlayerId.value = p.id
 }
 
-// Add-player modal — always opened by tapping a specific empty seat pill
-// (see the seat grid below). The standalone "+ Add Player" button (added
-// 2026-09-14, generic/unassigned/multi-select) was removed 2026-09-21 as
-// redundant — every empty seat is already its own visible "add here" tap
-// target, so a second, seat-less entry point just duplicated the same
-// modal for no real gain. AddPlayerModal.vue is now always seat-scoped.
+// Tapping an empty seat offers New/Existing; "+ New Player" forces
+// New-player-only — there's no "seat an existing player" path outside a seat tap.
 const addPlayerOpen = ref(false)
 const seatTarget = ref(null)
+const newPlayerFlow = ref(false)
 function onEmptySeatClick(seatNumber) {
   seatTarget.value = seatNumber
+  newPlayerFlow.value = false
+  addPlayerOpen.value = true
+}
+function onAddPlayerButtonClick() {
+  seatTarget.value = null
+  newPlayerFlow.value = true
   addPlayerOpen.value = true
 }
 function onAddPlayerClosed() {
   addPlayerOpen.value = false
   seatTarget.value = null
+  newPlayerFlow.value = false
 }
 function onPlayerAdded() {
   refreshAll()
 }
 
-// Move/swap seat
-const moveSeatTarget = ref(null) // the player being moved, or null
+const moveSeatTarget = ref(null) // player being moved, or null
 function onMoveSeatClick() {
   moveSeatTarget.value = selectedPlayer.value
 }
@@ -195,22 +189,74 @@ async function onPickMoveSeat(seatNumber) {
   }
 }
 
-// Entry sheet
+// A departed player is re-seated explicitly, into an empty seat only —
+// their old seat_number may since have been taken by someone else.
+const rejoinTarget = ref(null) // departed player being rejoined, or null
+function onRejoinClick() {
+  rejoinTarget.value = selectedPlayer.value
+}
+const rejoinSeatOptions = computed(() => {
+  if (!rejoinTarget.value) return []
+  return seatSlots.value.filter(s => !s.player).map(s => ({ seatNumber: s.seatNumber }))
+})
+async function onPickRejoinSeat(seatNumber) {
+  const player = rejoinTarget.value
+  rejoinTarget.value = null
+  try {
+    await api.post(`/game-days/${gameDay.current.id}/players/${player.id}/rejoin/`, { seat_number: seatNumber })
+    toast.success(`${player.display_name} rejoined at Seat ${seatNumber}.`)
+    refreshAll()
+  } catch (err) {
+    toast.error(err.response?.data?.detail || 'Could not rejoin this player.')
+  }
+}
+
+const payoutSubmitting = ref(false)
+
+// A payout only makes sense once the club owes the player (balance > 0) and
+// they've left the table — left_at doubles as "has returned/never held chips."
+const payoutDisabled = computed(() => {
+  const p = selectedPlayer.value
+  return !p || !(p.balance > 0) || !p.left_at || payoutSubmitting.value
+})
+
+const bankModalOpen = ref(false)
+
+async function onPayoutClick() {
+  const p = selectedPlayer.value
+  if (!p) return
+  if (!(p.bank_accounts || []).some(b => b.is_default)) {
+    bankModalOpen.value = true
+    return
+  }
+  payoutSubmitting.value = true
+  try {
+    await api.post('/transactions/payout/', { player: p.id, amount: p.balance })
+    toast.success(`Payout of ${N(p.balance)} initiated for ${p.display_name} — pending Owner approval.`)
+    refreshAll()
+  } catch (err) {
+    toast.error(err.response?.data?.detail || 'Could not initiate the payout.')
+  } finally {
+    payoutSubmitting.value = false
+  }
+}
+function onBankModalClosed() {
+  bankModalOpen.value = false
+}
+function onBankAccountAdded() {
+  bankModalOpen.value = false
+  refreshAll().then(onPayoutClick)
+}
+
 const entryModal = ref(null) // { type, player } | null
-// Set when the entry sheet was opened from the "Leave Table → Yes, return
-// chips" choice below — its CHIPS_IN save is what then marks them left,
-// chained here rather than in TransactionEntryModal itself.
+// Set when Leave Table's "return chips" choice opens the CHIPS_IN entry —
+// onEntrySaved uses this to also mark the player left afterward.
 const pendingLeave = ref(null)
 
 function openEntry(type, player = selectedPlayer.value) {
   entryModal.value = { type, player }
 }
 
-// "Payment" — was three separate action-grid buttons (Cash / POS /
-// Transfer), each doing the exact same thing (record a payment) with only
-// the channel differing. Consolidated into one button + a small picker
-// (2026-09-21, see the Cashier layout wireframe review) — cuts the grid
-// from 9 buttons to 7 with no capability lost.
 const paymentPickerOpen = ref(false)
 function pickPaymentType(type) {
   paymentPickerOpen.value = false
@@ -238,11 +284,7 @@ async function onEntrySaved() {
   refreshAll()
 }
 
-// Leave Table — see PLAN.md's "leave the table" entry. "Return to Table"
-// was removed 2026-09-15: a departed player comes back ONLY by being issued
-// chips (CHIPS_OUT), never through a bare re-add — so the 8th action-grid
-// button only ever renders for a still-active player now (see template).
-const leaveTarget = ref(null) // the player being asked "returning chips first?", or null
+const leaveTarget = ref(null) // player being asked "returning chips first?", or null
 
 function onLeaveClick() {
   leaveTarget.value = selectedPlayer.value
@@ -275,28 +317,40 @@ function playerName(playerId) {
 
 const ledgerRows = computed(() => ledger.value.map(row => ({ ...row, player_name: playerName(row.player) })))
 
-// A short stat-tile row above tonight's activity — derived entirely from
-// the already-loaded activity feed (no extra API call). Added 2026-09-21:
-// the page had no summary/"hero number" moment anywhere on it at all,
-// unlike every other ledger view in the app.
+// activity's running_balance is already partitioned per-player, so filtering
+// client-side gives each row the correct balance for its own player.
+const playerLedgerRows = computed(() => {
+  if (!selectedPlayerId.value) return []
+  return ledgerRows.value.filter(row => row.player === selectedPlayerId.value)
+})
+
+// Same game-day-wide scope record_transaction's CHIPS_IN ceiling checks —
+// from the dedicated chipsTotals fetch, not `ledger` (which excludes RAKE/TIP).
+const gameDayChipsOutTotal = computed(() => Number(chipsTotals.value?.chips_out_total || 0))
+const gameDayChipsInTotal = computed(() => Number(chipsTotals.value?.chips_in_total || 0))
+// Rake/tips never come back as a CHIPS_IN — shown only once nonzero.
+const gameDayRakeTipsTotal = computed(
+  () => Number(chipsTotals.value?.rake_total || 0) + Number(chipsTotals.value?.tips_total || 0),
+)
+const gameDayReturnableCeiling = computed(() => gameDayChipsOutTotal.value - gameDayRakeTipsTotal.value)
+
 const PAYMENT_TYPES = new Set(['PAYMENT_CASH', 'PAYMENT_TRANSFER', 'PAYMENT_POS', 'PAYMENT_DEAL'])
 const chipsOutTonight = computed(() =>
-  ledger.value.filter(r => r.type === 'CHIPS_OUT' && !r.is_voided).reduce((sum, r) => sum + Number(r.amount), 0)
+  playerLedgerRows.value.filter(r => r.type === 'CHIPS_OUT' && !r.is_voided).reduce((sum, r) => sum + Number(r.amount), 0)
 )
 const paymentsTonight = computed(() =>
-  ledger.value.filter(r => PAYMENT_TYPES.has(r.type) && !r.is_voided).reduce((sum, r) => sum + Number(r.amount), 0)
+  playerLedgerRows.value.filter(r => PAYMENT_TYPES.has(r.type) && !r.is_voided).reduce((sum, r) => sum + Number(r.amount), 0)
 )
-// Sum of every row's signed_amount, not running_balance — running_balance
-// on this feed is per-player-partitioned (see loadLedger's comment above),
-// not the club-wide total. PROFIT_SPLIT_STAKE rows carry signed_amount=0
-// (balance-neutral by design), so they fall out of this sum on their own —
-// no type filtering needed here.
-const tableBalanceTonight = computed(() =>
-  ledger.value.filter(r => !r.is_voided).reduce((sum, r) => sum + Number(r.signed_amount), 0)
+const chipsInTonight = computed(() =>
+  playerLedgerRows.value.filter(r => r.type === 'CHIPS_IN' && !r.is_voided).reduce((sum, r) => sum + Number(r.amount), 0)
+)
+// Positive = the club owes this player, negative = they owe the club — matches
+// selectedPlayer.balance's own convention; NOT negated like a club-wide total would be.
+const playerBalanceTonight = computed(() =>
+  playerLedgerRows.value.filter(r => !r.is_voided).reduce((sum, r) => sum + Number(r.signed_amount), 0)
 )
 
-// Void
-const voidTarget = ref(null) // the ledger row being voided, or null
+const voidTarget = ref(null) // ledger row being voided, or null
 
 function canVoid(row) {
   return canVoidTransaction(row, auth.user, gameDay.current?.status)
@@ -313,7 +367,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 <template>
   <div>
-    <!-- No game-day open -->
     <div v-if="!gameDay.isOpen" class="card empty-state">
       <div class="eyebrow">No Game-Day Open</div>
       <p class="muted">Open a game-day to start seating players and recording activity.</p>
@@ -323,24 +376,17 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </button>
     </div>
 
-    <!-- Game-day open: the real working screen -->
     <template v-else>
-      <!-- Compacted to one slim row (2026-09-21, see the Cashier layout
-           wireframe review) — was a tall stacked card (label above two
-           full-width detailed buttons); this is a low-frequency, not-
-           player-specific action, so it shouldn't compete for height with
-           the actual working area below. The "General — not tied to a
-           player" eyebrow was dropped entirely and this slot now carries
-           the seat-count summary instead (previously its own separate
-           .picker-row above the seat grid) — one row doing both jobs
-           rather than two adjacent one-line sections. -->
-      <div class="card section general-section">
+      <div class="section general-section">
         <div class="lbl">
-          {{ activeCount }} active &middot; {{ maxSeats - activeCount }} seats free <!-- — tap an empty seat to add a player -->
+          {{ activeCount }} active &middot; {{ maxSeats - activeCount }} seats free
           <template v-if="departedCount">&middot; ({{ departedCount }} players have left)</template>
         </div>
 
         <div class="general-actions">
+          <button class="add-player-btn" type="button" @click="onAddPlayerButtonClick">
+            <span class="add-player-icon">+</span> New Player
+          </button>
           <button class="general-btn" type="button" @click="openEntry('RAKE', null)">
             <span class="general-btn-title">Rake</span>
             <span class="general-btn-sub">end of day</span>
@@ -352,122 +398,150 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </div>
       </div>
 
-      <!-- Seat grid + selected player sit side by side (2026-09-21, see the
-           Cashier layout wireframe review) — previously both were full-
-           width, stacked vertically, so picking a player pushed the whole
-           action panel below the fold on a full table. A fixed-width seat
-           column keeps every seat and the working panel on screen together. -->
       <div class="working-area">
         <div class="seat-column">
           <p v-if="playersLoading && !players.length" class="muted">Loading…</p>
           <template v-else>
-            <div class="pills">
+            <div v-if="departedPlayers.length" class="seat-tabs">
               <button
-                v-for="s in seatSlots" :key="s.seatNumber" type="button" class="pill"
-                :class="s.player ? { 'pill--active': s.player.id === selectedPlayerId } : 'pill--empty'"
-                @click="s.player ? selectPlayer(s.player) : onEmptySeatClick(s.seatNumber)"
-              >
-                <span class="pill-seat">{{ s.seatNumber }}</span>
-                <span class="pill-label">{{ s.player ? `${s.player.display_name} · ${s.player.account_code}` : 'Empty' }}</span>
-              </button>
+                type="button" class="seat-tab" :class="{ 'seat-tab--active': seatColumnTab === 'seats' }"
+                @click="seatColumnTab = 'seats'"
+              >Seats</button>
+              <button
+                type="button" class="seat-tab" :class="{ 'seat-tab--active': seatColumnTab === 'left' }"
+                @click="seatColumnTab = 'left'"
+              >Left ({{ departedCount }})</button>
             </div>
 
-            <div v-if="unassignedPlayers.length" class="pills pills--secondary">
-              <div class="pills-label">Unassigned</div>
-              <button
-                v-for="p in unassignedPlayers" :key="p.id" type="button" class="pill"
-                :class="{ 'pill--active': p.id === selectedPlayerId }"
-                @click="selectPlayer(p)"
-              >
-                <span class="pill-label">{{ p.display_name }} &middot; {{ p.account_code }}</span>
-              </button>
-            </div>
+            <template v-if="seatColumnTab === 'seats' || !departedPlayers.length">
+              <div class="pills">
+                <button
+                  v-for="s in seatSlots" :key="s.seatNumber" type="button" class="pill"
+                  :class="s.player ? { 'pill--active': s.player.id === selectedPlayerId } : 'pill--empty'"
+                  @click="s.player ? selectPlayer(s.player) : onEmptySeatClick(s.seatNumber)"
+                >
+                  <span class="pill-seat">{{ s.seatNumber }}</span>
+                  <span class="pill-label">{{ s.player ? `${s.player.display_name} · ${s.player.account_code}` : 'Empty' }}</span>
+                </button>
+              </div>
 
-            <div v-if="departedPlayers.length" class="pills pills--secondary">
-              <div class="pills-label">Left tonight ({{ departedCount }})</div>
+              <div v-if="unassignedPlayers.length" class="pills pills--secondary">
+                <div class="pills-label">Unassigned</div>
+                <button
+                  v-for="p in unassignedPlayers" :key="p.id" type="button" class="pill"
+                  :class="{ 'pill--active': p.id === selectedPlayerId }"
+                  @click="selectPlayer(p)"
+                >
+                  <span class="pill-label">{{ p.display_name }} &middot; {{ p.account_code }}</span>
+                </button>
+              </div>
+            </template>
+
+            <div v-else class="pills pills--secondary">
               <button
                 v-for="p in departedPlayers" :key="p.id" type="button" class="pill pill--departed"
                 :class="{ 'pill--active': p.id === selectedPlayerId }"
                 @click="selectPlayer(p)"
               >
                 <span class="pill-label">{{ p.display_name }} &middot; {{ p.account_code }}</span>
-                <span class="pill-tag">left</span>
               </button>
             </div>
           </template>
         </div>
 
-        <div v-if="selectedPlayer" class="card section player-panel">
+        <div class="card section player-panel">
           <div class="panel-head">
-            <div class="lbl">{{ selectedPlayer.display_name }} &middot; {{ selectedPlayer.account_code }}</div>
-            <div v-if="selectedPlayer.left_at" class="left-badge">Left the table</div>
-            <div v-else-if="selectedPlayer.chips_limit != null" class="chips-limit-badge">
-              Chips limit: {{ N(selectedPlayer.chips_used_today) }} of {{ N(selectedPlayer.chips_limit) }} used
+            <div class="panel-name">
+              {{ selectedPlayer?.display_name || '--' }}
+              <span v-if="selectedPlayer" class="panel-name-code">&middot; {{ selectedPlayer.account_code }}</span>
+            </div>
+            <!-- Not exclusive with the two below — a departed player can also have a stuck payout. -->
+            <div class="panel-badges">
+              <div v-if="selectedPlayer?.payout_failed" class="payout-failed-badge">Payout failed — ask the Owner</div>
+              <div v-if="selectedPlayer?.left_at" class="left-badge">Left the table</div>
+              <div v-else-if="selectedPlayer?.chips_limit != null" class="chips-limit-badge">
+                Chips limit: {{ N(selectedPlayer.chips_used_today) }} of {{ N(selectedPlayer.chips_limit) }} used
+              </div>
             </div>
           </div>
 
-          <!-- The one hero-number moment on this panel — was a small inline
-               figure buried in the "Record for..." line, easy to miss for
-               the single fact a Cashier checks most often when a player's
-               selected. Added 2026-09-21, see the Cashier layout wireframe
-               review. -->
           <div class="hero-balance">
-            <div class="hero-value money" :class="{ 'money--positive': selectedPlayer.balance > 0 }">{{ N(selectedPlayer.balance) }}</div>
-            <div class="hero-caption">{{ selectedPlayer.display_name }}'s balance</div>
+            <div class="hero-value money" :class="{ 'money--positive': selectedPlayer?.balance > 0 }">
+              {{ selectedPlayer ? N(selectedPlayer.balance) : '--' }}
+            </div>
           </div>
 
           <div class="action-grid">
-            <button class="action-btn action-btn--accent" type="button" @click="openEntry('CHIPS_OUT')">Issue Chips</button>
-            <button class="action-btn" type="button" @click="openEntry('CHIPS_IN')">Return Chips</button>
-            <button class="action-btn" type="button" @click="paymentPickerOpen = true">Payment &#9662;</button>
-            <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">Payout</button>
-            <button class="action-btn" type="button" @click="router.push(`/players/${selectedPlayer.id}`)">View Player</button>
-            <button v-if="!selectedPlayer.left_at" class="action-btn" type="button" @click="onMoveSeatClick">Move Seat</button>
+            <!-- Disabled, not hidden, once departed — Rejoin at Seat is the only way back in. -->
             <button
-              v-if="!selectedPlayer.left_at" class="action-btn action-btn--warn" type="button"
-              @click="onLeaveClick"
+              class="action-btn action-btn--accent" type="button" :disabled="!selectedPlayer || !!selectedPlayer.left_at"
+              @click="openEntry('CHIPS_OUT')"
+            >Issue Chips</button>
+            <button
+              v-if="selectedPlayer?.left_at" class="action-btn action-btn--accent" type="button"
+              @click="onRejoinClick"
+            >Rejoin at Seat</button>
+            <!-- Departed players only — a correction path for a cashier mistake made while they left. -->
+            <button
+              v-if="selectedPlayer?.left_at" class="action-btn" type="button"
+              @click="openEntry('CHIPS_IN')"
+            >Return Chips</button>
+            <button class="action-btn" type="button" :disabled="!selectedPlayer" @click="paymentPickerOpen = true">Payment &#9662;</button>
+            <button
+              class="action-btn" type="button" :disabled="payoutDisabled"
+              @click="onPayoutClick"
+            >{{ payoutSubmitting ? 'Paying out…' : 'Payout' }}</button>
+            <button
+              v-if="!selectedPlayer?.left_at" class="action-btn" type="button" :disabled="!selectedPlayer"
+              @click="onMoveSeatClick"
+            >Move Seat</button>
+            <button
+              v-if="!selectedPlayer?.left_at" class="action-btn action-btn--warn" type="button"
+              :disabled="!selectedPlayer" @click="onLeaveClick"
             >Leave Table</button>
           </div>
-          <p v-if="selectedPlayer.left_at" class="left-hint">
+          <p v-if="selectedPlayer?.left_at" class="left-hint">
             {{ selectedPlayer.display_name }} left the table — Issue Chips to bring them back.
           </p>
         </div>
-        <!-- Regression fix (2026-09-21): this empty state was dropped
-             during an earlier edit this session — with no player selected
-             the right column rendered nothing at all, instead of a prompt. -->
-        <div v-else class="card section player-panel player-panel--empty">
-          <p class="muted">Pick a player to issue chips, take a payment, or view their balance.</p>
-        </div>
       </div>
-      <!-- Only tonight's numbers + activity feed sit in the boxed white
-           "screen-frame" — everything above (seating, the player panel)
-           stays on the page's own pale background, per the review
-           artifact's own screen: the white card is for "tonight's
-           record," not the whole working surface. -->
+
       <div class="screen-frame">
+        <div class="chips-caption">
+          Tonight: <span class="money">{{ N(gameDayChipsOutTotal) }}</span> chips out
+          <template v-if="gameDayRakeTipsTotal > 0">
+            (<span class="money">{{ N(gameDayReturnableCeiling) }}</span> returnable after rake/tips)
+          </template>
+          &middot; <span class="money">{{ N(gameDayChipsInTotal) }}</span> returned
+        </div>
+
         <div class="stats-row">
           <div class="stat">
-            <div class="stat-label">Active players</div>
-            <div class="stat-value">{{ activeCount }}</div>
-          </div>
-          <div class="stat">
             <div class="stat-label">Chips out</div>
-            <div class="stat-value">{{ N(chipsOutTonight) }}</div>
+            <div class="stat-value">{{ selectedPlayer ? N(chipsOutTonight) : '--' }}</div>
           </div>
           <div class="stat">
             <div class="stat-label">Payments</div>
-            <div class="stat-value">{{ N(paymentsTonight) }}</div>
+            <div class="stat-value">{{ selectedPlayer ? N(paymentsTonight) : '--' }}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Chips returned</div>
+            <div class="stat-value">{{ selectedPlayer ? N(chipsInTonight) : '--' }}</div>
           </div>
           <div class="stat stat--accent">
-            <div class="stat-label">Table balance</div>
-            <div class="stat-value">{{ N(tableBalanceTonight) }}</div>
+            <div class="stat-label">Balance</div>
+            <div class="stat-value">{{ selectedPlayer ? N(playerBalanceTonight) : '--' }}</div>
           </div>
         </div>
 
         <div class="ledger-feed">
-          <p v-if="ledgerLoading" class="muted">Loading…</p>
-          <p v-else-if="!ledger.length" class="muted">No activity yet tonight.</p>
-          <LedgerTable v-else :rows="ledgerRows" show-player voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
+          <p v-if="!selectedPlayer" class="muted">Select a player above to see their ledger.</p>
+          <p v-else-if="ledgerLoading" class="muted">Loading…</p>
+          <p v-else-if="!playerLedgerRows.length" class="muted">No activity yet tonight for {{ selectedPlayer.display_name }}.</p>
+          <LedgerTable
+            v-else :rows="playerLedgerRows" type-label="Action" voidable :can-void-fn="canVoid"
+            @void="voidTarget = $event"
+          />
         </div>
       </div>
     </template>
@@ -477,7 +551,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
       @close="onEntryClosed" @saved="onEntrySaved"
     />
 
-    <!-- Payment type picker — see pickPaymentType's comment above. -->
     <div v-if="paymentPickerOpen" class="overlay">
       <div class="dialog card leave-dialog">
         <div class="eyebrow">{{ selectedPlayer?.display_name }} &mdash; Payment</div>
@@ -491,7 +564,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
     </div>
 
-    <!-- Leave Table: the confirmation IS the chips question, not a separate step. -->
     <div v-if="leaveTarget" class="overlay">
       <div class="dialog card leave-dialog">
         <div class="eyebrow">{{ leaveTarget.display_name }} is leaving the table</div>
@@ -505,14 +577,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
     </div>
 
     <!-- recorded-by-name assumes the voider is also the recorder (canVoid's own
-         non-Owner rule guarantees this) — will need a real lookup once an
-         Owner-role frontend can void someone else's entry. -->
+         non-Owner rule guarantees this) — needs a real lookup once an Owner-role
+         frontend can void someone else's entry. -->
     <VoidEntryModal
       v-if="voidTarget" :transaction="voidTarget" :player-name="playerName(voidTarget.player)"
       :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
     />
 
-    <!-- Move/swap seat -->
     <div v-if="moveSeatTarget" class="overlay">
       <div class="dialog card">
         <div class="eyebrow">Move {{ moveSeatTarget.display_name }}</div>
@@ -530,11 +601,36 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
     </div>
 
-    <AddPlayerModal v-if="addPlayerOpen" :seat-number="seatTarget" @close="onAddPlayerClosed" @added="onPlayerAdded" />
+    <div v-if="rejoinTarget" class="overlay">
+      <div class="dialog card">
+        <div class="eyebrow">Rejoin {{ rejoinTarget.display_name }}</div>
+        <p class="muted">Pick an empty seat to bring them back to the table.</p>
+        <div class="seat-options">
+          <button
+            v-for="opt in rejoinSeatOptions" :key="opt.seatNumber" type="button" class="seat-option"
+            @click="onPickRejoinSeat(opt.seatNumber)"
+          >
+            <span class="pill-seat">{{ opt.seatNumber }}</span> Empty
+          </button>
+        </div>
+        <p v-if="!rejoinSeatOptions.length" class="muted">No empty seats right now.</p>
+        <button class="link-btn leave-cancel" type="button" @click="rejoinTarget = null">Cancel</button>
+      </div>
+    </div>
+
+    <AddPlayerModal
+      v-if="addPlayerOpen" :seat-number="seatTarget" :new-only="newPlayerFlow"
+      @close="onAddPlayerClosed" @added="onPlayerAdded"
+    />
 
     <StartGameDayModal
       v-if="startFlowOpen" :number="startFlowNumber"
       @close="onStartFlowClosed" @started="onGameDayStarted"
+    />
+
+    <PlayerBankAccountModal
+      v-if="bankModalOpen && selectedPlayer" :player="selectedPlayer"
+      @close="onBankModalClosed" @added="onBankAccountAdded"
     />
   </div>
 </template>
@@ -554,20 +650,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 .section { margin-bottom: 14px; }
 .lbl {
-  font-size: 11px;
+  font-size: 1400px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
-/* Was styled with the WARNING color (saturated amber card) — Rake/Tip
-   entry isn't a caution state, so that borrowed a semantic color for
-   decoration rather than meaning. A plain, quieter treatment reads as
-   "its own section," not "pay attention" — restyled 2026-09-21. */
-/* One slim row (label left, compact buttons right) — was a tall stacked
-   card, out of proportion for a low-frequency, not-player-specific action.
-   Restyled 2026-09-21, see the Cashier layout wireframe review. */
 .general-section {
   display: flex;
   align-items: center;
@@ -577,11 +666,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
   padding: 10px 16px;
   background: var(--bg);
 }
-/* This .lbl now carries the seat-count summary, not a section eyebrow —
-   the shared .lbl class below is uppercase/bold/letter-spaced (right for
-   "GENERAL — NOT TIED TO A PLAYER", wrong for a plain sentence like
-   "7 active · 2 seats free"). Overridden back to the plain style the old
-   standalone .picker-row used. */
 .general-section .lbl {
   font-size: 11px;
   font-weight: 400;
@@ -605,33 +689,44 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .general-btn-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .general-btn-sub { font-size: 10px; color: var(--text-tertiary); }
 
-/* Seat grid (left) + selected player (right) side by side — was both
-   full-width, stacked, so a busy table pushed the action panel below the
-   fold. Fixed-width left column keeps every seat visible alongside it.
-   Added 2026-09-21, see the Cashier layout wireframe review. Stacks back
-   to one column below --control-row breakpoint (narrow/portrait tablet). */
+.add-player-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+  border-radius: var(--radius-sm);
+  padding: 6px 16px;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.add-player-btn:hover { background: var(--accent); color: #fff; }
+.add-player-icon { font-size: 15px; font-weight: 700; line-height: 1; }
+
 .working-area { display: grid; grid-template-columns: minmax(240px, 360px) 1fr; gap: 16px; align-items: start; margin-bottom: 14px; }
 @media (max-width: 720px) {
   .working-area { grid-template-columns: 1fr; }
 }
 
-.empty-players {
-  border: 1px dashed var(--border-strong);
+.seat-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.seat-tab {
+  flex: 1;
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
   border-radius: var(--radius-sm);
-  padding: 16px;
-  text-align: center;
-  margin-bottom: 14px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  cursor: pointer;
 }
+.seat-tab--active { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent); }
 
-/* A real 2-column grid (not flex-wrap) now that the seat list lives in its
-   own fixed-width column — keeps every seat aligned into a clean block
-   instead of ragged rows of variable-width pills. */
 .pills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
-/* Fixed height + a truncating label (not free-flowing text) — a long
-   player name used to wrap the pill onto 2 lines, making that seat (and
-   every other pill sharing its grid row) taller than the rest of the
-   grid. One uniform row height regardless of name length now. Fixed
-   2026-09-21. */
 .pill {
   display: flex;
   align-items: center;
@@ -649,7 +744,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .pill--departed { background: var(--status-voided-bg); color: var(--status-voided-text); border-color: transparent; }
 .pill--empty { border-style: dashed; color: var(--text-tertiary); background: var(--bg); }
 .pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; text-align: left; }
-.pill-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; margin-left: 4px; opacity: 0.8; flex-shrink: 0; }
 .pill-seat {
   display: inline-flex;
   align-items: center;
@@ -682,35 +776,36 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .seat-option:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.player-panel--empty { text-align: center; }
-.player-panel--empty .muted { margin: 4px 0; }
-/* nowrap + truncating name (not flex-wrap) — the chips-limit badge only
-   shows for some players, and letting the row wrap onto a second line
-   when it's present made the whole panel visibly taller for those
-   players than for one without a badge. One fixed-height row always,
-   regardless of which badge (if any) is showing. Fixed 2026-09-21. */
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; flex-wrap: nowrap; }
-.panel-head .lbl {
-  text-transform: none;
-  font-size: 13px;
+.panel-name {
+  font-family: var(--font-display);
+  font-size: 18px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text-primary);
-  letter-spacing: normal;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
+.panel-name-code { font-family: var(--font-sans); font-size: 13px; font-weight: 500; color: var(--text-tertiary); }
 
-/* The one hero-number moment on this panel — was a small inline figure
-   buried in a "Record for..." sentence. Added 2026-09-21, see the Cashier
-   layout wireframe review. Money stays --font-mono per the design system
-   (Fraunces is for headings, not figures) at real hero size instead. */
 .hero-balance { text-align: center; margin: 10px 0 18px; }
 .hero-value { font-size: 36px; font-weight: 700; line-height: 1; color: var(--text-primary); }
 .hero-value.money--positive { color: var(--success); }
-.hero-caption { font-size: 11.5px; color: var(--text-tertiary); margin-top: 6px; }
 
+.panel-badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.payout-failed-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger-text);
+  border: 1px solid var(--danger);
+  background: var(--danger-bg);
+  border-radius: 12px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 .chips-limit-badge {
   font-size: 11px;
   font-weight: 600;
@@ -734,17 +829,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
   flex-shrink: 0;
 }
 
-.action-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.action-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .left-hint { font-size: 11.5px; color: var(--text-tertiary); text-align: center; margin-top: 8px; }
 .action-btn {
   border: 1px solid var(--border-strong);
   background: var(--surface);
   border-radius: var(--radius-sm);
   padding: 14px 6px;
-  /* Was a bare "64px" magic number, disconnected from the touch-target
-     system entirely — now tracks the same control-height-primary
-     every other primary control on this touch-first screen uses (and
-     will move correctly if that ever changes). */
   min-height: var(--control-height-primary);
   font-family: var(--font-sans);
   font-size: 12.5px;
@@ -754,20 +845,18 @@ const N = n => `₦${Number(n).toLocaleString()}`
   text-align: center;
   line-height: 1.3;
 }
-/* "Issue Chips" is the single most frequent action on this screen —
-   was only a slightly-thicker colored border among eight otherwise
-   identical buttons, not enough hierarchy for the most-used one. A
-   filled accent-tint background now sets it apart at a glance without
-   competing with the actual primary buttons (.btn--primary) elsewhere
-   in the app. */
 .action-btn--accent { border-color: var(--accent); background: var(--accent-bg); color: var(--accent-text); font-weight: 700; }
 .action-btn--warn { border-color: var(--warning); color: var(--warning-text); }
+.action-btn:disabled {
+  cursor: not-allowed;
+  background: var(--disabled-surface);
+  border-color: var(--disabled-border);
+  color: var(--text-tertiary);
+}
 
-/* The one "hero number" moment on this screen — added 2026-09-21, see
-   the Ledger Directions review artifact this was compared against.
-   Money stays in --font-mono (correct, per the design system — Fraunces
-   is for headings, not figures) but at real size/weight instead of the
-   13px convention used in the back-office ledger views. */
+.chips-caption { font-size: 12px; color: var(--text-tertiary); margin-bottom: 14px; }
+.chips-caption .money { color: var(--text-secondary); }
+
 .stats-row { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
 .stat { flex: 1 1 140px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; }
 .stat--accent { background: var(--accent-bg); border-color: transparent; }
@@ -777,13 +866,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .stat--accent .stat-value { color: var(--accent-text); }
 
 .link-btn { border: none; background: none; font-size: 11.5px; font-weight: 700; color: var(--accent); cursor: pointer; }
-.ledger-feed { border-top: 1px solid var(--border); }
 
-/* The one boxed-white moment on this screen — "tonight's record"
-   (stats + activity feed), matching the review artifact's own
-   .screen-frame treatment exactly: white card, thin border, generous
-   padding, a soft lifted shadow. Everything above it (seating, the
-   player panel) stays unboxed on the page's own background. */
 .screen-frame {
   background: var(--surface);
   border: 1px solid var(--border);

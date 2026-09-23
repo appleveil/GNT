@@ -1,17 +1,22 @@
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
+import { useClubSettingsStore } from '@/stores/clubSettings'
 import { useCloseGameDay } from '@/composables/useCloseGameDay'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
+const clubSettings = useClubSettingsStore()
 const { openConfirm: onCloseGameDay } = useCloseGameDay()
 
-onMounted(() => gameDay.fetchCurrent())
+onMounted(() => {
+  gameDay.fetchCurrent()
+  clubSettings.fetchCurrent()
+})
 
 // "Close Game-Day" lives here, next to the status pill it acts on — was a
 // small link buried at the bottom of the Cashier's ledger, easy to lose
@@ -23,20 +28,45 @@ onMounted(() => gameDay.fetchCurrent())
 // 2026-09-21, see the Cashier layout wireframe review this came out of.
 const canCloseGameDay = computed(() => ['CASHIER', 'OWNER'].includes(auth.user?.role))
 
+// The game-day status pill only means something on the screen that actually
+// works a game-day — the Cashier's live view (route 'game-day', which Owner
+// can also reach per router/index.js's comment on why that route stays
+// unrestricted). Everywhere else (Dashboard, Payouts, Admin, ...) it was
+// showing in every role's topbar regardless of what they were looking at;
+// narrowed 2026-09-23 per the lo-fi nav review.
+const showGameDayStatus = computed(() => route.name === 'game-day')
+
 const initial = computed(() => (auth.user?.fullName || '?').trim().charAt(0).toUpperCase())
+
+// The game-day's own date wasn't shown anywhere in the app at all — added
+// into the status pill itself (2026-09-22, per the Cashier layout review)
+// rather than a separate element, so every "which game-day am I in" fact
+// (number, date, status) reads from the one pill everyone already checks.
+// `started_at` was already on GameDaySerializer — no backend change needed.
+const gameDayDate = computed(() => {
+  if (!gameDay.current?.started_at) return ''
+  return new Date(gameDay.current.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+})
 
 // Cashier has exactly one screen (Game Day) as of 2026-09-14 — no tab bar
 // needed to navigate between one thing. Accountant gets the Phase B
-// back-office nav (2026-09-14); Owner gets those same 4 plus two more of its
-// own (Phase C, 2026-09-14) — "everything Accountant has, plus."
+// back-office nav (2026-09-14); Owner gets those same 3 plus its own
+// Payouts/Main Account/Admin/Settings (Phase C, 2026-09-14) — "everything
+// Accountant has, plus." Outstanding was its own 4th base tab until
+// 2026-09-23, when its whole page was folded into Dashboard and this tab
+// (and the standalone route) were retired.
 const tabs = computed(() => {
   const role = auth.user?.role
   if (role === 'CASHIER') return []
-  if (role === 'FLOOR_MANAGER') return [{ name: 'service-staff', label: 'Service Staff', path: '/service-staff' }]
+  if (role === 'FLOOR_MANAGER') {
+    return [
+      { name: 'masseuses', label: 'Masseuses', path: '/masseuses' },
+      { name: 'club-settings', label: 'Settings', path: '/settings' },
+    ]
+  }
   const base = [
     { name: 'dashboard', label: 'Dashboard', path: '/dashboard' },
     { name: 'game-days', label: 'Game Days', path: '/game-days' },
-    { name: 'outstanding', label: 'Outstanding', path: '/outstanding' },
     { name: 'roster', label: 'Players', path: '/roster' },
   ]
   if (role === 'OWNER') {
@@ -44,10 +74,20 @@ const tabs = computed(() => {
       { name: 'payouts', label: 'Payouts', path: '/payouts' },
       { name: 'main-account', label: 'Main Account', path: '/main-account' },
       { name: 'admin', label: 'Admin', path: '/admin' },
+      { name: 'club-settings', label: 'Settings', path: '/settings' },
     )
   }
   return base
 })
+
+// Settings is visually pinned to the bottom of the sidebar (2026-09-23 hi-fi
+// pass, per the lo-fi nav review sketch) — everything else in `tabs` renders
+// in its declared order above a spacer, Settings renders on its own below
+// it. Splitting the one `tabs` array here (rather than changing what tabs()
+// returns) keeps isActive/tabs a single source of truth for both the sidebar
+// and anything else that reads it later.
+const mainTabs = computed(() => tabs.value.filter(t => t.name !== 'club-settings'))
+const settingsTab = computed(() => tabs.value.find(t => t.name === 'club-settings'))
 
 // Was a generic "LPC Cashier"/"LPC Owner"/... role label — both the
 // original sketch and the lo-fi wireframe review used "Cashier Name" here
@@ -61,7 +101,20 @@ function isActive(tab) {
   return route.path === tab.path || route.path.startsWith(tab.path + '/')
 }
 
-async function onLogout() {
+// Logging out never closes a game-day (it just ends this browser session —
+// the game-day itself stays open for whoever logs back in, or another
+// device). That's easy to mistake for "wrapping up the night," so a
+// still-open game-day gets one confirmation step first. Added 2026-09-22.
+const logoutConfirmOpen = ref(false)
+function onLogoutClick() {
+  if (gameDay.isOpen) logoutConfirmOpen.value = true
+  else doLogout()
+}
+function onCancelLogout() {
+  logoutConfirmOpen.value = false
+}
+async function doLogout() {
+  logoutConfirmOpen.value = false
   await auth.logout()
   router.push('/login')
 }
@@ -74,33 +127,56 @@ async function onLogout() {
         <header class="topbar">
           <div class="brand">{{ brand }}</div>
           <div class="spacer" />
-          <div v-if="gameDay.isOpen" class="status-pill">
-            <span class="status-dot" />
-            Game-Day #{{ gameDay.current.number }} · OPEN
-          </div>
-          <div v-else class="status-pill status-pill--closed">No game-day open</div>
-          <button
-            v-if="gameDay.isOpen && canCloseGameDay" class="close-gd-btn" type="button"
-            @click="onCloseGameDay"
-          >Close Game-Day</button>
+          <template v-if="showGameDayStatus">
+            <div v-if="gameDay.isOpen" class="status-pill">
+              <span class="status-dot" />
+              Game-Day #{{ gameDay.current.number }}<template v-if="gameDayDate"> · {{ gameDayDate }}</template> · OPEN
+            </div>
+            <div v-else class="status-pill status-pill--closed">No game-day open</div>
+            <button
+              v-if="gameDay.isOpen && canCloseGameDay" class="close-gd-btn" type="button"
+              @click="onCloseGameDay"
+            >Close Game-Day</button>
+          </template>
           <div class="user" :title="auth.user?.fullName">
             <div class="avatar">{{ initial }}</div>
-            <button class="logout" type="button" @click="onLogout">Log out</button>
+            <button class="logout" type="button" @click="onLogoutClick">Log out</button>
           </div>
         </header>
 
-        <main class="content">
-          <router-view />
-        </main>
+        <div class="below-topbar">
+          <nav v-if="tabs.length" class="sidebar">
+            <RouterLink
+              v-for="tab in mainTabs" :key="tab.name" :to="tab.path"
+              class="side-tab" :class="{ 'side-tab--active': isActive(tab) }"
+            >
+              {{ tab.label }}
+            </RouterLink>
+            <div class="sidebar-spacer" />
+            <RouterLink
+              v-if="settingsTab" :to="settingsTab.path"
+              class="side-tab side-tab--settings" :class="{ 'side-tab--active': isActive(settingsTab) }"
+            >
+              {{ settingsTab.label }}
+            </RouterLink>
+          </nav>
 
-        <nav v-if="tabs.length" class="tabbar">
-          <RouterLink
-            v-for="tab in tabs" :key="tab.name" :to="tab.path"
-            class="tab" :class="{ 'tab--active': isActive(tab) }"
-          >
-            {{ tab.label }}
-          </RouterLink>
-        </nav>
+          <main class="content">
+            <router-view />
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logout while a game-day is open — see onLogoutClick's own comment. -->
+    <div v-if="logoutConfirmOpen" class="overlay">
+      <div class="dialog card">
+        <div class="eyebrow">Log out with Game-Day #{{ gameDay.current?.number }} still open?</div>
+        <p class="muted">Logging out doesn't close the game-day — it stays open for whoever logs back in.</p>
+        <div class="actions">
+          <button class="btn btn--secondary" type="button" @click="onCancelLogout">Cancel</button>
+          <button class="btn btn--primary" type="button" @click="doLogout">Log Out</button>
+        </div>
       </div>
     </div>
   </div>
@@ -124,7 +200,13 @@ async function onLogout() {
                white" treatment the user asked for on the Cashier page.
    Every role shares this same frame — only --accent differs. */
 .stage {
-  min-height: 100vh;
+  /* Was min-height — a box that can only grow taller than the viewport
+     never actually triggers .content's own overflow-y:auto below, so the
+     whole document scrolled (topbar and tabbar included) instead of just
+     the content between them. height (capped, not floored) plus the
+     overflow:hidden already here is what makes .content the one scrolling
+     region, so the topbar and tabbar stay put. Fixed 2026-09-23. */
+  height: 100vh;
   background: var(--stage);
   display: flex;
   max-width: 1180px;
@@ -138,8 +220,6 @@ async function onLogout() {
   max-width: 100%;
   margin: 0 auto;
   background: var(--bg);
-  border-radius: 24px;
-  padding: 44px 6px 60px;
   display: flex;
 }
 .shell {
@@ -148,7 +228,8 @@ async function onLogout() {
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  border-radius: 16px;
+  /* Square top corners (where the topbar sits) — bottom stays rounded. */
+  border-radius: 0 0 16px 16px;
   box-shadow: var(--shadow-md);
   overflow: hidden;
 }
@@ -241,45 +322,88 @@ async function onLogout() {
 }
 .logout:hover { color: var(--text-primary); }
 
+/* Below the topbar: sidebar + content, side by side — replaces the old
+   bottom .tabbar (2026-09-23 hi-fi pass, per the lo-fi nav review sketch:
+   a left sidebar reads as the desktop back-office pattern Accountant/Owner/
+   Floor Manager actually are, vs. the bottom tab strip that made more sense
+   for Cashier's touch tablet — which never had a tab bar to begin with,
+   tabs.length === 0 for that role either way). min-height: 0 is load-bearing
+   here — without it a flex child ignores its parent's height and .content's
+   own overflow-y:auto below never actually triggers. */
+.below-topbar {
+  flex-grow: 1;
+  min-height: 0;
+  display: flex;
+}
+.sidebar {
+  width: 208px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 0;
+  overflow-y: auto;
+}
+.side-tab {
+  padding: 12px 24px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  position: relative;
+}
+.side-tab:hover { color: var(--text-primary); }
+.side-tab--active {
+  font-weight: 700;
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+.side-tab--active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+}
+.sidebar-spacer { flex-grow: 1; }
+.side-tab--settings {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  margin-top: 8px;
+}
+
 .content {
   flex-grow: 1;
+  min-width: 0;
   overflow-y: auto;
   padding: 20px;
 }
 
-.tabbar {
-  height: 92px;
-  flex-shrink: 0;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: stretch;
-  padding-bottom: 8px;
-}
-.tab {
-  flex: 1;
+/* Logout confirm — same overlay/dialog shape every other confirmation in
+   the app uses (Close Game-Day, Leave Table, ...); this is the first one
+   AppShell itself needs, so it's defined here rather than shared, matching
+   how every other confirmation dialog in the app defines its own copy. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 25, 32, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 100;
+}
+.dialog { width: 440px; max-width: 92vw; box-shadow: var(--shadow-md); padding: 24px; }
+.eyebrow {
   font-size: 11px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-  text-decoration: none;
-  position: relative;
-}
-.tab--active {
   font-weight: 700;
-  color: var(--accent);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
 }
-.tab--active::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 32px;
-  height: 3px;
-  background: var(--accent);
-  border-radius: 2px;
-}
+.muted { color: var(--text-secondary); font-size: 13px; line-height: 1.6; margin: 8px 0 0; }
+.actions { display: flex; gap: 14px; margin-top: 20px; }
+.actions .btn { flex: 1; }
 </style>

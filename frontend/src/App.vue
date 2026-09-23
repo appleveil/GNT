@@ -1,6 +1,7 @@
 <script setup>
 import { watchEffect } from 'vue'
 import AuthorizerConfirmModal from '@/components/shared/AuthorizerConfirmModal.vue'
+import PlainConfirmModal from '@/components/shared/PlainConfirmModal.vue'
 import CloseGameDayModal from '@/components/shared/CloseGameDayModal.vue'
 import AppToast from '@/components/shared/AppToast.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -34,6 +35,7 @@ watchEffect(() => {
 <template>
   <router-view />
   <AuthorizerConfirmModal />
+  <PlainConfirmModal />
   <CloseGameDayModal />
   <AppToast />
 </template>

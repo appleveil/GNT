@@ -17,6 +17,14 @@ import { useToast } from '@/composables/useToast'
 // balance sum) — so a rejected row's status is REJECTED *and* is_voided is
 // true. Check status first in the history badge below, or every rejected
 // payout would render as a bare "VOIDED" instead of "Declined" with its reason.
+//
+// Auto-approval (2026-09-23, ClubSettings.payout_auto_approve_threshold):
+// initiate_payout immediately approves a payout at or under the threshold,
+// with approved_by left null as the marker that no one manually signed off
+// (see _execute_payout_transfer in gaming/services.py). A status of APPROVED
+// with no approved_by is what distinguishes "Auto-approved" from a manual
+// "Approved" in the history badge below — never inferred from amount here,
+// since the threshold can change after the fact.
 const toast = useToast()
 
 const players = ref([])
@@ -130,6 +138,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
               <RouterLink :to="`/roster/${t.player}`" class="player-link">{{ playerName(t.player) }}</RouterLink>
               <span v-if="t.status === 'REJECTED'" class="badge badge--rejected">Declined</span>
               <span v-else-if="t.is_voided" class="badge badge--voided">VOIDED</span>
+              <span v-else-if="t.status === 'APPROVED' && !t.approved_by" class="badge badge--auto-approved">Auto-approved</span>
               <span v-else class="badge badge--approved">{{ t.status.replace('_', ' ') }}</span>
             </div>
             <div class="row-sub">

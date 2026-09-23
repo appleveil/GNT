@@ -2,8 +2,22 @@
 import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
+import { usePlainConfirm } from '@/composables/usePlainConfirm'
+import { useClubSettingsStore } from '@/stores/clubSettings'
 import { TRANSACTION_TYPES } from '@/constants/transactionTypes'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
+
+// Which of the physical-count types has an Owner-configurable "require
+// approval" toggle (see ClubSettings, added 2026-09-23; CHIPS_OUT added
+// the same day) — PAYMENT_CASH isn't here, so it always calls confirmFm
+// below. Doesn't affect seat_player's own automatic default buy-in — that
+// never opens this modal at all, so it's unaffected either way.
+const APPROVAL_SETTING_BY_TYPE = {
+  CHIPS_OUT: 'require_approval_issue_chips',
+  CHIPS_IN: 'require_approval_return_chips',
+  TIP: 'require_approval_add_tip',
+  RAKE: 'require_approval_add_rake',
+}
 
 // A bottom sheet for recording one Transaction — used from ActiveGameDayView
 // for both per-player entries (Issue Chips, Chips In, Cash/POS/Transfer
@@ -17,6 +31,8 @@ const props = defineProps({
 const emit = defineEmits(['close', 'saved'])
 
 const { confirm: confirmFm } = useAuthorizerConfirm()
+const { plainConfirm } = usePlainConfirm()
+const clubSettings = useClubSettingsStore()
 
 const config = computed(() => TRANSACTION_TYPES[props.type])
 
@@ -32,19 +48,21 @@ const rateHint = ref('')
 const submitting = ref(false)
 const error = ref('')
 
-// Dealer/Service tip categorization (added 2026-09-17) — Dealer stays
-// anonymous/aggregate (no recipient, same as every Tip before this);
-// Service requires picking a named, active Service Staff person.
+// Service staff/Masseuse tip categorization (added 2026-09-17 as
+// Dealer/Service, renamed 2026-09-23 — see Transaction.TipCategory's own
+// comment) — Service staff stays anonymous/aggregate (no recipient, same
+// as every Tip before this); Masseuse requires picking a named, active
+// Masseuse.
 const isTip = computed(() => props.type === 'TIP')
-const tipCategory = ref('DEALER')
-const serviceStaffList = ref([])
-const selectedServiceStaffId = ref('')
+const tipCategory = ref('SERVICE_STAFF')
+const masseuseList = ref([])
+const selectedMasseuseId = ref('')
 
 onMounted(async () => {
   if (!isTip.value) return
   try {
-    const { data } = await api.get('/service-staff/')
-    serviceStaffList.value = data.filter(p => p.is_active)
+    const { data } = await api.get('/staff-members/?role=MASSEUSE')
+    masseuseList.value = data.filter(p => p.is_active)
   } catch {
     // Picker just stays empty — the Floor-Manager PIN step still surfaces
     // any real problem when the entry is actually submitted.
@@ -94,7 +112,7 @@ const canSubmit = computed(() => {
   if (!amount.value || Number(amount.value) <= 0) return false
   if (exceedsChipsLimit.value) return false
   if (config.value.needsCurrency && currency.value !== 'NGN' && !conversionRate.value) return false
-  if (isTip.value && tipCategory.value === 'SERVICE' && !selectedServiceStaffId.value) return false
+  if (isTip.value && tipCategory.value === 'MASSEUSE' && !selectedMasseuseId.value) return false
   return true
 })
 
@@ -110,7 +128,7 @@ async function doSave(extra = {}) {
     game_day: props.gameDayId,
     player: props.player ? props.player.id : null,
     type: props.type,
-    amount: nairaAmount.value.toFixed(2),
+    amount: Math.round(nairaAmount.value).toFixed(0), // whole Naira only — decimal_places=0 rejects a trailing ".00"
     notes: buildNotes(),
     ...extra,
   }
@@ -120,7 +138,7 @@ async function doSave(extra = {}) {
   }
   if (isTip.value) {
     payload.tip_category = tipCategory.value
-    if (tipCategory.value === 'SERVICE') payload.service_staff = selectedServiceStaffId.value
+    if (tipCategory.value === 'MASSEUSE') payload.masseuse = selectedMasseuseId.value
   }
   await api.post('/transactions/', payload)
 }
@@ -144,10 +162,13 @@ async function onSubmit() {
   }
 
   // Physical count — hand off to the Floor-Manager-only PIN sheet (see
-  // useAuthorizerConfirm's 'fm-only' mode). This modal stays mounted
-  // underneath it: if the PIN step is cancelled, the cashier lands right
-  // back here with the amount/notes they'd already entered still intact.
-  confirmFm({
+  // useAuthorizerConfirm's 'fm-only' mode), unless this type's own
+  // ClubSettings toggle is off (PAYMENT_CASH has no toggle —
+  // APPROVAL_SETTING_BY_TYPE has no entry for it, so it always lands
+  // here). This modal stays mounted underneath whichever one opens: if
+  // that step is cancelled, the cashier lands right back here with the
+  // amount/notes they'd already entered still intact.
+  const opts = {
     title: config.value.actionLabel,
     subtitle: props.player ? `for ${props.player.display_name} · ${props.player.account_code}` : "Tonight's box count",
     mode: 'fm-only',
@@ -155,7 +176,10 @@ async function onSubmit() {
       await doSave(fmPayload)
       emit('saved')
     },
-  })
+  }
+  const settingKey = APPROVAL_SETTING_BY_TYPE[props.type]
+  if (settingKey && clubSettings.current?.[settingKey] === false) plainConfirm(opts)
+  else confirmFm(opts)
 }
 
 const N = n => `₦${Number(n || 0).toLocaleString()}`
@@ -183,7 +207,7 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
       <div class="amount-box" :class="{ 'amount-box--danger': exceedsChipsLimit }">
         <span class="amount-prefix">{{ config.needsCurrency && currency !== 'NGN' ? currency : '₦' }}</span>
         <input
-          :value="displayAmount" type="text" inputmode="decimal" placeholder="0" class="amount-input" autofocus
+          :value="displayAmount" type="text" inputmode="numeric" placeholder="0" class="amount-input" autofocus
           @input="e => (amount = parseAmountInput(e.target.value))"
         />
       </div>
@@ -214,22 +238,22 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
         <div class="lbl">Category</div>
         <div class="tip-category-row">
           <label class="tip-category">
-            <input v-model="tipCategory" type="radio" value="DEALER" />
-            Dealer
+            <input v-model="tipCategory" type="radio" value="SERVICE_STAFF" />
+            Service staff
           </label>
           <label class="tip-category">
-            <input v-model="tipCategory" type="radio" value="SERVICE" />
-            Service
+            <input v-model="tipCategory" type="radio" value="MASSEUSE" />
+            Masseuse
           </label>
         </div>
-        <template v-if="tipCategory === 'SERVICE'">
+        <template v-if="tipCategory === 'MASSEUSE'">
           <div class="lbl">Received by</div>
-          <select v-model="selectedServiceStaffId" class="select">
+          <select v-model="selectedMasseuseId" class="select">
             <option value="" disabled>Select a person…</option>
-            <option v-for="p in serviceStaffList" :key="p.id" :value="p.id">{{ p.name }}</option>
+            <option v-for="p in masseuseList" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
-          <p v-if="!serviceStaffList.length" class="rate-hint">
-            No Service Staff on file yet — add one first (Floor Manager's "Service Staff" screen).
+          <p v-if="!masseuseList.length" class="rate-hint">
+            No Masseuse on file yet — add one first (Floor Manager's "Masseuses" screen).
           </p>
         </template>
       </template>

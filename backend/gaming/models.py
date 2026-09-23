@@ -1,7 +1,16 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
 
-from accounts.models import FloorManager, Player, ServiceStaff, StaffUser
+from accounts.models import FloorManager, Player, StaffMember, StaffUser
+
+# Whole Naira only, no kobo — every DecimalField below that represents an
+# actual Naira amount uses decimal_places=0 (added 2026-09-23, a deliberate
+# correction: this club never deals in fractional Naira). Rates and
+# percentages (ConversionRate.rate_to_naira, Transaction.conversion_rate,
+# Table.rake_percentage, ProfitSplitArrangement's *_pct fields) are NOT
+# amounts and keep their own precision.
 
 
 class Game(models.Model):
@@ -41,12 +50,33 @@ class Table(models.Model):
     snapshotted onto GameDay.buy_in_amount at open time, so a later edit
     here never rewrites what a past game-day used (same "copy now, don't
     re-derive" precedent as Transaction.conversion_rate).
+
+    Added 2026-09-23 — Owner/Floor-Manager-editable settings, via
+    ClubSettings' sibling "Settings" screen (see StaffMemberViewSet-style
+    get_permissions on TableViewSet): `rake_percentage`/`small_blind`/
+    `big_blind` are reference values only (nothing computes off them yet);
+    `max_players` overrides `Game.max_players` for this table specifically
+    when set (null = fall back to the Game's value — see
+    selectors.max_active_players); `max_chips_issuable` caps how much can
+    be issued to a player IN ONE GO — a ceiling per CHIPS_OUT, not a
+    running/cumulative total (a player can buy in at the cap as many times
+    as they like over the night; there's no limit on total chips
+    outstanding at once) — see record_transaction's CHIPS_OUT branch. All
+    five nullable: null means "no override"/"no cap," matching every table
+    that predates this change.
     """
 
     game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name='tables')
     name = models.CharField(max_length=100)
-    default_buy_in = models.DecimalField(max_digits=14, decimal_places=2)
+    default_buy_in = models.DecimalField(max_digits=14, decimal_places=0)
     is_active = models.BooleanField(default=True)
+    # decimal_places=2 (a real percentage, e.g. 2.50%) — the one field here
+    # that isn't a Naira amount, so the whole-number rule below doesn't apply.
+    rake_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    small_blind = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
+    big_blind = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
+    max_players = models.PositiveSmallIntegerField(null=True, blank=True)
+    max_chips_issuable = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -55,6 +85,51 @@ class Table(models.Model):
 
     def __str__(self):
         return f'{self.name} ({self.game.name})'
+
+
+class ClubSettings(models.Model):
+    """
+    Owner-only behavior toggles for the club, added 2026-09-23 alongside
+    the "Settings" screen. One row per tenant schema — a true singleton via
+    the pk=1 convention below, since (unlike PaystackAccount's MAIN/GAMING
+    split) there's no discriminator to key off: every field here just
+    applies club-wide. Always go through `load()`, never
+    `ClubSettings.objects.get(...)` directly, so a club that's never
+    touched Settings still gets the documented defaults instead of a
+    DoesNotExist.
+
+    Each `require_approval_*` flag governs whether that action needs an
+    Owner-or-Floor-Manager (or Floor-Manager-only) PIN at all — see
+    gaming.services.open_game_day/close_game_day/record_transaction. Off
+    doesn't mean "no confirmation whatsoever," just "no PIN": the frontend
+    still shows a plain confirm step (see usePlainConfirm.js).
+    `require_approval_close_game_day` only covers the ordinary (fully-
+    reconciled) close — a chip-discrepancy close always requires sign-off
+    regardless, since that's a genuine anomaly, not the routine case this
+    toggle is meant to streamline.
+    """
+
+    require_approval_open_game_day = models.BooleanField(default=True)
+    require_approval_close_game_day = models.BooleanField(default=True)
+    require_approval_issue_chips = models.BooleanField(default=True)
+    require_approval_return_chips = models.BooleanField(default=True)
+    require_approval_add_tip = models.BooleanField(default=True)
+    require_approval_add_rake = models.BooleanField(default=True)
+    # A payout at or below this auto-approves (see services._execute_payout_transfer)
+    # instead of sitting PENDING_APPROVAL for the Owner to act on.
+    payout_auto_approve_threshold = models.DecimalField(max_digits=14, decimal_places=0, default=Decimal('500000'))
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return 'Club settings'
 
 
 class GameDay(models.Model):
@@ -74,7 +149,7 @@ class GameDay(models.Model):
     # expected to set all three. See Game/Table above.
     game = models.ForeignKey(Game, on_delete=models.PROTECT, null=True, blank=True, related_name='game_days')
     table = models.ForeignKey(Table, on_delete=models.PROTECT, null=True, blank=True, related_name='game_days')
-    buy_in_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    buy_in_amount = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
 
     # Opening requires the Owner (login or PIN) or a Floor Manager PIN — a Cashier
     # is never the authorizer, under any circumstance. Nullable because a Floor
@@ -241,13 +316,13 @@ class ProfitSplitArrangement(models.Model):
     # Stake — how much of a buy-in the house covers. A cap of 0 effectively
     # means no real stake even with a nonzero percentage, per the concept doc.
     house_stake_pct = models.DecimalField(max_digits=5, decimal_places=2)  # 0-100
-    cap_amount = models.DecimalField(max_digits=14, decimal_places=2)  # per-period ceiling
+    cap_amount = models.DecimalField(max_digits=14, decimal_places=0)  # per-period ceiling
     reset_cadence = models.CharField(max_length=10, choices=ResetCadence.choices, default=ResetCadence.ONE_OFF)
     # The following three only apply when reset_cadence != ONE_OFF, and are
     # all optional — whichever is reached first ends the arrangement.
     ends_at = models.DateTimeField(null=True, blank=True)
     max_resets = models.PositiveIntegerField(null=True, blank=True)
-    max_cumulative_value = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    max_cumulative_value = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
 
     # Payout split — configuration only for now, see docstring above.
     payout_basis = models.CharField(max_length=15, choices=PayoutBasis.choices, default=PayoutBasis.AFTER_BUYIN)
@@ -255,8 +330,8 @@ class ProfitSplitArrangement(models.Model):
         max_length=15, choices=PayoutSplitMethod.choices, default=PayoutSplitMethod.STAKE_RATIO,
     )
     custom_ratio_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    fixed_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
-    fixed_offset = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    fixed_amount = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
+    fixed_offset = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
 
     is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(
@@ -309,13 +384,20 @@ class Transaction(models.Model):
 
     class TipCategory(models.TextChoices):
         """
-        Added 2026-09-17 — meaningful only when type=TIP. DEALER stays
-        anonymous/aggregate exactly like every Tip did before this (no
-        recipient); SERVICE requires a named service_staff recipient. See
-        gaming.selectors/services for the validation, and accounts.models.ServiceStaff.
+        Added 2026-09-17 — meaningful only when type=TIP. Values renamed
+        2026-09-23 (was DEALER/SERVICE) to line up with the roster split the
+        Owner actually uses — behavior of each side is unchanged, only the
+        label: SERVICE_STAFF stays anonymous/aggregate exactly like every Tip
+        did before this (no recipient); MASSEUSE requires a named `masseuse`
+        recipient — see gaming.selectors/services for the validation, and
+        accounts.models.StaffMember (role=MASSEUSE is the only role this FK
+        ever points at). StaffUser briefly grew matching SERVICE/DEALER/
+        MASSEUSE login roles the same day, then reverted once it was
+        clarified none of the three ever actually log in — see
+        StaffUser.Role's own comment.
         """
-        DEALER = 'DEALER', 'Dealer'
-        SERVICE = 'SERVICE', 'Service'
+        SERVICE_STAFF = 'SERVICE_STAFF', 'Service staff'
+        MASSEUSE = 'MASSEUSE', 'Masseuse'
 
     class Channel(models.TextChoices):
         CASHIER = 'CASHIER', 'Cashier'
@@ -346,7 +428,7 @@ class Transaction(models.Model):
         Player, on_delete=models.PROTECT, null=True, blank=True, related_name='transactions',
     )  # null only for RAKE/TIP
     type = models.CharField(max_length=25, choices=Type.choices)
-    amount = models.DecimalField(max_digits=14, decimal_places=2)  # always positive, Naira-equivalent value
+    amount = models.DecimalField(max_digits=14, decimal_places=0)  # always positive, Naira-equivalent value — whole Naira only, no kobo
 
     # Relevant to PAYMENT_CASH only
     currency = models.CharField(max_length=10, default='NGN')
@@ -364,14 +446,16 @@ class Transaction(models.Model):
     confirmed_at = models.DateTimeField(null=True, blank=True)
 
     # Meaningful only for type=TIP — see TipCategory. tip_category is required
-    # on every TIP; service_staff is required when tip_category=SERVICE and
-    # must be blank for DEALER (validated in services.record_transaction, not
-    # at the DB level — same pattern as every other type-conditional field
-    # here, e.g. floor_manager/currency). PROTECT so a historical tip never
-    # loses who it was attributed to, even if that person is later deactivated.
-    tip_category = models.CharField(max_length=10, choices=TipCategory.choices, null=True, blank=True)
-    service_staff = models.ForeignKey(
-        ServiceStaff, on_delete=models.PROTECT, null=True, blank=True, related_name='tips_received',
+    # on every TIP; masseuse is required when tip_category=MASSEUSE and
+    # must be blank for SERVICE_STAFF (validated in services.record_transaction,
+    # which also checks the referenced StaffMember's role is actually
+    # MASSEUSE — not at the DB level — same pattern as every other
+    # type-conditional field here, e.g. floor_manager/currency). PROTECT so
+    # a historical tip never loses who it was attributed to, even if that
+    # person is later deactivated.
+    tip_category = models.CharField(max_length=15, choices=TipCategory.choices, null=True, blank=True)
+    masseuse = models.ForeignKey(
+        StaffMember, on_delete=models.PROTECT, null=True, blank=True, related_name='tips_received',
     )
 
     # Only PAYOUT uses the non-POSTED states — every payout requires Owner approval.
@@ -427,18 +511,27 @@ class GameDaySummary(models.Model):
 
     game_day = models.OneToOneField(GameDay, on_delete=models.CASCADE, related_name='summary')
     num_players = models.PositiveIntegerField()
-    chips_out_total = models.DecimalField(max_digits=14, decimal_places=2)
-    chips_in_total = models.DecimalField(max_digits=14, decimal_places=2)
-    rake_total = models.DecimalField(max_digits=14, decimal_places=2)
-    tips_total = models.DecimalField(max_digits=14, decimal_places=2)
+    chips_out_total = models.DecimalField(max_digits=14, decimal_places=0)
+    chips_in_total = models.DecimalField(max_digits=14, decimal_places=0)
+    rake_total = models.DecimalField(max_digits=14, decimal_places=0)
+    tips_total = models.DecimalField(max_digits=14, decimal_places=0)
     # Signed: chips_out_total - chips_in_total - rake_total - tips_total.
     # Positive = unreturned/off-site chips this game-day; negative = excess chips
     # returned this game-day (off-site chips from an earlier day coming back).
     # Renamed from the never-implemented `chips_outstanding` placeholder — see
     # CONCEPT.md's "Off-site chips."
-    chips_variance = models.DecimalField(max_digits=14, decimal_places=2)
-    total_payments = models.DecimalField(max_digits=14, decimal_places=2)
-    game_balance = models.DecimalField(max_digits=14, decimal_places=2)
+    chips_variance = models.DecimalField(max_digits=14, decimal_places=0)
+    total_payments = models.DecimalField(max_digits=14, decimal_places=0)
+    game_balance = models.DecimalField(max_digits=14, decimal_places=0)
+    # Set only when chips_variance != 0 at close — a chip discrepancy no
+    # longer blocks closing outright (2026-09-22): a player may genuinely
+    # have walked off with chips, which isn't something the Cashier can
+    # fix on the spot. Instead it must be ACKNOWLEDGED — a reason is
+    # required, and authorization widens from Floor-Manager-only to Owner
+    # (own login or PIN) OR Floor Manager PIN for that close specifically —
+    # see gaming.services.close_game_day/game_day_chip_discrepancy. Blank
+    # whenever chips_variance is exactly 0.
+    chip_discrepancy_reason = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

@@ -3,8 +3,9 @@ import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transac
 
 // Shared tabular ledger row renderer (2026-09-17) — replaces 7 near-identical
 // hand-rolled `.feed-row`/`.ledger-row`/`.activity-row` implementations
-// (GameDayLedgerView, GameDayDetailView, OutstandingView, RosterDetailView
-// x2, ActiveGameDayView, PlayerDetailView) with one presentational
+// (GameDayLedgerView, GameDayDetailView, OutstandingView [folded into
+// DashboardView 2026-09-23], RosterDetailView x2, ActiveGameDayView,
+// PlayerDetailView) with one presentational
 // component: no API calls, no store access — the parent still fetches its
 // own data and handles voiding exactly as before, just renders through this
 // instead of its own markup. See PLAN.md's "Ledgers: list rows → tabular
@@ -23,6 +24,18 @@ const props = defineProps({
   // row => path string, or null/undefined to render plain text (Cashier's
   // ActiveGameDayView has no /roster/:id route to link to).
   playerTo: { type: Function, default: null },
+  // The Status column only ever means anything for Payout approval states
+  // (PENDING_APPROVAL/APPROVED/REJECTED/TRANSFER_FAILED) — every other type
+  // is always POSTED, rendering no badge. Defaults on (back-office ledgers
+  // that regularly surface payouts want it); the Cashier's own Game-Day
+  // activity feed turns it off (2026-09-22) — a mostly-blank column with no
+  // real use on that screen.
+  showStatus: { type: Boolean, default: true },
+  // The "Type" column header reads oddly once every row already belongs to
+  // one player (e.g. ActiveGameDayView's per-player ledger experiment,
+  // 2026-09-22) — "Action" fits better there. Values in the column are
+  // unchanged either way (TRANSACTION_TYPES[row.type].label).
+  typeLabel: { type: String, default: 'Type' },
   dateFormat: { type: String, default: 'time' }, // 'time' | 'datetime'
   voidable: { type: Boolean, default: false },
   canVoidFn: { type: Function, default: () => false },
@@ -37,6 +50,15 @@ function formatDateTime(iso) {
   return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · ${formatTime(iso)}`
 }
 const N = n => `₦${Number(n).toLocaleString()}`
+
+// Amount coloring (2026-09-22, per the ledger design review) — chips going
+// out reads as a debit (red), money coming back in reads as a credit
+// (green), so the Amount column reinforces the +/- sign rather than just
+// repeating it in neutral ink. See transactionTypes.js's `amountTone`.
+function amountToneClass(type) {
+  const tone = TRANSACTION_TYPES[type]?.amountTone
+  return tone ? `amount--${tone}` : ''
+}
 </script>
 
 <template>
@@ -46,17 +68,17 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <tr>
           <th class="col-lane" aria-hidden="true" />
           <th>{{ dateFormat === 'datetime' ? 'Date' : 'Time' }}</th>
-          <th>Type</th>
+          <th>{{ typeLabel }}</th>
           <th v-if="showPlayer">Player</th>
           <th class="num">Amount</th>
           <th class="num">Balance</th>
-          <th>Status</th>
+          <th v-if="showStatus">Status</th>
           <th v-if="voidable" class="col-action" aria-hidden="true" />
         </tr>
       </thead>
       <tbody>
         <tr v-if="!rows.length">
-          <td class="empty" :colspan="3 + (showPlayer ? 1 : 0) + 2 + 1 + (voidable ? 1 : 0)">Nothing recorded yet.</td>
+          <td class="empty" :colspan="3 + (showPlayer ? 1 : 0) + 2 + (showStatus ? 1 : 0) + (voidable ? 1 : 0)">Nothing recorded yet.</td>
         </tr>
         <tr v-for="row in rows" :key="row.id" :class="{ 'row--voided': row.is_voided }">
           <td class="col-lane"><span :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" /></td>
@@ -66,12 +88,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <RouterLink v-if="playerTo?.(row)" :to="playerTo(row)" class="player-link" @click.stop>{{ row.player_name }}</RouterLink>
             <span v-else>{{ row.player_name }}</span>
           </td>
-          <td class="num mono">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</td>
+          <td class="num mono" :class="amountToneClass(row.type)">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</td>
           <td class="num mono">
             <span v-if="row.is_voided" class="voided-label">VOIDED</span>
             <span v-else>{{ N(row.running_balance) }}</span>
           </td>
-          <td>
+          <td v-if="showStatus">
             <span v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ row.status.replace('_', ' ') }}</span>
           </td>
           <td v-if="voidable" class="col-action">
@@ -85,7 +107,11 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 <style scoped>
 .ledger-table-wrap { overflow-x: auto; }
-.ledger-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+/* font-family explicit, not just inherited from body — some engines don't
+   reliably carry it onto table cells across every browser/zoom context,
+   which is what made the ledger read as off-face from the rest of the
+   app's Public Sans. Fixed 2026-09-22. */
+.ledger-table { width: 100%; border-collapse: collapse; font-family: var(--font-sans); font-size: 12.5px; }
 
 .ledger-table thead th {
   position: sticky;
@@ -118,6 +144,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 .ledger-table td.mono, .ledger-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ledger-table td.empty { text-align: center; color: var(--text-secondary); padding: 20px 10px; font-family: var(--font-sans); }
+.ledger-table td.amount--debit { color: var(--danger-text); }
+.ledger-table td.amount--credit { color: var(--success-text); }
 
 /* Was a bare 4px solid-color bar — upgraded 2026-09-21 to a proper
    tinted swatch (matching the Ledger Directions review artifact's

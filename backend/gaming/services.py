@@ -9,11 +9,11 @@ from decimal import Decimal
 from django.db import transaction as db_transaction
 from django.utils import timezone
 
-from accounts.models import FloorManager, Player, StaffUser
+from accounts.models import FloorManager, Player, StaffMember, StaffUser
 
 from . import selectors
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
-from .models import ConversionRate, GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
+from .models import ClubSettings, ConversionRate, GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
 
 # A real table only has so many seats. Revised 2026-09-15: a departed player
 # returns ONLY by being issued chips (CHIPS_OUT) — never a bare re-add — and
@@ -119,10 +119,19 @@ def open_game_day(
     choice each night, but with a pre-filled default (confirmed). All
     three stay optional so a game-day can still be opened without them,
     same as every game-day before this change.
+
+    Revised 2026-09-23: sign-off itself is now optional, per
+    ClubSettings.require_approval_open_game_day — off, and this skips
+    straight to creating the game-day with no owner/fm at all (the
+    frontend still shows a plain, PIN-less confirm step first; see
+    usePlainConfirm.js).
     """
-    owner, fm = _resolve_owner_or_floor_manager(
-        operator, floor_manager_id, floor_manager_pin, owner_id, owner_pin, action='Opening a game-day',
-    )
+    if ClubSettings.load().require_approval_open_game_day:
+        owner, fm = _resolve_owner_or_floor_manager(
+            operator, floor_manager_id, floor_manager_pin, owner_id, owner_pin, action='Opening a game-day',
+        )
+    else:
+        owner, fm = None, None
     if buy_in_amount is None and table is not None:
         buy_in_amount = table.default_buy_in
     return GameDay.objects.create(
@@ -132,24 +141,116 @@ def open_game_day(
     )
 
 
-def close_game_day(game_day, operator, floor_manager_id=None, floor_manager_pin=None):
+def close_blocked_reason(game_day):
     """
-    Cashier, Owner, or a Floor Manager PIN can each close a game-day alone.
-    Writes the GameDaySummary snapshot (incl. the chips variance) once, here —
-    it's never recomputed after this.
+    Why close_game_day would refuse outright right now, or None if it
+    wouldn't — added 2026-09-22, shared with GameDayViewSet.close_preview
+    so the Cashier sees this up front rather than only after entering a
+    PIN. HARD block only, never overridable: every seated player must have
+    left the table first — an active seat means someone's still mid-play,
+    nothing to reconcile against yet. A chip discrepancy is a SEPARATE,
+    acknowledgeable condition — see game_day_chip_discrepancy — not a hard
+    block at all.
     """
-    fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
-    allowed_roles = {StaffUser.Role.CASHIER, StaffUser.Role.OWNER}
-    if operator.role not in allowed_roles and fm is None:
-        raise AuthorizationError('Closing a game-day requires the Cashier, Owner, or a Floor Manager PIN.')
+    active_count = selectors.active_game_day_players_count(game_day)
+    if active_count > 0:
+        noun = 'player' if active_count == 1 else 'players'
+        return f'{active_count} {noun} still at the table — everyone must leave before closing.'
+    return None
+
+
+def game_day_chip_discrepancy(game_day):
+    """
+    None once chips fully reconcile for the night; otherwise a dict
+    describing the gap, used by close_game_day's acknowledge-and-sign-off
+    path (see its own docstring) and surfaced on GameDayViewSet.close_preview
+    so the Cashier sees it before attempting to close.
+
+    Deliberately built on the SAME chips_variance formula GameDaySummary
+    already freezes at close (chips_out − chips_in − rake − tips), not a
+    bare chips_out-vs-chips_in comparison — rake and tips are chips that
+    legitimately never come back as a CHIPS_IN (skimmed from play, or
+    handed to staff as a tip), so they're not a discrepancy; only whatever
+    is still unaccounted for after those is. Added 2026-09-22.
+    """
+    data = selectors.game_day_summary_data(game_day)
+    variance = data['chips_variance']
+    if variance == 0:
+        return None
+    return {
+        'chips_out_total': data['chips_out_total'],
+        'chips_in_total': data['chips_in_total'],
+        'rake_total': data['rake_total'],
+        'tips_total': data['tips_total'],
+        'amount': abs(variance),
+        'direction': 'short' if variance > 0 else 'excess',
+    }
+
+
+def close_game_day(
+    game_day, operator, floor_manager_id=None, floor_manager_pin=None,
+    owner_id=None, owner_pin=None, discrepancy_reason='',
+):
+    """
+    Closing is the night's final physical reconciliation, witnessed
+    independently just like any other physical-count entry (CHIPS_OUT/IN,
+    cash, rake, tip — see PHYSICAL_COUNT_TYPES): an ordinary close (chips
+    fully reconciled) requires a Floor Manager PIN, full stop — no
+    Owner-login bypass, unlike open_game_day/set_conversion_rate,
+    deliberately: the whole point of a signature here is independent
+    verification, which an Owner closing solo wouldn't provide.
+
+    A chip discrepancy (see game_day_chip_discrepancy) does NOT block
+    closing outright — a player may genuinely have walked off with chips,
+    which isn't something anyone can fix on the spot — but it must be
+    ACKNOWLEDGED: `discrepancy_reason` is required (raises otherwise), and
+    authorization widens to Owner (own login or PIN) OR Floor Manager PIN
+    for that close specifically — either may sign off on a deficit or an
+    excess. The reason is frozen onto GameDaySummary.chip_discrepancy_reason
+    for the audit trail. Revised 2026-09-22 — see PLAN.md's dated entry for
+    the full history (was Cashier/Owner/FM, any one alone, no PIN, no gate
+    of any kind, before this).
+
+    Still hard-blocks on close_blocked_reason (players still seated) —
+    nothing to sign off on there, it's just not ready yet. Writes the
+    GameDaySummary snapshot once, here — it's never recomputed after.
+
+    Revised 2026-09-23: the ORDINARY (no-discrepancy) path's PIN is now
+    optional, per ClubSettings.require_approval_close_game_day — off, and
+    `fm` just stays None. A chip discrepancy always still requires
+    Owner-or-FM sign-off regardless of this flag: it's a genuine anomaly
+    (chips didn't reconcile), not the routine close this flag streamlines.
+    """
+    reason = close_blocked_reason(game_day)
+    if reason is not None:
+        raise InvalidStateError(reason)
+
+    discrepancy = game_day_chip_discrepancy(game_day)
+    if discrepancy is not None:
+        if not discrepancy_reason.strip():
+            raise InvalidStateError(
+                f"Chips don't reconcile (₦{discrepancy['amount']:,} {discrepancy['direction']}) — "
+                f'a reason is required to close anyway.'
+            )
+        owner, fm = _resolve_owner_or_floor_manager(
+            operator, floor_manager_id, floor_manager_pin, owner_id, owner_pin,
+            action='Closing with a chip discrepancy',
+        )
+    elif ClubSettings.load().require_approval_close_game_day:
+        fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
+        if fm is None:
+            raise AuthorizationError('Closing a game-day requires a Floor Manager PIN.')
+    else:
+        fm = None
+
     game_day.status = GameDay.Status.CLOSED
     game_day.ended_at = timezone.now()
     game_day.closed_by = operator
     game_day.closed_by_floor_manager = fm
     game_day.save(update_fields=['status', 'ended_at', 'closed_by', 'closed_by_floor_manager'])
-    GameDaySummary.objects.update_or_create(
-        game_day=game_day, defaults=selectors.game_day_summary_data(game_day),
-    )
+    summary_data = selectors.game_day_summary_data(game_day)
+    summary_data['chip_discrepancy_reason'] = discrepancy_reason.strip() if discrepancy is not None else ''
+    GameDaySummary.objects.update_or_create(game_day=game_day, defaults=summary_data)
     return game_day
 
 
@@ -167,7 +268,7 @@ def set_conversion_rate(
     )
 
 
-def _ensure_seated(game_day, player, operator=None, revive=False):
+def _ensure_seated(game_day, player, operator=None, block_departed=False):
     """
     Idempotently ensures `player` has a GameDayPlayer row for `game_day` — a
     no-op for the between-game-day case (game_day is None) or rake/tip
@@ -175,18 +276,22 @@ def _ensure_seated(game_day, player, operator=None, revive=False):
     initiate_payout so a player can never have real activity tonight without
     also showing up in the Cashier's seated-players list.
 
-    `revive` (added 2026-09-15, default False) is the ONLY thing that clears
-    a departed player's left_at — pass True only for a CHIPS_OUT
-    (record_transaction). Every other transaction type, and initiate_payout,
-    record normally against a departed player without bringing them back to
-    the table (e.g. settling a Return-Chips owed from before they left).
-    "Return to Table" as a bare re-add is gone — seat_player no longer calls
-    this for an already-seated-but-departed player at all (see below).
+    `block_departed` (renamed from `revive` 2026-09-22, default False) —
+    pass True only for a CHIPS_OUT (record_transaction). Until 2026-09-22
+    this silently cleared a departed player's left_at, reviving them onto
+    whatever seat_number they still carried from before — but leave_table
+    never clears seat_number, so that seat could since have been taken by
+    someone else, and the Cashier had no chance to pick a (possibly
+    different) seat first. Now it raises instead, directing the caller to
+    gaming.services.rejoin_at_seat — an explicit seat pick, THEN chips.
+    Every other transaction type, and initiate_payout, still record
+    normally against a departed player without touching left_at at all
+    (e.g. a Return-Chips correction after the fact — see PLAN.md).
 
     Creating a brand-new seat (never seated tonight, regardless of who's
-    calling) is always capped, same as a revival — closes a gap where
-    record_transaction/initiate_payout could otherwise seat a 10th active
-    player without ever going through seat_player's check.
+    calling) is always capped — closes a gap where record_transaction/
+    initiate_payout could otherwise seat a 10th active player without ever
+    going through seat_player's check.
     """
     if game_day is None or player is None:
         return
@@ -200,15 +305,11 @@ def _ensure_seated(game_day, player, operator=None, revive=False):
                 player=player,
             )
         GameDayPlayer.objects.create(game_day=game_day, player=player, added_by=operator)
-    elif revive and seat.left_at is not None:
-        if selectors.active_game_day_players_count(game_day) >= max_players:
-            raise TableFullError(
-                f'The table is full ({max_players} active players right now) — '
-                f"{player.display_name} wasn't seated. Try again once someone leaves the table.",
-                player=player,
-            )
-        seat.left_at = None
-        seat.save(update_fields=['left_at'])
+    elif block_departed and seat.left_at is not None:
+        raise InvalidStateError(
+            f'{player.display_name} left the table tonight — pick a seat to bring them back '
+            f'(Rejoin) before issuing chips.'
+        )
 
 
 def _validate_seat_number(game_day, seat_number, exclude_player=None):
@@ -238,8 +339,10 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
     Registering a brand-new player (player_fields) always succeeds, even if
     the table is full — only seating them for tonight is capped (via
     _ensure_seated). Revised 2026-09-15: this can no longer revive a departed
-    player at all — that's issue-chips-only now — so a departed player_id
-    raises a clear InvalidStateError instead of silently re-seating them.
+    player at all — a departed player_id raises a clear InvalidStateError
+    instead of silently re-seating them. Revised again 2026-09-22: bringing
+    a departed player back is now rejoin_at_seat (explicit seat pick), not
+    issuing them chips — see _ensure_seated's block_departed docstring.
 
     `seat_number` (added 2026-09-17, optional) assigns a specific numbered
     seat at the same time — used when the Cashier taps an empty seat
@@ -267,7 +370,7 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
     existing_seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
     if existing_seat is not None and existing_seat.left_at is not None:
         raise InvalidStateError(
-            f'{player.display_name} left the table tonight — issue them chips to bring them back, not re-seat.'
+            f'{player.display_name} left the table tonight — rejoin them at a seat instead of re-seating.'
         )
     if seat_number is not None:
         _validate_seat_number(game_day, seat_number, exclude_player=player)
@@ -326,6 +429,38 @@ def move_seat(game_day, player, seat_number, operator=None):
             occupant.save(update_fields=['seat_number'])
         seat.seat_number = seat_number
         seat.save(update_fields=['seat_number'])
+    return seat
+
+
+def rejoin_at_seat(game_day, player, seat_number, operator=None):
+    """
+    Brings a departed player back to the table at a specific seat, in one
+    atomic step — added 2026-09-22 so bringing someone back always goes
+    through an explicit seat pick FIRST, rather than the old "Issue Chips
+    silently revives them onto whatever seat_number they still carried from
+    before they left" behavior (leave_table never clears seat_number, so
+    that seat could since have been taken by someone else — a real, if
+    quiet, correctness gap this closes). Once rejoined here, the player is
+    active again and Issue Chips works on them exactly like anyone else —
+    see _ensure_seated's block_departed, which now refuses to do this
+    implicitly.
+    """
+    _require_open_game_day(game_day)
+    seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
+    if seat is None or seat.left_at is None:
+        raise InvalidStateError(f"{player.display_name} hasn't left tonight's table.")
+    max_players = selectors.max_active_players(game_day)
+    if selectors.active_game_day_players_count(game_day) >= max_players:
+        raise TableFullError(
+            f'The table is full ({max_players} active players right now) — '
+            f"{player.display_name} wasn't seated. Try again once someone leaves the table.",
+            player=player,
+        )
+    _validate_seat_number(game_day, seat_number, exclude_player=player)
+    with db_transaction.atomic():
+        seat.left_at = None
+        seat.seat_number = seat_number
+        seat.save(update_fields=['left_at', 'seat_number'])
     return seat
 
 
@@ -421,6 +556,20 @@ PHYSICAL_COUNT_TYPES = {
     Transaction.Type.TIP,
 }
 
+# Which of PHYSICAL_COUNT_TYPES has an Owner-configurable "require
+# approval" toggle (see ClubSettings) — PAYMENT_CASH isn't here, so it
+# keeps requiring the Floor Manager PIN unconditionally. Added 2026-09-23;
+# CHIPS_OUT added the same day. Doesn't touch seat_player's own automatic
+# default buy-in (_skip_pin_check=True) — that bypass runs before this
+# lookup is ever consulted (see the `if not _skip_pin_check` guard below),
+# same as before this toggle existed.
+_APPROVAL_SETTING_BY_TYPE = {
+    Transaction.Type.CHIPS_OUT: 'require_approval_issue_chips',
+    Transaction.Type.CHIPS_IN: 'require_approval_return_chips',
+    Transaction.Type.TIP: 'require_approval_add_tip',
+    Transaction.Type.RAKE: 'require_approval_add_rake',
+}
+
 DEFAULT_CHANNEL_BY_TYPE = {
     Transaction.Type.CHIPS_OUT: Transaction.Channel.CASHIER,
     Transaction.Type.CHIPS_IN: Transaction.Channel.CHIPS,
@@ -457,14 +606,14 @@ def _apply_profit_split_stake(player, amount):
         return amount, Decimal('0'), arrangement
     uncapped_house_share = amount * arrangement.house_stake_pct / Decimal('100')
     house_portion = min(uncapped_house_share, status['available_stake_this_period'], amount)
-    house_portion = house_portion.quantize(Decimal('0.01'))
+    house_portion = house_portion.quantize(Decimal('1'))  # whole Naira only — no kobo
     return amount - house_portion, house_portion, arrangement
 
 
 def record_transaction(
     *, type, amount, recorded_by, game_day=None, player=None, notes='', currency='NGN',
     conversion_rate=None, channel=None, floor_manager_id=None, floor_manager_pin=None,
-    tip_category=None, service_staff=None, _skip_pin_check=False,
+    tip_category=None, masseuse=None, _skip_pin_check=False,
 ):
     """
     The general entry point for recording a ledger-affecting event (chips, cash,
@@ -492,11 +641,11 @@ def record_transaction(
     already final, and a retroactive ledger entry shouldn't reopen its
     active-player cap or resurrect anyone into its seated list.
 
-    A TIP requires `tip_category` (added 2026-09-17): DEALER stays anonymous/
-    aggregate exactly as every Tip did before this (no recipient, tips_total
-    arithmetic unaffected — this is attribution layered on top, not a new
-    ledger figure); SERVICE requires an active `service_staff` recipient.
-    Neither field applies to any other type.
+    A TIP requires `tip_category` (added 2026-09-17, values renamed
+    2026-09-23): SERVICE_STAFF stays anonymous/aggregate exactly as every Tip
+    did before this (no recipient, tips_total arithmetic unaffected — this is
+    attribution layered on top, not a new ledger figure); MASSEUSE requires
+    an active `masseuse` recipient. Neither field applies to any other type.
 
     A WRITE_OFF (added 2026-09-20, part of "Deals" — see CONCEPT.md's Deals
     section) always requires a `notes` reason — it's the one Transaction
@@ -520,15 +669,15 @@ def record_transaction(
                 f'(outstanding: ₦{outstanding:,}).'
             )
     if type == Transaction.Type.TIP:
-        if tip_category not in (Transaction.TipCategory.DEALER, Transaction.TipCategory.SERVICE):
-            raise InvalidStateError('A Tip must specify a category: Dealer or Service.')
-        if tip_category == Transaction.TipCategory.SERVICE:
-            if service_staff is None or not service_staff.is_active:
-                raise InvalidStateError('A Service tip requires an active Service Staff recipient.')
-        elif service_staff is not None:
-            raise InvalidStateError('A Dealer tip cannot have a Service Staff recipient.')
-    elif tip_category is not None or service_staff is not None:
-        raise InvalidStateError('tip_category/service_staff only apply to a Tip.')
+        if tip_category not in (Transaction.TipCategory.SERVICE_STAFF, Transaction.TipCategory.MASSEUSE):
+            raise InvalidStateError('A Tip must specify a category: Service staff or Masseuse.')
+        if tip_category == Transaction.TipCategory.MASSEUSE:
+            if masseuse is None or not masseuse.is_active or masseuse.role != StaffMember.Role.MASSEUSE:
+                raise InvalidStateError('A Masseuse tip requires an active Masseuse recipient.')
+        elif masseuse is not None:
+            raise InvalidStateError('A Service staff tip cannot have a Masseuse recipient.')
+    elif tip_category is not None or masseuse is not None:
+        raise InvalidStateError('tip_category/masseuse only apply to a Tip.')
 
     # "Deals" Profit Split stake (added 2026-09-20): if this player has an
     # active arrangement, part of this buy-in is house-covered rather than
@@ -547,13 +696,66 @@ def record_transaction(
                 f"This would exceed {player.display_name}'s chips limit for tonight "
                 f'(limit ₦{player.chips_limit:,}, debt after this issuance would be ₦{debt_after:,}).'
             )
+
+    # Per-issuance cap (added 2026-09-23, Owner/Floor-Manager-editable via
+    # Table.max_chips_issuable — see the Settings screen): how much can be
+    # issued to a player IN ONE GO. Corrected same day — this is NOT a
+    # running/cumulative total (a player can buy in at the cap multiple
+    # times over the night; there's no limit on total chips outstanding at
+    # once) — just a ceiling on any single CHIPS_OUT amount. Distinct from
+    # player.chips_limit above, which caps one player's own overall debt
+    # tonight, not the size of any one issuance. null = no cap.
+    if (
+        type == Transaction.Type.CHIPS_OUT and game_day is not None
+        and game_day.table_id and game_day.table.max_chips_issuable is not None
+        and amount > game_day.table.max_chips_issuable
+    ):
+        raise InvalidStateError(
+            f'This exceeds the most that can be issued in one go on this table '
+            f"(₦{amount:,} requested, cap ₦{game_day.table.max_chips_issuable:,})."
+        )
+
+    # Chips returned can never exceed what could still physically be on the
+    # table for the game-day, full stop — added 2026-09-22 after a request
+    # to catch this on the spot (a miscount, or forgetting someone already
+    # cashed out) rather than only at close. Deliberately game-day-wide, not
+    # per-player: an excess return is still a discrepancy in the physical
+    # chip count even if it nets out across different players' CHIPS_OUT/
+    # CHIPS_IN rows. Blocks the entry outright — no override — until the
+    # amount (or a missing CHIPS_OUT elsewhere) is corrected.
+    #
+    # Revised 2026-09-23: rake and tips are chips that legitimately never
+    # come back as a CHIPS_IN (skimmed from play / handed to staff) — same
+    # reasoning close-time's chips_variance already used (see
+    # game_day_chip_discrepancy). Netting them out of the ceiling here
+    # means this on-the-spot check now agrees with that close-time one,
+    # instead of being looser than it (it would otherwise let a return
+    # through that close would immediately flag as an excess).
+    if type == Transaction.Type.CHIPS_IN and game_day is not None:
+        totals = selectors.game_day_chips_totals(game_day)
+        max_returnable = totals['chips_out_total'] - totals['rake_total'] - totals['tips_total']
+        chips_in_after = totals['chips_in_total'] + amount
+        if chips_in_after > max_returnable:
+            over_by = chips_in_after - max_returnable
+            raise InvalidStateError(
+                f'This would put total chips returned tonight (₦{chips_in_after:,}) above what could still be '
+                f'on the table (₦{max_returnable:,} — chips issued minus rake/tips already taken out) '
+                f'by ₦{over_by:,} — recount before returning.'
+            )
     fm = None
     if not _skip_pin_check and type in PHYSICAL_COUNT_TYPES:
-        fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
-        if fm is None:
-            raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
+        # CHIPS_OUT/CHIPS_IN/TIP/RAKE's sign-off is Owner-configurable
+        # (added 2026-09-23, ClubSettings.require_approval_*) —
+        # PAYMENT_CASH has no entry here, so it keeps requiring the PIN
+        # unconditionally, same as before this change.
+        setting_name = _APPROVAL_SETTING_BY_TYPE.get(type)
+        requires_pin = getattr(ClubSettings.load(), setting_name) if setting_name else True
+        if requires_pin:
+            fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
+            if fm is None:
+                raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
     if game_day is not None and game_day.status == GameDay.Status.OPEN:
-        _ensure_seated(game_day, player, recorded_by, revive=(type == Transaction.Type.CHIPS_OUT))
+        _ensure_seated(game_day, player, recorded_by, block_departed=(type == Transaction.Type.CHIPS_OUT))
 
     with db_transaction.atomic():
         txn = Transaction.objects.create(
@@ -563,7 +765,7 @@ def record_transaction(
             channel=channel or DEFAULT_CHANNEL_BY_TYPE[type], notes=notes,
             recorded_by=recorded_by, floor_manager=fm,
             confirmed_at=timezone.now() if fm else None,
-            tip_category=tip_category, service_staff=service_staff,
+            tip_category=tip_category, masseuse=masseuse,
             profit_split_arrangement=arrangement if house_portion > 0 else None,
         )
         if house_portion > 0:
@@ -701,7 +903,8 @@ def deactivate_profit_split_arrangement(arrangement, operator):
 
 def initiate_payout(player, amount, operator, game_day=None):
     """
-    Cashier initiates a cash-out transfer; it always lands PENDING_APPROVAL.
+    Cashier initiates a cash-out transfer; it lands PENDING_APPROVAL unless
+    it clears the auto-approval threshold (see the bottom of this function).
 
     Revised 2026-09-13: a payout is now always scoped to a game-day — it
     defaults to whichever one is currently open when the caller doesn't pass
@@ -719,6 +922,14 @@ def initiate_payout(player, amount, operator, game_day=None):
     later as TRANSFER_FAILED at approval time (that approval-time check in
     payments.services.initiate_payout_transfer stays too, as defense in
     depth — e.g. the account being removed between request and approval).
+
+    Revised 2026-09-23: a payout at or below
+    ClubSettings.payout_auto_approve_threshold (Owner-editable, default
+    ₦500,000) skips PENDING_APPROVAL entirely and runs the same funds-check
+    + real transfer approve_payout does — see _execute_payout_transfer,
+    shared by both. `approved_by=None` on the resulting transaction is the
+    marker for "auto-approved, nobody manually signed off" (vs a real
+    Owner's id for a manual approval).
     """
     game_day = game_day or selectors.current_open_game_day()
     if game_day is None:
@@ -742,42 +953,40 @@ def initiate_payout(player, amount, operator, game_day=None):
             f'(available: ₦{available:,}).'
         )
 
-    _ensure_seated(game_day, player, operator, revive=False)  # a payout never revives a departed player
-    return Transaction.objects.create(
+    _ensure_seated(game_day, player, operator)  # a payout never brings back a departed player
+    transaction_obj = Transaction.objects.create(
         game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=amount,
         channel=Transaction.Channel.CASHIER, recorded_by=operator,
         status=Transaction.Status.PENDING_APPROVAL,
     )
+    if amount <= ClubSettings.load().payout_auto_approve_threshold:
+        return _execute_payout_transfer(transaction_obj, approved_by=None)
+    return transaction_obj
 
 
-def approve_payout(transaction_obj, operator):
+def _execute_payout_transfer(transaction_obj, approved_by):
     """
-    Every payout requires Owner approval before funds move — no threshold
-    exemption. Approval and the real Paystack transfer happen together: if
-    the transfer can't be sent (no bank account on file, Paystack rejects
+    Shared by approve_payout (Owner manually approves) and
+    initiate_payout's auto-approval path (amount at/under
+    ClubSettings.payout_auto_approve_threshold, approved_by=None) — the
+    funds-guard, the real Paystack transfer, and the resulting status are
+    identical either way; only who (if anyone) approved it differs.
+
+    Guards against the club's Main Account balance itself going negative —
+    checked first, before approved_by/approved_at are ever touched, so an
+    insufficient-funds rejection leaves the transaction completely
+    untouched and retryable once funds arrive (distinct from
+    TRANSFER_FAILED, which means a transfer was actually attempted and
+    failed). Runs inside one atomic, row-locked block: two concurrent
+    approvals of the SAME transaction (double-click, two tabs) would
+    otherwise have a bare TOCTOU race on the status check alone;
+    select_for_update() serializes that plus the funds check. If the
+    transfer can't be sent (no bank account on file, Paystack rejects
     it, ...), the payout lands TRANSFER_FAILED instead of APPROVED so it's
-    visibly stuck rather than silently "approved" with nothing moving.
-    TRANSFER_FAILED can be retried by calling this again once the underlying
-    issue is fixed (e.g. a bank account is added).
-
-    Revised 2026-09-17: also guards against the club's Main Account balance
-    itself going negative — checked first, before approved_by/approved_at
-    are ever touched, so an insufficient-funds rejection leaves the
-    transaction completely untouched and retryable once funds arrive
-    (distinct from TRANSFER_FAILED, which means a transfer was actually
-    attempted and failed). Placed here rather than at initiate_payout
-    because the Main Account balance is Owner-only visibility (CONCEPT.md) —
-    a Cashier requesting a payout shouldn't learn anything about club-wide
-    funds. The whole function now runs inside one atomic, row-locked block:
-    previously two concurrent approvals of the SAME transaction (double-
-    click, two tabs) had a bare TOCTOU race on the status check alone;
-    select_for_update() serializes that plus this new funds check.
+    visibly stuck rather than silently "approved" with nothing moving —
+    retryable by calling approve_payout again once the underlying issue is
+    fixed.
     """
-    if operator.role != StaffUser.Role.OWNER:
-        raise AuthorizationError('Only the Owner can approve a payout.')
-    if transaction_obj.type != Transaction.Type.PAYOUT:
-        raise ValueError('Not a payout transaction.')
-
     with db_transaction.atomic():
         transaction_obj = Transaction.objects.select_for_update().get(pk=transaction_obj.pk)
         if transaction_obj.status not in (Transaction.Status.PENDING_APPROVAL, Transaction.Status.TRANSFER_FAILED):
@@ -794,7 +1003,7 @@ def approve_payout(transaction_obj, operator):
         # at module level, so importing it back at module level here would be circular.
         from payments.services import PaystackAPIError, initiate_payout_transfer
 
-        transaction_obj.approved_by = operator
+        transaction_obj.approved_by = approved_by
         transaction_obj.approved_at = timezone.now()
         try:
             transfer_code = initiate_payout_transfer(transaction_obj)
@@ -808,6 +1017,20 @@ def approve_payout(transaction_obj, operator):
         transaction_obj.external_reference = transfer_code
         transaction_obj.save(update_fields=['status', 'approved_by', 'approved_at', 'external_reference'])
         return transaction_obj
+
+
+def approve_payout(transaction_obj, operator):
+    """
+    Owner manually approves a still-pending (or previously TRANSFER_FAILED)
+    payout — the auto-approval path (see initiate_payout) handles anything
+    at or under the club's threshold on its own; this is for the rest.
+    See _execute_payout_transfer for what approval actually does.
+    """
+    if operator.role != StaffUser.Role.OWNER:
+        raise AuthorizationError('Only the Owner can approve a payout.')
+    if transaction_obj.type != Transaction.Type.PAYOUT:
+        raise ValueError('Not a payout transaction.')
+    return _execute_payout_transfer(transaction_obj, approved_by=operator)
 
 
 def reject_payout(transaction_obj, operator, reason):

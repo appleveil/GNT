@@ -93,6 +93,13 @@
   --status-rejected-text: var(--danger-text);
   --status-voided-bg:     #E7EAE6;
   --status-voided-text:   #A9B0A6;
+  /* Auto-approved (a payout that met the club's payout_auto_approve_threshold,
+     approved_by=None — see PayoutsView.vue) is still an APPROVED status, but a
+     human never signed off on it. Its own cool/blue tone, distinct from the
+     warm success green a manual Approve click gets, so the two read apart in
+     the history list at a glance. Added 2026-09-23. */
+  --status-auto-approved-bg:   oklch(0.94 0.04 230);
+  --status-auto-approved-text: oklch(0.40 0.11 230);
 
   /* Transaction icon lanes — chips tracks the viewer's own role accent
      (unchanged relationship from before: chips = accent); payments

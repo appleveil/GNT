@@ -771,6 +771,421 @@ like before this feature existed.
   the now-removed rows) — no other frontend change needed, since the
   Leave Table UI never sent the disposition params this removes.
 
+### Payout-failed badge on the Cashier's player panel (2026-09-23)
+Item #8 off the "what am I missing" review — a payout that lands
+`TRANSFER_FAILED` (Owner approved it, but the Paystack transfer itself
+didn't go through) was only ever visible in the Owner's Payouts view; the
+Cashier who initiated it had no way to know without asking. Chose to
+surface it as a status badge, reusing the same "field" the player panel
+already uses for "Left the table"/chips-limit — not a separate
+notification system.
+- [x] New `selectors.player_has_failed_payout(player, game_day)` — any
+  non-voided `PAYOUT` transaction still sitting at `TRANSFER_FAILED`
+  tonight. Clears itself the moment the Owner retries successfully
+  (`APPROVED`) or rejects it (`REJECTED`+voided) — same `Transaction` row,
+  no separate acknowledge step.
+- [x] `GameDaySeatedPlayerSerializer.payout_failed` — exposed on both the
+  seated-players list and single-player detail endpoints the Cashier's
+  page already polls.
+- [x] Frontend: a red `payout-failed-badge` next to the existing
+  "Left the table"/chips-limit badge on the player panel — additive, not
+  exclusive, since a departed player can also have a stuck payout.
+- Two new backend tests (158/158 passing); `npm run build` clean.
+- **Discarded from the same list**: #1 (cash drawer reconciliation) and
+  #6 (per-dealer/service-staff tip summary) — not being pursued.
+- **Deferred to Phase F backlog** (below): #2 (void-after-return-posted
+  can create a silent excess), #3 (idle/session timeout), #4 (shift
+  handoff), #5 (forgotten entries after close), #7 (duplicate player
+  registration), #9 (printable end-of-night report).
+
+### Masseuse/Dealer/Service staff roles + tip-category rename (2026-09-23)
+Two related but independent changes, both from "add dealer and masseuse to
+the list of staff an owner can add":
+- [x] ~~Three new `StaffUser.Role` login roles — `MASSEUSE`/`DEALER`/
+  `SERVICE` — addable from the Admin page's "Staff accounts" dropdown~~ —
+  **superseded the same day**, see "Masseuse/Dealer/Service corrected:
+  never log in, no dashboard" below: this was wrong, all three never
+  actually log in. Left here as a historical record of what was briefly
+  built (including the `StaffHomeView.vue`/`homeRouteFor` redirect-loop
+  fix this required) before the correction; none of it exists any more.
+- [x] `Transaction.TipCategory`'s two values renamed — `DEALER` (anonymous/
+  aggregate) is now `SERVICE_STAFF` ("Service staff"), and `SERVICE`
+  (named recipient) is now `MASSEUSE` — behavior of each side unchanged,
+  only the label, per the Owner's explicit framing: Masseuses get tracked
+  by name, "Service staff" stays the aggregate/anonymous bucket dealers
+  used to be. Deliberately decoupled from the new login roles above —
+  `StaffUser.Role.SERVICE` is who can log in, `TipCategory.SERVICE_STAFF`
+  is who a tip gets attributed to; a real Masseuse or Dealer doesn't need
+  a login for tips to work.
+- [x] `accounts.ServiceStaff` (the named-recipient roster) renamed to
+  `Masseuse` — matches what it's actually for now that "Service" no
+  longer means the named side. `RenameModel` + a companion `RenameField`
+  on `Transaction.service_staff` -> `masseuse`, plus a `RunPython` data
+  migration remapping every existing row's stored `tip_category` value.
+  One real migration-ordering gotcha hit and fixed: the cross-app
+  `RenameModel` needed an explicit dependency on gaming's last migration,
+  or the graph's topological sort was free to apply it before gaming's
+  *historical* migrations that still reference the old model name,
+  producing a lazy-reference error rebuilding project state from scratch.
+  (`Masseuse` was generalized further to `StaffMember` the same day — see
+  the correction entry below; this rename step itself still stands.)
+- [x] Frontend: Floor Manager's "Service Staff" screen/tab/route renamed
+  to "Masseuses" (`/masseuses`, `MasseuseListView.vue`); the Tip entry
+  form's Dealer/Service radio is now Service staff/Masseuse.
+- 216/216 backend tests passing (2 new role tests, `TipCategoryTests`
+  renamed/updated in place); `npm run build` clean.
+
+### Rake/tips netted out of the on-the-spot chips-returned ceiling (2026-09-23)
+The 2026-09-22 "chips returned can never exceed chips issued" per-transaction
+gate (`record_transaction`'s CHIPS_IN branch) compared raw `chips_out_total`
+vs `chips_in_total` only — the exact bug already caught and fixed once
+before, at close time, for `chips_variance` (rake/tips are chips that
+legitimately never come back as a CHIPS_IN, skimmed from play / handed to
+staff). Left uncorrected here, the on-the-spot check was strictly *looser*
+than the close-time one: it would silently let a return through that
+`game_day_chip_discrepancy` would immediately flag as an excess at close.
+- [x] `selectors.game_day_chips_totals` now also returns `rake_total`/
+  `tips_total`; `record_transaction`'s ceiling is
+  `chips_out_total - rake_total - tips_total`, matching `chips_variance`'s
+  formula exactly.
+- [x] Frontend: the persistent chips-caption on the Cashier's page (added
+  2026-09-22 specifically to preview this same check) now nets out
+  rake/tips too, showing an extra "(₦X returnable after rake/tips)" once
+  either is nonzero — otherwise unchanged, so a normal night before any
+  rake/tip is recorded stays exactly as slim as before.
+- 4 new backend tests (rake alone, tips alone, both stacking, and the
+  error message reporting the adjusted ceiling) — 220/220 passing;
+  `npm run build` clean.
+
+**Follow-up bug, same day**: the caption still never actually showed the
+rake/tips adjustment live — it was computed by filtering the frontend's
+`ledger` ref, but `ledger` (and `activity`) *exclude RAKE/TIP entirely*
+(`EXCLUDED_FROM_GAME_DAY_LEDGER` — they're day-level entries, not scoped to
+any player), so no amount of client-side filtering could ever surface them.
+- [x] New `GET /game-days/<id>/chips-totals/` endpoint (new
+  `GameDayChipsTotalsSerializer`), wrapping `selectors.game_day_chips_totals`
+  directly — the dedicated live data source the caption actually needed.
+- [x] Frontend: `ActiveGameDayView.vue`'s chips-caption computeds now read
+  from this endpoint (fetched alongside players/ledger in `refreshAll()`)
+  instead of deriving anything from `ledger`.
+- 1 new backend test (`chips-totals` includes rake/tips) — 221/221 passing.
+
+### Masseuse/Dealer/Service corrected: never log in, no dashboard (2026-09-23)
+Same-day correction to the earlier "Masseuse/Dealer/Service staff roles"
+entry above: it added them as real `StaffUser.Role` logins (username +
+password), which was wrong — clarified they never actually log in and have
+no dashboard of their own.
+- [x] Removed `MASSEUSE`/`DEALER`/`SERVICE` from `StaffUser.Role` entirely
+  — back to Cashier/Accountant/Owner/Floor Manager only.
+- [x] `accounts.Masseuse` generalized to `accounts.StaffMember` — same
+  named, non-login roster the Masseuse tip category already used, now
+  with a `role` field (`MASSEUSE`/`DEALER`/`SERVICE`). `Transaction.masseuse`
+  still only ever points at a `role=MASSEUSE` row — enforced at both the
+  serializer (queryset filter) and service layer (explicit role check,
+  new `test_masseuse_tip_rejects_a_dealer_or_service_staffmember`).
+- [x] `/api/masseuses/` renamed `/api/staff-members/`, with a `?role=`
+  filter (mirrors `StaffUserViewSet.owners`' own role-filtering pattern) —
+  used by the Tip picker and the Floor Manager's "Masseuses" screen (both
+  hardcode `?role=MASSEUSE`; that screen's own scope is unchanged, still
+  just the named tip-recipient roster).
+- [x] New "Other Staff" section on the Admin page (Owner-only) — the actual
+  place Masseuse/Dealer/Service get added from now: name + role, no
+  username/password, no login.
+- [x] Frontend: removed the dead `/staff-home` placeholder route,
+  `StaffHomeView.vue`, and the `homeRouteFor`/`AppShell.vue` branches that
+  existed only to keep those three roles from hitting an infinite redirect
+  loop — none of it was ever reachable once the roles themselves were
+  reverted.
+- One more cross-app migration-ordering dependency needed (same shape as
+  the original Masseuse rename's own gotcha — see that entry): the
+  `RenameModel` had to depend on gaming's last migration, which still
+  referenced `accounts.masseuse`.
+- 221/221 backend tests passing; `npm run build` clean.
+
+### Removed the original (pre-2026-09-22) cashier ledger (2026-09-23)
+The everyone-at-once, unscoped ledger table — superseded by the
+per-selected-player ledger feed — had been kept commented out in
+`ActiveGameDayView.vue`'s template since the swap, in case that experiment
+needed reverting. Confirmed no longer needed and deleted outright, along
+with the stale comments pointing at it (`playerLedgerRows`' own comment,
+the template's own "original cashier ledger" note). `ledgerRows`/`ledger`
+themselves are unaffected — `playerLedgerRows` (the live feed) still
+depends on both.
+
+### Close Game-Day sign-off modal fix + ActiveGameDayView.vue cleanup (2026-09-23)
+- [x] Fixed the sign-off (PIN) modal rendering behind the close-game-day
+  summary: `CloseGameDayModal.vue`'s `.overlay` was `z-index: 100`, tied
+  with `AuthorizerConfirmModal`'s own 100 — with equal z-index, later-mounted
+  wins, and `App.vue` mounts `AuthorizerConfirmModal` first. Dropped to
+  `z-index: 90`, matching the existing convention (`TransactionEntryModal`'s
+  own overlay is already 90 for the same reason). Every other modal that
+  can stay open while `AuthorizerConfirmModal` layers on top of it was
+  checked — none had the same bug.
+- [x] `ActiveGameDayView.vue` cleaned up at the user's request: stripped
+  the file's accumulated dated/changelog-style comments ("Added
+  2026-09-22 — see the Cashier layout wireframe review", "was X, now Y",
+  ...) down to only what a reader would otherwise get wrong (sign/polarity
+  conventions, why a fetch can't be derived from another one, cross-file
+  couplings) — roughly 1180 lines to 894. Also removed two dead CSS rules
+  found in the process (`.hero-caption`, `.empty-players` — no matching
+  markup anywhere in the template). No behavior change; `npm run build`
+  clean throughout.
+
+### Owner/Floor-Manager-configurable Club Settings (2026-09-23)
+New "Settings" screen (`/settings`, visible to both Owner and Floor
+Manager) covering what used to be fixed in code:
+- [x] `ClubSettings` — new singleton model (`pk=1` convention, `load()`
+  classmethod), Owner-only: 5 `require_approval_*` toggles (open/close a
+  game-day, return chips, add a tip, add rake) and
+  `payout_auto_approve_threshold` (default ₦500,000). `GET
+  /club-settings/` open to any role (the frontend needs the toggles to
+  decide PIN-vs-plain-confirm); `PATCH` Owner-only.
+- [x] `Table` gets 5 new Owner/Floor-Manager-editable fields:
+  `max_chips_issuable`, `rake_percentage`, `small_blind`, `big_blind`,
+  `max_players` (all nullable — null = no override/no cap). `TableViewSet`
+  changed from read-only to a full `ModelViewSet` (read: anyone; write:
+  Owner-or-Floor-Manager, same split as `StaffMemberViewSet`); `name`/
+  `game`/`is_active` stay locked. `selectors.max_active_players` gained a
+  table-first tier ahead of `Game.max_players`. `max_chips_issuable` is
+  enforced in `record_transaction`'s CHIPS_OUT branch.
+  **Corrected same day**: first built as a running/cumulative cap on total
+  chips outstanding at the table (netting rake/tips like the CHIPS_IN
+  ceiling) — live-tested and found wrong. The real rule: a ceiling on any
+  ONE issuance only (`amount > table.max_chips_issuable`) — a player can
+  buy in at the cap as many times as they like over the night, and there's
+  no limit at all on total chips outstanding at once.
+- [x] Each `require_approval_*` toggle is consulted inline in
+  `open_game_day`/`close_game_day`/`record_transaction` — off skips the
+  PIN-resolution call entirely (`owner`/`fm` stay `None`, exactly like
+  every already-nullable case those fields supported before). A chip-
+  discrepancy close always still requires Owner-or-FM sign-off regardless
+  of the close toggle — a genuine anomaly, not the routine case it
+  streamlines. CHIPS_OUT/PAYMENT_CASH have no toggle at all, unaffected.
+- [x] Payout auto-approval: `approve_payout`'s funds-check + real transfer
+  extracted into `_execute_payout_transfer(transaction_obj, approved_by)`;
+  `initiate_payout` now calls it immediately (`approved_by=None`, the
+  "auto-approved" marker) when the amount is at or under the threshold,
+  instead of always landing `PENDING_APPROVAL`. No frontend change needed
+  — `PayoutsView.vue`/`RejectPayoutModal.vue` only react to `status`.
+- [x] Frontend: new `usePlainConfirm.js`/`PlainConfirmModal.vue` (mirrors
+  `useAuthorizerConfirm.js`/`AuthorizerConfirmModal.vue`'s module-singleton
+  shape, mounted once in `App.vue`) — the "still confirm, just no PIN"
+  fallback when a toggle is off, wired into `StartGameDayModal.vue`,
+  `useCloseGameDay.js`, and `TransactionEntryModal.vue`. New
+  `stores/clubSettings.js` (mirrors `stores/gameDay.js`), fetched once
+  from `AppShell.vue`'s `onMounted` alongside `gameDay.fetchCurrent()`.
+  New `views/shared/ClubSettingsView.vue`, routed at `/settings` for both
+  roles (Owner-only sections hidden inline via `v-if`), copying
+  `AdminView.vue`'s per-section CRUD-lite pattern.
+- Tests: `ClubSettingsModelTests`, `RequireApprovalTogglesTests`,
+  `MaxChipsIssuablePerTableTests`, `TableMaxPlayersOverrideTests`,
+  `PayoutAutoApprovalThresholdTests`, `ClubSettingsAndTablePermissionsAPITests`
+  (24 new, all green) — plus 3 pre-existing payout tests updated
+  (`_disable_payout_auto_approval()` helper) since their fixture amounts
+  fell under the new default threshold, which is unrelated to what they
+  were actually testing (manual-approval behavior).
+
+### Whole Naira only — no kobo anywhere (2026-09-23)
+Every Naira AMOUNT field, backend and frontend, is now `decimal_places=0` —
+this club never deals in fractional Naira. Scoped deliberately: RATES and
+PERCENTAGES are not amounts and keep their own precision — `Table.
+rake_percentage`, `ConversionRate.rate_to_naira`/`Transaction.
+conversion_rate` (both decimal_places=4), and `ProfitSplitArrangement`'s
+`house_stake_pct`/`custom_ratio_pct` are all untouched.
+- [x] Every money `DecimalField` changed `decimal_places=2` -> `0`:
+  `Transaction.amount`, `GameDaySummary`'s six total/balance fields,
+  `GameDay.buy_in_amount`, `Table.default_buy_in`/`small_blind`/
+  `big_blind`/`max_chips_issuable`, `ClubSettings.
+  payout_auto_approve_threshold`, `Player.chips_limit`,
+  `ProfitSplitArrangement.cap_amount`/`max_cumulative_value`/
+  `fixed_amount`/`fixed_offset` — plus every matching explicit
+  `serializers.DecimalField` declaration (`gaming/serializers.py`, ~18
+  fields). Two migrations (`accounts.0007`, `gaming.0020`), both plain
+  `AlterField` — checked the dev DB first for any real fractional Naira
+  value anywhere (none existed) before applying, so no data was rounded.
+  `_apply_profit_split_stake`'s `.quantize(Decimal('0.01'))` -> `
+  Decimal('1')`.
+- [x] `utils/amountInput.js` — `parseAmountInput` now strips a typed `.`
+  outright instead of allowing one decimal point; `formatAmountForDisplay`
+  no longer has a decimal-part branch. Both call sites
+  (`TransactionEntryModal.vue`'s amount field, `RosterDetailView.vue`'s
+  chips-limit/deal-amount fields) needed no changes beyond this — same
+  function signatures. `inputmode="decimal"` on all three -> `"numeric"`
+  (the FX-rate and conversion-rate inputs elsewhere keep `"decimal"`, not
+  Naira amounts).
+- Note: DRF's `DecimalField(decimal_places=0)` rejects "500000.00" outright
+  (extra zero decimal places, not just a nonzero fraction) rather than
+  silently rounding — confirmed live. Not a practical issue since every
+  money `<input>` in the app is `type="number"`/digit-stripped text, which
+  never produces a trailing-zero decimal string, but worth knowing if a
+  future integration ever posts a formatted amount here.
+
+### `Table.max_chips_issuable` semantics correction (2026-09-23)
+Live-tested immediately after the Club Settings entry above and found
+wrong: it was built as a running/cumulative cap on total chips outstanding
+at a table (net of returns/rake/tips), which blocked a normal new buy-in
+once the table's cumulative issuance crossed the configured number. The
+actual rule, per the Owner: it's a ceiling on any ONE issuance — a player
+can buy in at the cap as many times as they like over the course of the
+night, and there is no limit at all on total chips outstanding on a table
+at once. Fixed in `record_transaction`'s CHIPS_OUT branch
+(`amount > table.max_chips_issuable`, no totals lookup); `Table`'s own
+docstring, the error message, and `ClubSettingsView.vue`'s label/help text
+("Max chips per buy-in") updated to match. `MaxChipsIssuablePerTableTests`
+rewritten for the corrected behavior (multiple same-cap buy-ins now
+explicitly asserted to NOT raise).
+
+### Fixed: every Cashier entry (chips, cash, rake, tip, ...) 400ing (2026-09-23)
+Missed spot from the whole-Naira change above: `TransactionEntryModal.vue`'s
+`doSave` built its payload with `nairaAmount.value.toFixed(2)` — always a
+`".00"`-suffixed string. `Transaction.amount` is `decimal_places=0` now, and
+DRF's `DecimalField` rejects a value with EXTRA (even all-zero) decimal
+places outright rather than rounding it away — so every entry through this
+modal (Chips Out/In, Cash, POS, Transfer, Rake, Tip — the Cashier's main
+working screen) 400'd unconditionally. Fixed: `Math.round(nairaAmount.value
+).toFixed(0)` — also correctly handles the one place a real fraction could
+appear here (a foreign-currency amount × conversion_rate, e.g. 100 × 1547.83
+NGN/unit). Confirmed live: reproduced the exact 400 with the old
+`"15000.00"` payload, confirmed `"15000"` succeeds. `utils/amountInput.js`
+itself and its other two callers (`RosterDetailView.vue`) were already
+correct — this was the one remaining `.toFixed(2)` in the whole frontend.
+
+### Added "Issue chips" to the require-approval toggle list (2026-09-23)
+`ClubSettings.require_approval_issue_chips` (new `BooleanField`, default
+`True`, migration `gaming.0021`) — CHIPS_OUT joins CHIPS_IN/TIP/RAKE in
+`_APPROVAL_SETTING_BY_TYPE`; PAYMENT_CASH remains the one physical-count
+type with no toggle at all. Doesn't touch `seat_player`'s own automatic
+default buy-in (`_skip_pin_check=True`) — that bypass short-circuits
+before this lookup is ever consulted, same as before this toggle existed.
+Frontend: added to `TransactionEntryModal.vue`'s own
+`APPROVAL_SETTING_BY_TYPE` and `ClubSettingsView.vue`'s `APPROVAL_TOGGLES`
+list (between Close a game-day and Return chips). Tests: renamed the old
+"CHIPS_OUT/PAYMENT_CASH always require a PIN" test to cover PAYMENT_CASH
+only, added `test_issue_chips_needs_no_pin_once_disabled`/
+`test_issue_chips_still_requires_a_pin_by_default`.
+
+### Nav/layout fixes + Outstanding folded into Dashboard + auto-approved payout badge (2026-09-23)
+Four small frontend fixes from a lo-fi nav review:
+- **Top nav no longer scrolls away.** `AppShell.vue`'s `.stage` was
+  `min-height: 100vh` — a box that can only grow taller than the viewport
+  never actually triggers `.content`'s own `overflow-y: auto`, so the whole
+  document scrolled (topbar and tabbar included) instead of just the
+  content between them. Changed to `height: 100vh` (paired with the
+  `overflow: hidden` already there) so `.content` is the one scrolling
+  region and the topbar/tabbar stay put.
+- **Game-day status pill scoped to the Cashier's screen.** It was showing
+  in every role's topbar regardless of what they were looking at
+  (Dashboard, Payouts, Admin, ...). Gated behind a new
+  `showGameDayStatus = route.name === 'game-day'` — still shows for Owner
+  too, since Owner can also reach that same route (router/index.js's
+  existing comment on why it stays unrestricted for Owner).
+- **`OutstandingView.vue` deleted; its content (full-activity feed + by-
+  player summary, void trigger included) merged wholesale into
+  `DashboardView.vue`**, which Accountant and Owner already share. Removed
+  the `/outstanding` route, its `outstanding` nav tab, and the "View
+  outstanding ledger" quick-link (now redundant — it's inline on the same
+  page). `DashboardView.vue` now fetches `/players/` + `/outstanding/`
+  alongside `/dashboard/`.
+- **Payout history distinguishes Approved from Auto-approved.** A payout at
+  or under `ClubSettings.payout_auto_approve_threshold` gets
+  `approved_by=None` (see `_execute_payout_transfer`, 2026-09-23 session
+  above) — `PayoutsView.vue`'s history badge now checks
+  `status === 'APPROVED' && !approved_by` and renders "Auto-approved" in
+  its own cool-blue badge (`--status-auto-approved-bg/text`, new tokens in
+  `tokens.css`), instead of both cases reading as a plain "APPROVED". No
+  backend change needed — `approved_by` was already on `TransactionSerializer`.
+
+### Hi-fi Game Days page: paginated list + inline detail + per-player drill-down (2026-09-23)
+Implements the lo-fi Game Days wireframe from this session for real.
+`GameDayDetailView.vue` and its standalone `/game-days/:id` route are gone —
+`GameDaysListView.vue` now carries the whole thing:
+- **List paginated 7/page** (client-side — the full list was already fetched
+  in one call, no new endpoint), with Prev/Next + numbered page buttons and
+  a "Showing X–Y of N" label.
+- **Clicking "View" on a row opens that game-day's detail inline, below the
+  list on the same page** (scrolls to it), instead of navigating away — the
+  same stat grid, full club-wide ledger, and players-seated list
+  `GameDayDetailView.vue` had, just relocated. Clicking "View" again (now
+  "Hide") on the open row collapses it; a "× Close" button in the detail
+  header does the same.
+- **New: tapping a seated player's pill narrows the view to just their own
+  activity** — a 4-box mini stat row (chips out, payments, chips returned,
+  balance) plus that player's own ledger, replacing the club-wide ledger
+  panel while a player's selected. No new backend endpoint: reuses
+  `GET /game-days/{id}/players/{player_id}/ledger/` (already existed for
+  `RosterDetailView.vue`'s own per-game-day section) — the mini stats are
+  summed client-side from those rows (chips out/returned by type, payments
+  by the same 4 `PAYMENT_TYPES` `gaming/selectors.py`'s
+  `game_day_summary_data` already uses), voided rows excluded from the
+  sums but still shown (struck through) in the ledger table itself.
+- Void still works from either ledger (club-wide or per-player) — reloads
+  whichever is showing afterward.
+- Confirmed via search that nothing else in the app linked to
+  `/game-days/:id` before removing the route.
+
+### Fixed: "Owed to players" stat card had a hardcoded "7 players" (2026-09-23)
+`DashboardView.vue`'s "Owed by players" card correctly used `totals.debtor_count`;
+its sibling "Owed to players" card had a literal `7 players` in the template
+instead — never wired to real data. `selectors.dashboard_totals()` now
+returns a 4-tuple (`total_debt, total_credit, debtor_count, creditor_count`)
+instead of 3 — `creditor_count` computed the same way `debtor_count` already
+was (count of players with `balance > 0` from the same grouped query, no
+extra query). `DashboardView` (gaming/views.py) adds `creditor_count` to the
+response for both Accountant and Owner. Test added:
+`test_dashboard_creditor_count_is_computed_not_hardcoded`.
+
+### Hi-fi sidebar nav + FX Rates moved to Settings + rake-this-month stat (2026-09-23)
+- **Hi-fi sidebar nav for Owner/Accountant/Floor Manager.** `AppShell.vue`'s
+  bottom `.tabbar` is retired for these roles (Cashier still has no nav —
+  `tabs.length === 0` for that role either way, unaffected) in favor of a
+  left sidebar below the topbar, per the lo-fi nav review sketch: `.shell`
+  now stacks `.topbar` over a new `.below-topbar` row (`.sidebar` +
+  `.content` side by side, `min-height: 0` load-bearing so `.content`'s own
+  scroll still works — same fix as the earlier `height: 100vh` stage change).
+  `tabs` is split into `mainTabs`/`settingsTab` computeds so Settings can
+  render pinned to the bottom of the sidebar, below a spacer, matching the
+  sketch — `tabs` itself is unchanged, still the one source of truth.
+- **FX Rates moved from Admin to Settings**, into the Owner-only block
+  (`ClubSettingsView.vue`, alongside Approvals and Payout auto-approval) —
+  same `/conversion-rates/`+`set_rate` endpoints, state, and markup, just
+  relocated; `AdminView.vue` loses the section, its now-unused state/
+  functions, and its FX-only CSS. Still gated to Owner only (the section
+  itself — the Settings route stays open to Floor Manager for Tables above
+  it), matching the old Owner-only Admin route's behavior exactly.
+- **Owner Dashboard: "Unreturned chips" → "Total rake this month".** New
+  `selectors.total_rake_this_month()` (RAKE transactions since the start of
+  the current Africa/Lagos calendar month, live — not gated behind a
+  game-day close the way `outstanding_chips_total()`'s `GameDaySummary` rows
+  are). `DashboardView` (gaming/views.py) now sends `total_rake_this_month`
+  instead of `outstanding_chips` for OWNER; ACCOUNTANT's response is
+  unchanged (`outstanding_chips`, unaffected — this was an Owner-dashboard-
+  only ask). Frontend: `DashboardView.vue`'s 3rd stat card branches on
+  whichever field actually came back.
+
+### Owner Dashboard's per-load computation, explained (not fixed) (2026-09-23)
+Asked, not filed as a bug: `GET /dashboard/` (gaming/views.py's
+`DashboardView`) recomputes everything from raw `Transaction` rows on every
+single request, no caching, no stored running totals anywhere:
+- `selectors.dashboard_totals()` — every non-voided Transaction with a
+  player, grouped by player and summed (`signed_amount`) in one query, then
+  split into "owed by"/"owed to"/debtor-count with a **Python loop over
+  every player** (not done in the DB) — the heaviest of the three, and the
+  one that gets slower as the player roster grows, independent of how much
+  activity happened recently.
+- `selectors.main_account_balance()` (Owner only) — every MAIN_ACCOUNT_FILTER
+  Transaction ever posted, summed.
+- `selectors.outstanding_chips_total()` (Accountant) / `total_rake_this_month()`
+  (Owner, new this session) — the former sums every closed game-day's
+  `chips_variance` ever recorded; the latter scopes to the current month, so
+  it's the one number here that doesn't grow unbounded with the club's age.
+At this club's current scale (per PLAN.md's own "accepted trade-off" note on
+the Payouts page's client-side filtering) this is fine — flagged here only
+because the question was asked, not because it's misbehaving. If it ever
+needs to change, the shape would likely be a stored per-player running
+balance (maintained incrementally by `record_transaction`, the way
+`GameDayPlayer`/`GameDaySummary` already snapshot other totals) rather than
+recomputing the whole ledger on every dashboard load.
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`
@@ -793,6 +1208,18 @@ Today the Paystack integration (secret/public keys) is env-var-only (`settings.P
 - [ ] Period-over-period reporting (weekly/monthly trends, top debtors)
 - [ ] Search/filter/export across player lists, game-day history, ledgers
 - [ ] "Unattributed payment" queue (money landing outside the DVA-linked flow)
+- [ ] Flag a void at void-time when it would silently create/change a chips
+  excess (voiding a `CHIPS_OUT` after its matching `CHIPS_IN` already
+  posted) — currently only surfaces later, at close, via `chips_variance`
+- [ ] Idle/session timeout at the Cashier desk (a logged-in session left
+  unattended has no auto-lock today)
+- [ ] Shift handoff — no record of "Cashier A hands off to Cashier B"
+  mid-game-day
+- [ ] A path back in for a forgotten entry discovered after close (deal/
+  write-off can still post to a closed game-day; nothing else can)
+- [ ] Merge/delete path for a duplicate/mistaken player registration
+  ("+ New Player" always creates a real, permanent `Player` row)
+- [ ] Printable/exportable end-of-night report for the Cashier to hand over
 
 ---
 

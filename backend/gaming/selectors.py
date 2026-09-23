@@ -71,7 +71,11 @@ def _with_running_balance(queryset, partition_by=None):
     ZERO to the running balance, via this separate `contribution` annotation
     the window function sums over instead of summing signed_amount directly.
     """
-    queryset = _with_signed_amount(queryset).order_by('created_at')
+    # `id` as a tiebreaker — two rows created in the same request (e.g.
+    # seating auto-issuing a CHIPS_OUT) can share a created_at down to the
+    # microsecond; `id` guarantees a stable, insertion-order sort instead of
+    # leaving ties to the database's whim.
+    queryset = _with_signed_amount(queryset).order_by('created_at', 'id')
     queryset = queryset.annotate(
         contribution=Case(
             When(is_voided=True, then=ZERO),
@@ -83,7 +87,7 @@ def _with_running_balance(queryset, partition_by=None):
         running_balance=Window(
             expression=Sum('contribution'),
             partition_by=partition_by,
-            order_by=F('created_at').asc(),
+            order_by=[F('created_at').asc(), F('id').asc()],
         )
     )
 
@@ -157,6 +161,25 @@ def player_game_day_balance(player, game_day):
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
 
 
+def player_has_failed_payout(player, game_day):
+    """
+    Whether this player currently has a payout stuck at TRANSFER_FAILED
+    tonight — Owner approved it but the real transfer didn't go through
+    (see gaming.services.approve_payout). A Cashier who initiated the
+    payout otherwise has no way to learn this short of asking the Owner,
+    so it's surfaced as a status badge on the Cashier's player panel
+    (see GameDaySeatedPlayerSerializer.get_payout_failed). Clears itself
+    once the Owner retries approve_payout successfully (APPROVED) or
+    rejects it (REJECTED + is_voided) — both move the same Transaction
+    row off TRANSFER_FAILED, so no separate "acknowledge" step is needed.
+    Added 2026-09-23.
+    """
+    return Transaction.objects.filter(
+        game_day=game_day, player=player, type=Transaction.Type.PAYOUT,
+        status=Transaction.Status.TRANSFER_FAILED, is_voided=False,
+    ).exists()
+
+
 def main_account_balance():
     qs = _with_signed_amount(Transaction.objects.filter(MAIN_ACCOUNT_FILTER, is_voided=False))
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
@@ -196,14 +219,17 @@ _DEFAULT_MAX_PLAYERS = 9
 
 def max_active_players(game_day):
     """
-    The active-seat cap for THIS game-day — Game.max_players for the game
-    actually being played tonight (Texas Hold'em 9, Omaha 8, ...), or
-    _DEFAULT_MAX_PLAYERS for a legacy game-day with no `game` set. The one
-    place both gaming.services (seating/moving a player) and
-    free_seat_numbers below resolve the cap through, so the two can never
-    drift apart the way the old duplicated constants could. Added
-    2026-09-21.
+    The active-seat cap for THIS game-day — Table.max_players (Owner/Floor-
+    Manager-editable, added 2026-09-23) when the table has its own override,
+    else Game.max_players for the game actually being played tonight (Texas
+    Hold'em 9, Omaha 8, ...), else _DEFAULT_MAX_PLAYERS for a legacy
+    game-day with no `game` set. The one place both gaming.services
+    (seating/moving a player) and free_seat_numbers below resolve the cap
+    through, so the two can never drift apart the way the old duplicated
+    constants could. Added 2026-09-21.
     """
+    if game_day.table_id and game_day.table.max_players:
+        return game_day.table.max_players
     if game_day.game_id:
         return game_day.game.max_players
     return _DEFAULT_MAX_PLAYERS
@@ -233,6 +259,31 @@ PAYMENT_TYPES = {
 
 def _sum_amount(qs):
     return qs.aggregate(total=Coalesce(Sum('amount'), ZERO))['total']
+
+
+def game_day_chips_totals(game_day):
+    """
+    Live chips out/in/rake/tip totals for one game-day (not the frozen
+    close-time summary — see game_day_summary_data for that). Added
+    2026-09-22 so record_transaction can enforce "chips returned can never
+    exceed chips issued" before a new CHIPS_IN posts, catching a miscount on
+    the spot rather than only at close (where chips_variance would
+    otherwise be the first place it surfaced).
+
+    rake_total/tips_total added 2026-09-23: rake and tips are chips that
+    legitimately never come back as a CHIPS_IN (skimmed from play / handed
+    to staff — same reasoning as game_day_summary_data's chips_variance,
+    which this now mirrors) — a game-day-wide cap that didn't net these out
+    would let more chips be "returned" than could physically still be on
+    the table.
+    """
+    txns = Transaction.objects.filter(game_day=game_day, is_voided=False)
+    return {
+        'chips_out_total': _sum_amount(txns.filter(type=Transaction.Type.CHIPS_OUT)),
+        'chips_in_total': _sum_amount(txns.filter(type=Transaction.Type.CHIPS_IN)),
+        'rake_total': _sum_amount(txns.filter(type=Transaction.Type.RAKE)),
+        'tips_total': _sum_amount(txns.filter(type=Transaction.Type.TIP)),
+    }
 
 
 def game_day_summary_data(game_day):
@@ -272,10 +323,33 @@ def outstanding_chips_total():
     return GameDaySummary.objects.aggregate(total=Coalesce(Sum('chips_variance'), ZERO))['total']
 
 
+def total_rake_this_month():
+    """
+    Club-wide RAKE total since the start of the current calendar month
+    (Africa/Lagos — settings.TIME_ZONE), across every game-day, open or
+    closed alike (unlike outstanding_chips_total, which only ever sees
+    closed game-days via GameDaySummary — rake posts live as RAKE
+    transactions the moment it's recorded, no close needed to count here).
+    Feeds the Owner Dashboard's "Total rake this month" stat card, which
+    replaced "Unreturned chips" there on 2026-09-23 — Accountant's own
+    dashboard still gets outstanding_chips_total, unchanged.
+    """
+    start_of_month = timezone.localtime(timezone.now()).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0,
+    )
+    return _sum_amount(
+        Transaction.objects.filter(type=Transaction.Type.RAKE, is_voided=False, created_at__gte=start_of_month)
+    )
+
+
 def dashboard_totals():
     """
-    (total owed BY players, total owed TO players, debtor count) across every
-    player, in a single grouped query — feeds the Accountant/Owner dashboard.
+    (total owed BY players, total owed TO players, debtor count, creditor
+    count) across every player, in a single grouped query — feeds the
+    Accountant/Owner dashboard. creditor_count added 2026-09-23 — the
+    "Owed to players" stat card was reading debtor_count's own sibling
+    number off a hardcoded "7 players" in DashboardView.vue until then; it
+    now comes from here like everything else on that card.
     """
     per_player = (
         _with_signed_amount(Transaction.objects.filter(is_voided=False, player__isnull=False))
@@ -285,7 +359,8 @@ def dashboard_totals():
     total_debt = sum((-row['balance'] for row in per_player if row['balance'] < 0), Decimal('0'))
     total_credit = sum((row['balance'] for row in per_player if row['balance'] > 0), Decimal('0'))
     debtor_count = sum(1 for row in per_player if row['balance'] < 0)
-    return total_debt, total_credit, debtor_count
+    creditor_count = sum(1 for row in per_player if row['balance'] > 0)
+    return total_debt, total_credit, debtor_count, creditor_count
 
 
 def _profit_split_periods_elapsed(arrangement, now):

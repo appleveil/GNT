@@ -3,14 +3,19 @@ import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useToast } from '@/composables/useToast'
 
-// Owner-only admin page (Phase C, 2026-09-14) — three CRUD-lite sections on
-// one page rather than three separate nav tabs, since each is small: Staff
-// accounts, Floor Managers, FX Rates. See PLAN.md's Phase C for why each
-// backend piece here is either already-built (Floor Manager PIN reset,
-// chips_limit... not here, that's RosterDetailView) or the one genuinely new
-// backend addition (staff password reset — StaffUserSerializer used for
-// update has no password field at all; POST /staff-users/{id}/reset-password/
-// is new).
+// Owner-only admin page (Phase C, 2026-09-14) — CRUD-lite sections on one
+// page rather than separate nav tabs, since each is small: Staff accounts,
+// Other Staff (added 2026-09-23), Floor Managers. See PLAN.md's Phase C for
+// why each backend piece here is either already-built (Floor Manager PIN
+// reset, chips_limit... not here, that's RosterDetailView) or the one
+// genuinely new backend addition (staff password reset —
+// StaffUserSerializer used for update has no password field at all; POST
+// /staff-users/{id}/reset-password/ is new).
+//
+// FX Rates lived here as a 4th section until 2026-09-23, when it moved to
+// the Settings page's own Owner-only block (ClubSettingsView.vue) — same
+// data/endpoints, just grouped with the club's other Owner-tunable numbers
+// instead of the staff-roster sections here.
 const toast = useToast()
 
 // ── Staff accounts ────────────────────────────────────────────────────────
@@ -74,6 +79,58 @@ async function onSubmitReset(user) {
     toast.error(err.response?.data?.password?.[0] || 'Could not reset that password.')
   } finally {
     resetSubmitting.value = false
+  }
+}
+
+// ── Other Staff (Masseuse/Dealer/Service) ───────────────────────────────────
+// Added 2026-09-23, per the Owner's request to add these three as staff
+// types from this page — briefly built as real StaffUser logins (see
+// "Staff accounts" above), then corrected the same day once it was
+// clarified none of the three ever actually log in. accounts.StaffMember
+// is the same named-recipient roster the Masseuse tip category uses (see
+// gaming.models.Transaction.masseuse) generalized with a `role` field —
+// Dealer/Service are pure record-keeping here, not wired into anything
+// else yet. No username/password, no dashboard.
+const otherStaff = ref([])
+const otherStaffLoading = ref(true)
+const newOtherStaff = ref({ name: '', role: 'MASSEUSE' })
+const otherStaffCreating = ref(false)
+const otherStaffError = ref('')
+const OTHER_STAFF_ROLE_LABEL = { MASSEUSE: 'Masseuse', DEALER: 'Dealer', SERVICE: 'Service' }
+
+async function loadOtherStaff() {
+  otherStaffLoading.value = true
+  try {
+    const { data } = await api.get('/staff-members/')
+    otherStaff.value = data
+  } catch {
+    toast.error('Could not load staff.')
+  } finally {
+    otherStaffLoading.value = false
+  }
+}
+
+async function onCreateOtherStaff() {
+  otherStaffError.value = ''
+  otherStaffCreating.value = true
+  try {
+    await api.post('/staff-members/', newOtherStaff.value)
+    newOtherStaff.value = { name: '', role: newOtherStaff.value.role }
+    await loadOtherStaff()
+    toast.success('Staff member added.')
+  } catch (err) {
+    otherStaffError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add this person.'
+  } finally {
+    otherStaffCreating.value = false
+  }
+}
+
+async function onToggleOtherStaffActive(person) {
+  try {
+    const { data } = await api.patch(`/staff-members/${person.id}/`, { is_active: !person.is_active })
+    Object.assign(person, data)
+  } catch {
+    toast.error('Could not update this person.')
   }
 }
 
@@ -146,78 +203,18 @@ async function onSubmitFmReset(fm) {
   }
 }
 
-// ── FX Rates ───────────────────────────────────────────────────────────────
-const rates = ref([])
-const ratesLoading = ref(true)
-const gameDays = ref([])
-const newRate = ref({ currency: 'USD', rate_to_naira: '', game_day: '' })
-const rateSubmitting = ref(false)
-const rateError = ref('')
-
-async function loadRates() {
-  ratesLoading.value = true
-  try {
-    const [ratesRes, gameDaysRes] = await Promise.all([
-      api.get('/conversion-rates/'),
-      api.get('/game-days/'),
-    ])
-    rates.value = ratesRes.data
-    gameDays.value = gameDaysRes.data
-  } catch {
-    toast.error('Could not load FX rates.')
-  } finally {
-    ratesLoading.value = false
-  }
-}
-
-// Standing (game_day: null) rate per currency — the most recently created
-// row, since a rate change is always a new row, never an edit (immutable
-// once created, per SCHEMA.md). rates.value comes back newest-first already
-// (ConversionRateViewSet has no explicit ordering override, but set_rate
-// creates rows in order — sort defensively by created_at desc to be sure).
-const standingByCurrency = computed(() => {
-  const sorted = rates.value.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-  const found = {}
-  for (const r of sorted) {
-    if (r.game_day == null && !(r.currency in found)) found[r.currency] = r
-  }
-  return found
-})
-const recentRates = computed(() => rates.value.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 10))
-
-async function onSetRate() {
-  rateError.value = ''
-  rateSubmitting.value = true
-  try {
-    const payload = { currency: newRate.value.currency, rate_to_naira: newRate.value.rate_to_naira }
-    if (newRate.value.game_day) payload.game_day = newRate.value.game_day
-    await api.post('/conversion-rates/set_rate/', payload)
-    newRate.value = { currency: newRate.value.currency, rate_to_naira: '', game_day: '' }
-    await loadRates()
-    toast.success('Rate set.')
-  } catch (err) {
-    rateError.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not set this rate.'
-  } finally {
-    rateSubmitting.value = false
-  }
-}
-
 onMounted(() => {
   loadStaff()
+  loadOtherStaff()
   loadFloorManagers()
-  loadRates()
 })
-
-function formatDate(iso) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
       <h1>Admin</h1>
-      <p>Staff accounts, Floor Managers, and FX rates.</p>
+      <p>Staff accounts, other staff, and Floor Managers.</p>
     </div>
 
     <div class="card section-card">
@@ -259,6 +256,34 @@ function formatDate(iso) {
     </div>
 
     <div class="card section-card">
+      <div class="section-title">Other Staff</div>
+      <p class="section-note">Masseuse, Dealer, Service — named records only, no login or dashboard of their own.</p>
+      <p v-if="otherStaffLoading" class="muted">Loading…</p>
+      <template v-else>
+        <p v-if="!otherStaff.length" class="muted">No one added yet.</p>
+        <div v-for="p in otherStaff" :key="p.id" class="row">
+          <div class="row-info">
+            <div class="row-name">{{ p.name }}</div>
+            <div class="row-sub">{{ OTHER_STAFF_ROLE_LABEL[p.role] }}</div>
+          </div>
+          <span class="badge" :class="p.is_active ? 'badge--approved' : 'badge--closed'">{{ p.is_active ? 'active' : 'inactive' }}</span>
+          <button class="link-btn" type="button" @click="onToggleOtherStaffActive(p)">{{ p.is_active ? 'Deactivate' : 'Activate' }}</button>
+        </div>
+
+        <form class="create-form" @submit.prevent="onCreateOtherStaff">
+          <input v-model="newOtherStaff.name" type="text" placeholder="Name" required class="ff" />
+          <select v-model="newOtherStaff.role" class="ff">
+            <option value="MASSEUSE">Masseuse</option>
+            <option value="DEALER">Dealer</option>
+            <option value="SERVICE">Service</option>
+          </select>
+          <button class="btn btn--primary" type="submit" :disabled="otherStaffCreating">{{ otherStaffCreating ? 'Adding…' : '+ Add' }}</button>
+        </form>
+        <p v-if="otherStaffError" class="form-error">{{ otherStaffError }}</p>
+      </template>
+    </div>
+
+    <div class="card section-card">
       <div class="section-title">Floor Managers</div>
       <p class="section-note">
         This is the physical-count PIN-witness credential — separate from a Floor Manager's own login
@@ -293,44 +318,6 @@ function formatDate(iso) {
           <button class="btn btn--primary" type="submit" :disabled="fmCreating">{{ fmCreating ? 'Adding…' : '+ Add Floor Manager' }}</button>
         </form>
         <p v-if="fmError" class="form-error">{{ fmError }}</p>
-      </template>
-    </div>
-
-    <div class="card section-card">
-      <div class="section-title">FX Rates</div>
-      <p v-if="ratesLoading" class="muted">Loading…</p>
-      <template v-else>
-        <div class="rate-grid">
-          <div v-for="(rate, currency) in standingByCurrency" :key="currency" class="rate-chip">
-            <span class="rate-currency">{{ currency }}</span>
-            <span class="rate-value">{{ Number(rate.rate_to_naira).toLocaleString() }} / ₦1</span>
-          </div>
-          <p v-if="!Object.keys(standingByCurrency).length" class="muted">No standing rate set yet.</p>
-        </div>
-
-        <form class="create-form" @submit.prevent="onSetRate">
-          <select v-model="newRate.currency" class="ff">
-            <option value="USD">USD</option>
-            <option value="GBP">GBP</option>
-            <option value="EUR">EUR</option>
-            <option value="OTHER">Other</option>
-          </select>
-          <input v-model="newRate.rate_to_naira" type="number" min="0" step="0.0001" placeholder="Rate to ₦1" required class="ff" />
-          <select v-model="newRate.game_day" class="ff">
-            <option value="">Standing rate (no override)</option>
-            <option v-for="gd in gameDays" :key="gd.id" :value="gd.id">Override for Game-Day #{{ gd.number }}</option>
-          </select>
-          <button class="btn btn--primary" type="submit" :disabled="rateSubmitting">{{ rateSubmitting ? 'Setting…' : 'Set rate' }}</button>
-        </form>
-        <p v-if="rateError" class="form-error">{{ rateError }}</p>
-
-        <div class="rate-history">
-          <div class="lbl--muted">Recent changes</div>
-          <div v-for="r in recentRates" :key="r.id" class="rate-row">
-            <span>{{ r.currency }} &middot; {{ Number(r.rate_to_naira).toLocaleString() }}{{ r.game_day ? ' (game-day override)' : ' (standing)' }}</span>
-            <span class="rate-date">{{ formatDate(r.created_at) }}</span>
-          </div>
-        </div>
       </template>
     </div>
   </div>
@@ -387,22 +374,4 @@ function formatDate(iso) {
   padding: 8px 12px;
   margin-top: 8px;
 }
-
-.rate-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
-.rate-chip {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
-  min-width: 110px;
-}
-.rate-currency { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; color: var(--text-tertiary); }
-.rate-value { font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: var(--text-primary); }
-
-.rate-history { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
-.lbl--muted { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; }
-.rate-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; font-size: 12.5px; color: var(--text-primary); }
-.rate-date { color: var(--text-tertiary); font-size: 11px; }
 </style>

@@ -8,20 +8,32 @@ import { useToast } from '@/composables/useToast'
 // Bottom sheet — replaces the old routed /players/new page (2026-09-14) so
 // the cashier never leaves the Game Day screen to seat someone.
 //
-// `seatNumber` — always set now (2026-09-21): this is only ever opened by
-// tapping a specific empty seat pill on ActiveGameDayView.vue. The old
-// generic "+ Add Player" button (opened with no seatNumber, multi-select
-// existing-player mode, unassigned seating) was removed as redundant —
-// every empty seat is already its own "add here" tap target — so this
-// modal no longer needs to support a seat-less, multi-person case at all:
-// one seat, one player, exactly like tapping the seat physically would be.
-const props = defineProps({ seatNumber: { type: Number, required: true } })
+// `seatNumber` — set when opened by tapping a specific empty seat pill on
+// ActiveGameDayView.vue (seats them directly, either tab available); null
+// when opened via the general "+ New Player" button (registers a brand-new
+// club-wide Player with no seat yet — they show up under "Unassigned"
+// until moved into one).
+//
+// `newOnly` (added 2026-09-22) — true only for the "+ New Player" button:
+// that entry point is for registering someone brand-new, full stop, no
+// tab choice. Picking an EXISTING player always goes through a seat tap
+// now — there's no "add an existing player with no seat" path any more,
+// closing what used to be a second, less obvious way to do the same thing
+// two different ways.
+const props = defineProps({
+  seatNumber: { type: Number, default: null },
+  newOnly: { type: Boolean, default: false },
+})
 const emit = defineEmits(['close', 'added'])
 
 const gameDay = useGameDayStore()
 const toast = useToast()
 
-const mode = ref('existing') // 'existing' | 'new' — existing is the common case, so it's the default
+// 'existing' is the default for a seat tap (the common case — most empty
+// seats get filled by someone already on the roster); newOnly forces 'new'
+// and the tab switcher itself is hidden (see template), so this never
+// changes away from 'new' in that mode.
+const mode = ref(props.newOnly ? 'new' : 'existing')
 const submitting = ref(false)
 const error = ref('')
 
@@ -30,12 +42,13 @@ const accountCode = ref('')
 const displayName = ref('')
 const bank = ref({ bank_name: '', bank_code: '', account_number: '', account_name: '' })
 
-// Existing player — multi-select against the roster MINUS anyone with a
-// GameDayPlayer row for tonight at all, active OR departed. "Return to
-// Table" was removed 2026-09-15 — a departed player is never re-addable
-// here, only by being issued chips directly (see ActiveGameDayView.vue) —
-// so they must not appear in this list either, closing that side door.
-// Per-game now (Texas Hold'em 9, Omaha 8, ...) — gaming.selectors.
+// Existing player (seat-tap only — see newOnly above) — select against the
+// roster MINUS anyone with a GameDayPlayer row for tonight at all, active
+// OR departed. A departed player never appears here: bringing them back is
+// ActiveGameDayView's own Rejoin at Seat action now (2026-09-22, picks a
+// seat first, then re-activates them in one step) — not this modal, which
+// only ever creates a fresh GameDayPlayer row, never revives an existing
+// one. Per-game now (Texas Hold'em 9, Omaha 8, ...) — gaming.selectors.
 // max_active_players resolves it server-side; GameDaySerializer exposes the
 // resolved number directly as max_players so this never needs its own copy
 // of the game/table lookup. Falls back to 9 only for the brief window before
@@ -47,7 +60,11 @@ const rosterLoading = ref(false)
 const search = ref('')
 const selectedId = ref(null)
 const activeCount = ref(0)
-const isFull = computed(() => activeCount.value >= maxActivePlayers.value)
+// A seat-less add (props.seatNumber null, from the general "+ New Player"
+// button) never takes an active seat, so the table-full cap — which is
+// about seat capacity — doesn't apply to it. Only a seat-scoped add can be
+// blocked by a full table.
+const isFull = computed(() => props.seatNumber != null && activeCount.value >= maxActivePlayers.value)
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return roster.value
@@ -77,7 +94,10 @@ async function loadRoster() {
   }
 }
 
-onMounted(loadRoster)
+// newOnly never shows the existing-player tab, so there's nothing for the
+// roster fetch to serve — skip it entirely rather than loading data that'll
+// never render.
+onMounted(() => { if (!props.newOnly) loadRoster() })
 
 function toggleSelect(id) {
   // One seat, one person — picking a different row replaces the selection.
@@ -156,12 +176,14 @@ function onModeChange(next) {
       <div class="grip" />
       <div class="head">
         <div class="sheet-title">
-          Seat {{ seatNumber }} &mdash; Game-Day #{{ gameDay.current?.number ?? '—' }}
+          {{ seatNumber ? `Seat ${seatNumber}` : 'New Player' }} &mdash; Game-Day #{{ gameDay.current?.number ?? '—' }}
         </div>
         <button class="close-btn" type="button" @click="emit('close')">&times;</button>
       </div>
 
-      <div class="tabs">
+      <!-- newOnly (the "+ New Player" button) skips the tab choice
+           entirely — see its own comment above. -->
+      <div v-if="!newOnly" class="tabs">
         <button
           type="button" class="tab" :class="{ 'tab--active': mode === 'existing' }"
           @click="onModeChange('existing')"
@@ -203,7 +225,7 @@ function onModeChange(next) {
           class="btn btn--primary" type="button" :disabled="isFull || !selectedId || submitting"
           @click="onSubmitExisting"
         >
-          {{ submitting ? 'Seating…' : `Seat in Seat ${seatNumber}` }}
+          {{ submitting ? 'Adding…' : (seatNumber ? `Seat in Seat ${seatNumber}` : 'Add Player') }}
         </button>
       </template>
 
@@ -226,7 +248,7 @@ function onModeChange(next) {
         <p v-if="error" class="form-error">{{ error }}</p>
 
         <button class="btn btn--primary" type="submit" :disabled="submitting">
-          {{ submitting ? 'Seating…' : `Seat in Seat ${seatNumber}` }}
+          {{ submitting ? 'Adding…' : (seatNumber ? `Seat in Seat ${seatNumber}` : 'Add Player') }}
         </button>
       </form>
     </div>

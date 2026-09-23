@@ -7,8 +7,22 @@ import { describeChipsVariance } from '@/utils/chipsVariance'
 // Moved out of ActiveGameDayView.vue (2026-09-21) so the trigger can live in
 // AppShell's topbar instead — see useCloseGameDay.js's header comment.
 // Mounted once in App.vue, alongside AuthorizerConfirmModal/AppToast.
+//
+// Revised 2026-09-22 — the actions row branches into up to three steps
+// (see useCloseGameDay.js's own header comment for the order):
+//   1. close_blocked_reason (hard block, active players) — no actions,
+//      just a dismiss.
+//   2. chip_discrepancy (acknowledge-and-sign-off) — a reason textarea +
+//      "Acknowledge & Continue".
+//   3. rakeConfirmStep (rake is ₦0) — a yes/no prompt.
+//   4. otherwise, the plain "Close Game-Day" button, which now hands off
+//      to the shared Floor-Manager-PIN modal (or Owner-or-FM when a
+//      discrepancy was just acknowledged) via useAuthorizerConfirm.
 const gameDay = useGameDayStore()
-const { preview, closing, error, confirm, cancel } = useCloseGameDay()
+const {
+  preview, error, discrepancyReason, rakeConfirmStep,
+  confirm, acknowledgeDiscrepancy, confirmNoRake, cancelRakeConfirm, cancel,
+} = useCloseGameDay()
 
 const tonightsVariance = computed(() => preview.value ? describeChipsVariance(preview.value.chips_variance) : null)
 const outstandingAfterClose = computed(() => preview.value ? describeChipsVariance(preview.value.outstanding_chips_after_close) : null)
@@ -20,10 +34,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
   <div v-if="preview" class="overlay">
     <div class="dialog card">
       <div class="eyebrow">Close Game-Day #{{ gameDay.current?.number }}?</div>
-      <p class="muted">This locks entries — only the Owner can amend after closing.</p>
 
       <div class="stats">
-        <div class="stat-row"><span>Players seated</span><span class="money">{{ preview.num_players_seated }}</span></div>
+        <div class="stat-row"><span>Total players</span><span class="money">{{ preview.num_players_seated }}</span></div>
         <div class="stat-row"><span>Chips out</span><span class="money">{{ N(preview.chips_out_total) }}</span></div>
         <div class="stat-row"><span>Chips returned</span><span class="money">{{ N(preview.chips_in_total) }}</span></div>
         <div class="stat-row"><span>Payments received</span><span class="money">{{ N(preview.total_payments) }}</span></div>
@@ -41,11 +54,50 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
       <p v-if="error" class="form-error">{{ error }}</p>
 
-      <div class="actions">
+      <!-- Blocked outright — see gaming.services.close_blocked_reason.
+           Nothing to confirm until this is resolved, so no actions row. -->
+      <template v-if="preview.close_blocked_reason">
+        <p class="form-error">{{ preview.close_blocked_reason }}</p>
+        <div class="actions">
+          <button class="btn btn--secondary" type="button" @click="cancel">Close</button>
+        </div>
+      </template>
+
+      <!-- Chip discrepancy — doesn't block closing, but needs a reason
+           before it can proceed (see gaming.services.game_day_chip_discrepancy). -->
+      <template v-else-if="preview.chip_discrepancy">
+        <p class="discrepancy-note">
+          Chips don't reconcile — ₦{{ N(preview.chip_discrepancy.amount) }} {{ preview.chip_discrepancy.direction }}.
+          A player may have walked off with chips, or this may be a miscount — either way, this
+          needs a reason and an Owner or Floor Manager's sign-off to close anyway.
+        </p>
+        <textarea
+          v-model="discrepancyReason" class="reason-field" rows="3"
+          placeholder="What happened? (required)"
+        />
+        <div class="actions">
+          <button class="btn btn--secondary" type="button" @click="cancel">Cancel</button>
+          <button
+            class="btn btn--primary" type="button" :disabled="!discrepancyReason.trim()"
+            @click="acknowledgeDiscrepancy"
+          >Acknowledge &amp; Continue</button>
+        </div>
+      </template>
+
+      <!-- Rake is exactly ₦0 — likely a miscount (forgotten entry), not
+           necessarily a real no-rake night. One extra confirmation before
+           it's locked in. -->
+      <template v-else-if="rakeConfirmStep">
+        <p class="rake-check">Rake for tonight is ₦0 — are you sure none was taken?</p>
+        <div class="actions">
+          <button class="btn btn--secondary" type="button" @click="cancelRakeConfirm">Go back</button>
+          <button class="btn btn--primary" type="button" @click="confirmNoRake">Yes, ₦0 is correct</button>
+        </div>
+      </template>
+
+      <div v-else class="actions">
         <button class="btn btn--secondary" type="button" @click="cancel">Cancel</button>
-        <button class="btn btn--primary" type="button" :disabled="closing" @click="confirm">
-          {{ closing ? 'Closing…' : 'Close Game-Day' }}
-        </button>
+        <button class="btn btn--primary" type="button" @click="confirm">Close Game-Day</button>
       </div>
     </div>
   </div>
@@ -59,10 +111,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  /* Below AuthorizerConfirmModal's 100 — this stays open (preview.value)
+     while the PIN step layers on top of it for the actual close/discrepancy
+     sign-off, same as TransactionEntryModal's own overlay. */
+  z-index: 90;
 }
 .dialog { width: 480px; max-width: 92vw; box-shadow: var(--shadow-md); padding: 24px; }
-.muted { color: var(--text-secondary); font-size: 13px; line-height: 1.6; margin: 8px 0 0; }
 .stats { margin-top: 12px; }
 .stat-row {
   display: flex;
@@ -83,6 +137,36 @@ const N = n => `₦${Number(n).toLocaleString()}`
   font-size: 13px;
   color: var(--danger);
   background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-top: 12px;
+}
+.discrepancy-note {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-top: 12px;
+}
+.reason-field {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 12px;
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+.rake-check {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--warning-text);
+  background: var(--warning-bg);
   border-radius: var(--radius-sm);
   padding: 10px 14px;
   margin-top: 12px;

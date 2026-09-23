@@ -11,6 +11,7 @@ router.register('conversion-rates', views.ConversionRateViewSet, basename='conve
 router.register('transactions', views.TransactionViewSet, basename='transaction')
 
 urlpatterns = [
+    path('club-settings/', views.ClubSettingsView.as_view(), name='club-settings'),
     path('outstanding/', views.OutstandingLedgerView.as_view(), name='outstanding-ledger'),
     path('main-account/ledger/', views.MainAccountLedgerView.as_view(), name='main-account-ledger'),
     path('dashboard/', views.DashboardView.as_view(), name='dashboard'),

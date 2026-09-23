@@ -13,9 +13,15 @@ class StaffUser(AbstractUser):
         OWNER = 'OWNER', 'Owner'
         # A Floor Manager's PIN-witness credential (see FloorManager below)
         # is unchanged and unrelated to this — this is a SEPARATE, real login
-        # for the same real person, added so they can manage the Service
-        # Staff roster themselves (gaming.models.ServiceStaff). See
-        # FloorManager.staff_user for how the two records link.
+        # for the same real person, added so they can manage the StaffMember
+        # roster themselves (gaming.models.Transaction.masseuse points at
+        # accounts.StaffMember). See FloorManager.staff_user for how the two
+        # records link.
+        #
+        # MASSEUSE/DEALER/SERVICE were added here 2026-09-23, then reverted
+        # the same day once it was clarified they never actually log in —
+        # see StaffMember below, which is where they live instead: named,
+        # non-login staff records the Owner adds from the Admin page.
         FLOOR_MANAGER = 'FLOOR_MANAGER', 'Floor Manager'
 
     role = models.CharField(max_length=20, choices=Role.choices)
@@ -73,19 +79,34 @@ class FloorManager(models.Model):
         return self.name
 
 
-class ServiceStaff(models.Model):
+class StaffMember(models.Model):
     """
-    A named tipped-service person (not a Dealer — dealer tips stay
-    anonymous/aggregate) — added 2026-09-17 alongside the Floor Manager
-    login, since managing this roster is a Floor Manager function. Mirrors
-    FloorManager's shape minus the PIN — this is a named recipient a tip
-    gets attributed to, not a witness/authorizer, so no login/PIN of its
-    own. See gaming.models.Transaction.service_staff/tip_category.
+    A named, NON-LOGIN staff record — added 2026-09-17 as "ServiceStaff"
+    (a named tipped person only), renamed to "Masseuse" 2026-09-23 when
+    Transaction.TipCategory's two values were relabeled, then generalized
+    to StaffMember the same day once it was clarified that Masseuse/Dealer/
+    Service should never log in at all: they were briefly added as
+    StaffUser.Role choices (a real login) before that correction — see
+    StaffUser.Role's own comment. This is where they actually belong:
+    Owner-addable from the Admin page, no username/password, no dashboard.
+
+    `role` is one of three: MASSEUSE (named tip recipient — see
+    gaming.models.Transaction.masseuse/tip_category; the ONLY role this
+    FK ever points at, validated in gaming.services.record_transaction),
+    DEALER, or SERVICE — the latter two are pure record-keeping today (an
+    employee directory), not wired into anything else yet. Mirrors
+    FloorManager's shape minus the PIN — a name, not a witness/authorizer.
     """
 
+    class Role(models.TextChoices):
+        MASSEUSE = 'MASSEUSE', 'Masseuse'
+        DEALER = 'DEALER', 'Dealer'
+        SERVICE = 'SERVICE', 'Service'
+
     name = models.CharField(max_length=150)
+    role = models.CharField(max_length=10, choices=Role.choices, default=Role.MASSEUSE)
     is_active = models.BooleanField(default=True)
-    created_by = models.ForeignKey(StaffUser, on_delete=models.PROTECT, related_name='service_staff_added')
+    created_by = models.ForeignKey(StaffUser, on_delete=models.PROTECT, related_name='staff_members_added')
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -98,7 +119,8 @@ class Player(models.Model):
     # Per-game-day credit ceiling, Owner-set-and-edited only; null = no cap. Checked
     # against the player's *current game-day* debt, not a lifetime total — see
     # CONCEPT.md's "Chips limit."
-    chips_limit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # Whole Naira only — no kobo anywhere in this club's figures (2026-09-23).
+    chips_limit = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

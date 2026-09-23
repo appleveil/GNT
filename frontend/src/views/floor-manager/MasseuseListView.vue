@@ -3,14 +3,21 @@ import { ref, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useToast } from '@/composables/useToast'
 
-// Floor Manager's own screen (2026-09-17) — managing the named tipped-
-// Service-staff roster (see gaming.models.Transaction.service_staff/
-// tip_category) is one of a Floor Manager's own functions now that they
-// have a real login. Owner can do this too (ServiceStaffViewSet allows
-// both), but this page lives under the Floor Manager's own nav/role, not
-// Owner's — copies AdminView.vue's Floor-Managers-section pattern exactly
-// (the one proven CRUD-list pattern in this codebase), minus a PIN (a
-// Service Staff record is a named recipient, not a witness/authorizer).
+// Floor Manager's own screen (2026-09-17 as "Service Staff", renamed
+// 2026-09-23 — see gaming.models.Transaction.masseuse/TipCategory's own
+// comment) — managing the named tipped-Masseuse roster is one of a Floor
+// Manager's own functions now that they have a real login. Owner can do
+// this too (StaffMemberViewSet allows both), but this page lives under the
+// Floor Manager's own nav/role, not Owner's — copies AdminView.vue's
+// Floor-Managers-section pattern exactly (the one proven CRUD-list pattern
+// in this codebase), minus a PIN (a named recipient, not a witness/
+// authorizer).
+//
+// Backs onto accounts.StaffMember (generalized 2026-09-23 to also cover
+// Dealer/Service — see that model's own docstring), always scoped to
+// role=MASSEUSE here: this page is specifically the named tip-recipient
+// roster, not the general staff directory (that's the Owner's Admin page,
+// "Other Staff" section).
 const toast = useToast()
 
 const people = ref([])
@@ -22,10 +29,10 @@ const error = ref('')
 async function load() {
   loading.value = true
   try {
-    const { data } = await api.get('/service-staff/')
+    const { data } = await api.get('/staff-members/?role=MASSEUSE')
     people.value = data
   } catch {
-    toast.error('Could not load Service Staff.')
+    toast.error('Could not load Masseuses.')
   } finally {
     loading.value = false
   }
@@ -37,10 +44,10 @@ async function onCreate() {
   error.value = ''
   creating.value = true
   try {
-    await api.post('/service-staff/', { name: newName.value })
+    await api.post('/staff-members/', { name: newName.value, role: 'MASSEUSE' })
     newName.value = ''
     await load()
-    toast.success('Service Staff added.')
+    toast.success('Masseuse added.')
   } catch (err) {
     error.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add this person.'
   } finally {
@@ -50,7 +57,7 @@ async function onCreate() {
 
 async function onToggleActive(person) {
   try {
-    const { data } = await api.patch(`/service-staff/${person.id}/`, { is_active: !person.is_active })
+    const { data } = await api.patch(`/staff-members/${person.id}/`, { is_active: !person.is_active })
     Object.assign(person, data)
   } catch {
     toast.error('Could not update this person.')
@@ -61,8 +68,8 @@ async function onToggleActive(person) {
 <template>
   <div class="page">
     <div class="page-header">
-      <h1>Service Staff</h1>
-      <p>Named people Service tips get attributed to — Dealer tips stay anonymous and don't need anyone added here.</p>
+      <h1>Masseuses</h1>
+      <p>Named people Masseuse tips get attributed to — Service staff tips stay anonymous and don't need anyone added here.</p>
     </div>
 
     <div class="card section-card">
@@ -79,7 +86,7 @@ async function onToggleActive(person) {
 
         <form class="create-form" @submit.prevent="onCreate">
           <input v-model="newName" type="text" placeholder="Name" required class="ff" />
-          <button class="btn btn--primary" type="submit" :disabled="creating">{{ creating ? 'Adding…' : '+ Add Service Staff' }}</button>
+          <button class="btn btn--primary" type="submit" :disabled="creating">{{ creating ? 'Adding…' : '+ Add Masseuse' }}</button>
         </form>
         <p v-if="error" class="form-error">{{ error }}</p>
       </template>

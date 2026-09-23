@@ -20,10 +20,14 @@
 import { ref, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useAuthorizerConfirm } from '@/composables/useAuthorizerConfirm'
+import { usePlainConfirm } from '@/composables/usePlainConfirm'
+import { useClubSettingsStore } from '@/stores/clubSettings'
 
 const props = defineProps({ number: { type: Number, required: true } })
 const emit = defineEmits(['close', 'started'])
 const { confirm } = useAuthorizerConfirm()
+const { plainConfirm } = usePlainConfirm()
+const clubSettings = useClubSettingsStore()
 
 const step = ref('game') // 'game' | 'table' | 'buyin'
 
@@ -77,7 +81,7 @@ function pickTable(table) {
 const N = n => `₦${Number(n).toLocaleString()}`
 
 function onStartConfirm() {
-  confirm({
+  const opts = {
     title: `Open Game-Day #${props.number}`,
     subtitle: `${selectedGame.value.name} · ${selectedTable.value.name} · ${N(buyIn.value)} buy-in`,
     onSubmit: async payload => {
@@ -90,7 +94,13 @@ function onStartConfirm() {
       })
       emit('started', data)
     },
-  })
+  }
+  // ClubSettings.require_approval_open_game_day, Owner-editable (added
+  // 2026-09-23) — off, and this is a plain confirm instead of the PIN
+  // sheet. `=== false` (not just falsy) so a still-loading/failed fetch
+  // (clubSettings.current is null) keeps the safer PIN default.
+  if (clubSettings.current?.require_approval_open_game_day === false) plainConfirm(opts)
+  else confirm(opts)
 }
 </script>
 

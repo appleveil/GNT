@@ -59,6 +59,7 @@
 .badge--closed     { background: var(--status-closed-bg);    color: var(--status-closed-text); }
 .badge--pending    { background: var(--status-pending-bg);   color: var(--status-pending-text); }
 .badge--approved   { background: var(--status-approved-bg);  color: var(--status-approved-text); }
+.badge--auto-approved { background: var(--status-auto-approved-bg); color: var(--status-auto-approved-text); }
 .badge--rejected   { background: var(--status-rejected-bg);  color: var(--status-rejected-text); }
 .badge--voided     { background: var(--status-voided-bg);    color: var(--status-voided-text); text-decoration: line-through; }
 

@@ -8,7 +8,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
+from .models import FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 from .permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner
 
 PIN_MIN_LENGTH = 4
@@ -17,8 +17,8 @@ from .serializers import (
     FloorManagerSerializer,
     PlayerBankAccountSerializer,
     PlayerSerializer,
-    ServiceStaffSerializer,
     StaffLoginSerializer,
+    StaffMemberSerializer,
     StaffPasswordResetSerializer,
     StaffUserCreateSerializer,
     StaffUserSerializer,
@@ -122,19 +122,30 @@ class FloorManagerViewSet(viewsets.ModelViewSet):
         return [IsOwner()]
 
 
-class ServiceStaffViewSet(viewsets.ModelViewSet):
+class StaffMemberViewSet(viewsets.ModelViewSet):
     """
-    Named tipped-service people (added 2026-09-17) — read: any authenticated
-    staff (needed for the Tip entry form's picker); write (create/deactivate):
-    Floor Manager or Owner, matching CONCEPT.md's framing of "adding these
-    service people" as a Floor Manager function, with the Owner able to do
-    it too as usual.
+    Named, non-login staff (added 2026-09-17 as "Service Staff", generalized
+    2026-09-23 — see StaffMember's own docstring, and its Role's MASSEUSE/
+    DEALER/SERVICE) — read: any authenticated staff (needed for the Tip
+    entry form's Masseuse picker, and the Admin page's own listing); write
+    (create/deactivate): Floor Manager or Owner, matching CONCEPT.md's
+    framing of "adding these service people" as a Floor Manager function,
+    with the Owner able to do it too as usual.
+
+    `?role=MASSEUSE` (added 2026-09-23) scopes the list to one role —
+    used by the Tip entry form (only a Masseuse can be a named tip
+    recipient) and by the Floor Manager's own "Masseuses" screen, which
+    only ever shows/creates that one role. Mirrors StaffUserViewSet.owners'
+    own role-filtering pattern.
     """
 
-    serializer_class = ServiceStaffSerializer
+    serializer_class = StaffMemberSerializer
 
     def get_queryset(self):
-        qs = ServiceStaff.objects.all().order_by('name')
+        qs = StaffMember.objects.all().order_by('name')
+        role = self.request.query_params.get('role')
+        if role:
+            qs = qs.filter(role=role)
         if getattr(self.request.user, 'role', None) not in (StaffUser.Role.FLOOR_MANAGER, StaffUser.Role.OWNER):
             qs = qs.filter(is_active=True)
         return qs

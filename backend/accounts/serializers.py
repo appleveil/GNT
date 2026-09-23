@@ -3,7 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
+from .models import FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 
 
 class StaffLoginSerializer(TokenObtainPairSerializer):
@@ -94,14 +94,14 @@ class FloorManagerSerializer(serializers.ModelSerializer):
         return instance
 
 
-class ServiceStaffSerializer(serializers.ModelSerializer):
+class StaffMemberSerializer(serializers.ModelSerializer):
     class Meta:
-        model = ServiceStaff
-        fields = ['id', 'name', 'is_active', 'created_by', 'created_at']
+        model = StaffMember
+        fields = ['id', 'name', 'role', 'is_active', 'created_by', 'created_at']
         read_only_fields = ['id', 'created_by', 'created_at']
 
     def create(self, validated_data):
-        return ServiceStaff.objects.create(**validated_data, created_by=self.context['request'].user)
+        return StaffMember.objects.create(**validated_data, created_by=self.context['request'].user)
 
 
 class PlayerBankAccountSerializer(serializers.ModelSerializer):

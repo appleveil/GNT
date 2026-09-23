@@ -1,10 +1,13 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
 import { useToast } from '@/composables/useToast'
+import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
+import { canVoidTransaction } from '@/utils/canVoid'
 
 // Accountant/Owner back-office dashboard (Phase B, 2026-09-14). Phase C
 // (2026-09-14) adds two Owner-only pieces: main_account_balance (already
@@ -14,6 +17,16 @@ import { useToast } from '@/composables/useToast'
 // confirmed in gaming/services.py's _resolve_owner_or_floor_manager, distinct
 // from the Cashier-device picker-then-PIN flow in ActiveGameDayView.vue
 // (whose nextGameDayNumber() this mirrors).
+//
+// The Outstanding ledger (feed + by-player summary) moved in here wholesale
+// from its own /outstanding page on 2026-09-23 — that page is gone, this is
+// now its only home, for both roles that already share this page.
+//
+// Also 2026-09-23: the 3rd stat card is role-conditional now.
+// total_rake_this_month (Owner only) replaced "Unreturned chips" there;
+// Accountant still gets outstanding_chips as before — the two fields are
+// mutually exclusive per role in the API response, so the template below
+// just checks which one showed up.
 const router = useRouter()
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
@@ -22,6 +35,11 @@ const toast = useToast()
 const totals = ref(null)
 const loading = ref(true)
 const opening = ref(false)
+
+const players = ref([])
+const outstandingRows = ref([])
+const outstandingLoading = ref(true)
+const voidTarget = ref(null)
 
 async function load() {
   loading.value = true
@@ -32,6 +50,21 @@ async function load() {
     toast.error('Could not load dashboard totals.')
   } finally {
     loading.value = false
+  }
+  // Own try/catch, own toast — a failure here never blocks the totals above
+  // from showing, same convention as the gameDay.fetchCurrent() call below.
+  outstandingLoading.value = true
+  try {
+    const [playersRes, ledgerRes] = await Promise.all([
+      api.get('/players/'),
+      api.get('/outstanding/'),
+    ])
+    players.value = playersRes.data
+    outstandingRows.value = ledgerRes.data
+  } catch {
+    toast.error('Could not load the outstanding ledger.')
+  } finally {
+    outstandingLoading.value = false
   }
   // Separate from the totals fetch above (own try/catch, own toast) so a
   // failure here never blocks the totals from showing — see gameDay.js's
@@ -62,6 +95,37 @@ async function onOpenGameDay() {
   }
 }
 
+function playerName(playerId) {
+  return players.value.find(p => p.id === playerId)?.display_name || ''
+}
+
+function canVoid(row) {
+  return canVoidTransaction(row, auth.user)
+}
+function onVoided() {
+  voidTarget.value = null
+  toast.success('Entry voided.')
+  load()
+}
+
+// One summary row per player — their current outstanding balance is the
+// running_balance on their chronologically LAST row (outstandingRows is
+// ascending by created_at, as the API returns it), sorted biggest-absolute-
+// balance first so the players who owe the most (or are owed the most)
+// surface top.
+const byPlayer = computed(() => {
+  const latest = new Map() // player id -> last row seen, in ascending order
+  for (const row of outstandingRows.value) {
+    if (row.player) latest.set(row.player, row)
+  }
+  return Array.from(latest.values())
+    .map(row => ({ playerId: row.player, name: playerName(row.player), balance: Number(row.running_balance) }))
+    .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance))
+})
+
+const feed = computed(() => outstandingRows.value.slice().reverse().map(row => ({ ...row, player_name: playerName(row.player) })))
+const playerTo = row => (row.player ? `/roster/${row.player}` : null)
+
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
 
@@ -77,29 +141,26 @@ const N = n => `₦${Number(n).toLocaleString()}`
     <template v-else-if="totals">
       <div class="stat-grid">
         <div class="card stat-card">
-          <div class="stat-label">Outstanding from players</div>
-          <div class="stat-value money--neg">{{ N(totals.total_outstanding_from_players) }}</div>
-          <div class="stat-sub">owed to the club</div>
+          <div class="stat-label">Owed by players</div>
+          <div class="stat-value money--pos">{{ N(totals.total_outstanding_from_players) }}</div>
+          <div class="stat-stub">{{ totals.debtor_count }} players</div>
         </div>
         <div class="card stat-card">
-          <div class="stat-label">Outstanding to players</div>
-          <div class="stat-value money--pos">{{ N(totals.total_outstanding_to_players) }}</div>
-          <div class="stat-sub">owed by the club</div>
+          <div class="stat-label">Owed to players</div>
+          <div class="stat-value money--neg">{{ N(totals.total_outstanding_to_players) }}</div>
+          <div class="stat-stub">{{ totals.creditor_count }} players</div>
         </div>
-        <div class="card stat-card">
-          <div class="stat-label">Debtors</div>
-          <div class="stat-value">{{ totals.debtor_count }}</div>
-          <div class="stat-sub">players in the red</div>
+        <div v-if="totals.total_rake_this_month !== undefined" class="card stat-card">
+          <div class="stat-label">Total rake this month</div>
+          <div class="stat-value">{{ N(totals.total_rake_this_month) }}</div>
         </div>
-        <div class="card stat-card">
-          <div class="stat-label">Outstanding chips</div>
+        <div v-else class="card stat-card">
+          <div class="stat-label">Unreturned chips</div>
           <div class="stat-value">{{ N(totals.outstanding_chips) }}</div>
-          <div class="stat-sub">unreturned, across closed game-days</div>
         </div>
         <div v-if="totals.main_account_balance !== undefined" class="card stat-card">
           <div class="stat-label">Main account balance</div>
           <div class="stat-value">{{ N(totals.main_account_balance) }}</div>
-          <div class="stat-sub">the club's real bank balance</div>
         </div>
       </div>
 
@@ -123,16 +184,42 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
 
       <div class="quick-links">
-        <button class="card link-card" type="button" @click="router.push('/outstanding')">
-          <div class="link-title">View outstanding ledger &rarr;</div>
-          <div class="link-sub">Every player's cross-game-day running balance.</div>
-        </button>
         <button class="card link-card" type="button" @click="router.push('/game-days')">
           <div class="link-title">Browse game-day history &rarr;</div>
           <div class="link-sub">Every game-day, open and closed, with full ledgers.</div>
         </button>
       </div>
+
+      <div class="section-heading">
+        <h2>Outstanding</h2>
+        <p>Activity recorded outside any game-day — deals, write-offs, direct payments — with each player's own running balance.</p>
+      </div>
+
+      <p v-if="outstandingLoading" class="muted">Loading…</p>
+      <p v-else-if="!outstandingRows.length" class="muted">No between-game-day activity recorded.</p>
+
+      <div v-else class="grid-two">
+        <div class="card feed-card">
+          <div class="section-title">Full activity</div>
+          <div class="feed">
+            <LedgerTable :rows="feed" show-player :player-to="playerTo" date-format="datetime" voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
+          </div>
+        </div>
+
+        <div class="card summary-card">
+          <div class="section-title">By player</div>
+          <RouterLink v-for="p in byPlayer" :key="p.playerId" :to="`/roster/${p.playerId}`" class="summary-row">
+            <span class="summary-name">{{ p.name }}</span>
+            <span class="money" :class="p.balance > 0 ? 'money--pos' : p.balance < 0 ? 'money--neg' : ''">{{ N(p.balance) }}</span>
+          </RouterLink>
+        </div>
+      </div>
     </template>
+
+    <VoidEntryModal
+      v-if="voidTarget" :transaction="voidTarget" :player-name="playerName(voidTarget.player)"
+      :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
+    />
   </div>
 </template>
 
@@ -162,7 +249,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .gd-title { font-size: 14px; font-weight: 700; color: var(--text-primary); }
 .gd-sub { font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
 
-.quick-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.quick-links { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 16px; }
 .link-card {
   padding: 18px 20px;
   text-align: left;
@@ -174,9 +261,38 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .link-title { font-size: 14px; font-weight: 700; color: var(--accent-text); margin-bottom: 4px; }
 .link-sub { font-size: 12.5px; color: var(--text-secondary); }
 
+/* Outstanding section — carried over from the retired OutstandingView.vue
+   (2026-09-23), styles included. */
+.section-heading { margin: 28px 0 16px; }
+.section-heading h2 { font-size: 17px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
+.section-heading p { font-size: 13px; color: var(--text-secondary); margin: 0; max-width: 620px; }
+
+.grid-two { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+.feed-card, .summary-card { padding: 18px 20px; }
+.section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin-bottom: 12px; }
+
+.feed { border-top: 1px solid var(--border); }
+
+.summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+}
+.summary-row:last-child { border-bottom: none; }
+.summary-name { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.summary-row:hover .summary-name { color: var(--accent-text); }
+.money--pos { color: var(--success-text); }
+.money--neg { color: var(--danger-text); }
+
 @media (max-width: 720px) {
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .quick-links { grid-template-columns: 1fr; }
   .game-day-card { flex-direction: column; align-items: stretch; text-align: center; }
+}
+@media (max-width: 860px) {
+  .grid-two { grid-template-columns: 1fr; }
 }
 </style>

@@ -7,11 +7,24 @@ from rest_framework import status
 
 from lpc_backend.testing import APITestCase, TestCase
 
-from accounts.models import FloorManager, Player, PlayerBankAccount, ServiceStaff, StaffUser
+from accounts.models import FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
-from .models import ConversionRate, Game, GameDay, GameDayPlayer, ProfitSplitArrangement, Table, Transaction
+from .models import ClubSettings, ConversionRate, Game, GameDay, GameDayPlayer, ProfitSplitArrangement, Table, Transaction
+
+
+def _disable_payout_auto_approval():
+    """
+    A negative threshold `amount <= threshold` can never satisfy (even a
+    ₦0 payout) — used by tests written before ClubSettings.
+    payout_auto_approve_threshold existed (default ₦500,000), whose own
+    intent is "stays PENDING_APPROVAL until an Owner acts," not the new
+    threshold feature itself (see PayoutAutoApprovalThresholdTests for that).
+    """
+    obj = ClubSettings.load()
+    obj.payout_auto_approve_threshold = Decimal('-1')
+    obj.save(update_fields=['payout_auto_approve_threshold'])
 
 
 class LedgerMathTests(TestCase):
@@ -217,10 +230,30 @@ class AuthorizationTests(TestCase):
                 3, timezone.now(), self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='0000',
             )
 
-    def test_cashier_can_close_game_day_alone(self):
+    def test_cashier_alone_cannot_close_game_day(self):
+        """Revised 2026-09-22: closing now always requires a Floor Manager
+        PIN — the night's final physical reconciliation, witnessed
+        independently, same as any other physical-count entry. No more
+        Cashier/Owner-alone bypass."""
         gd = services.open_game_day(4, timezone.now(), self.owner)
-        closed = services.close_game_day(gd, self.cashier)
+        with self.assertRaises(AuthorizationError):
+            services.close_game_day(gd, self.cashier)
+
+    def test_owner_alone_cannot_close_game_day_either(self):
+        """No Owner-login bypass, unlike open_game_day/set_conversion_rate —
+        deliberately: an Owner closing solo defeats the point of an
+        independent signature."""
+        gd = services.open_game_day(41, timezone.now(), self.owner)
+        with self.assertRaises(AuthorizationError):
+            services.close_game_day(gd, self.owner)
+
+    def test_floor_manager_pin_can_close_game_day(self):
+        gd = services.open_game_day(42, timezone.now(), self.owner)
+        closed = services.close_game_day(
+            gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
         self.assertEqual(closed.status, GameDay.Status.CLOSED)
+        self.assertEqual(closed.closed_by_floor_manager, self.fm)
 
     def test_accountant_cannot_close_game_day(self):
         gd = services.open_game_day(5, timezone.now(), self.owner)
@@ -270,7 +303,14 @@ class AuthorizationTests(TestCase):
             game_day=gd, player=player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(1000),
             channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
         )
-        services.close_game_day(gd, self.cashier)
+        # A matching (raw, same as the CHIPS_OUT above) CHIPS_IN — this test
+        # is about void authorization after close, not chip reconciliation,
+        # so it needs the close-time gate satisfied, not exercised.
+        Transaction.objects.create(
+            game_day=gd, player=player, type=Transaction.Type.CHIPS_IN, amount=Decimal(1000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
         with self.assertRaises(AuthorizationError):
             services.void_transaction(txn, self.cashier, 'too late')
         services.void_transaction(txn, self.owner, 'owner override')  # should not raise
@@ -279,7 +319,7 @@ class AuthorizationTests(TestCase):
 
     def test_cannot_record_transaction_against_closed_game_day(self):
         gd = services.open_game_day(9, timezone.now(), self.owner)
-        services.close_game_day(gd, self.cashier)
+        services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
         player = Player.objects.create(account_code='WWI 5', display_name='Test5')
         with self.assertRaises(InvalidStateError):
             services.record_transaction(
@@ -289,7 +329,7 @@ class AuthorizationTests(TestCase):
 
     def test_cannot_initiate_payout_against_closed_game_day(self):
         gd = services.open_game_day(10, timezone.now(), self.owner)
-        services.close_game_day(gd, self.cashier)
+        services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
         player = Player.objects.create(account_code='WWI 6', display_name='Test6')
         with self.assertRaises(InvalidStateError):
             services.initiate_payout(player, Decimal(1000), self.cashier, game_day=gd)
@@ -299,6 +339,10 @@ class AuthorizationTests(TestCase):
     @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_test'})
     @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_test'})
     def test_payout_requires_owner_approval(self, mock_create_recipient, mock_initiate_transfer):
+        # Below the default auto-approval threshold — force it off (see
+        # PayoutAutoApprovalThresholdTests for that feature's own tests) so
+        # this keeps testing manual approval, undisturbed by it.
+        _disable_payout_auto_approval()
         gd = services.open_game_day(20, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 4', display_name='Test4')
         PlayerBankAccount.objects.create(
@@ -326,6 +370,7 @@ class AuthorizationTests(TestCase):
         at approval time (Owner-only visibility), leaves the transaction fully
         untouched (still PENDING_APPROVAL, not TRANSFER_FAILED) so it can be
         retried once funds arrive."""
+        _disable_payout_auto_approval()
         gd = services.open_game_day(30, timezone.now(), self.owner)
         player = Player.objects.create(account_code='WWI 16', display_name='Test16')
         PlayerBankAccount.objects.create(
@@ -497,7 +542,9 @@ class GameDayAndTransactionAPITests(APITestCase):
         response = self.client.post('/api/game-days/open/', {'number': 1})
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_owner_can_open_and_cashier_can_close_via_api(self):
+    def test_owner_can_open_but_cashier_alone_cannot_close_via_api(self):
+        """Revised 2026-09-22: closing always requires a Floor Manager PIN
+        now — see services.close_game_day."""
         self.client.force_authenticate(self.owner)
         open_response = self.client.post('/api/game-days/open/', {'number': 2})
         self.assertEqual(open_response.status_code, status.HTTP_201_CREATED)
@@ -505,6 +552,11 @@ class GameDayAndTransactionAPITests(APITestCase):
 
         self.client.force_authenticate(self.cashier)
         close_response = self.client.post(f'/api/game-days/{game_day_id}/close/', {})
+        self.assertEqual(close_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        close_response = self.client.post(f'/api/game-days/{game_day_id}/close/', {
+            'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
         self.assertEqual(close_response.status_code, status.HTTP_200_OK)
         self.assertEqual(close_response.data['status'], GameDay.Status.CLOSED)
 
@@ -514,6 +566,13 @@ class GameDayAndTransactionAPITests(APITestCase):
             game_day=gd, player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(200000),
             channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
         )
+        # Matching CHIPS_IN — this test is about the preview/close data
+        # matching each other, not chip reconciliation; needs the close-time
+        # gate satisfied rather than exercised. See close_blocked_reason.
+        Transaction.objects.create(
+            game_day=gd, player=self.player, type=Transaction.Type.CHIPS_IN, amount=Decimal(200000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
         self.client.force_authenticate(self.cashier)
 
         preview = self.client.get(f'/api/game-days/{gd.id}/close-preview/')
@@ -521,13 +580,187 @@ class GameDayAndTransactionAPITests(APITestCase):
         self.assertEqual(Decimal(str(preview.data['chips_out_total'])), Decimal(200000))
         self.assertIn('num_players_seated', preview.data)
         self.assertIn('outstanding_chips_after_close', preview.data)
+        self.assertEqual(preview.data['active_players_count'], 0)
+        self.assertIsNone(preview.data['close_blocked_reason'])
 
         gd.refresh_from_db()
         self.assertEqual(gd.status, GameDay.Status.OPEN)  # preview must not close it
         self.assertFalse(hasattr(gd, 'summary'))
 
-        close_response = self.client.post(f'/api/game-days/{gd.id}/close/', {})
+        close_response = self.client.post(f'/api/game-days/{gd.id}/close/', {
+            'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
+        })
         self.assertEqual(close_response.data['summary']['chips_out_total'], preview.data['chips_out_total'])
+
+    def test_cannot_close_while_a_player_is_still_active(self):
+        gd = services.open_game_day(43, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        self.assertIn('still at the table', services.close_blocked_reason(gd))
+        with self.assertRaises(InvalidStateError):
+            services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
+
+    def test_chips_shortfall_does_not_hard_block_but_requires_a_reason(self):
+        """Revised 2026-09-22: a chip discrepancy doesn't block closing
+        outright any more (a player may genuinely have walked off with
+        chips) — it must be ACKNOWLEDGED instead. close_blocked_reason
+        (the hard block) stays None; game_day_chip_discrepancy reports the
+        gap; closing without a reason still raises."""
+        gd = services.open_game_day(44, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.leave_table(gd, self.player, operator=self.cashier)  # left owing chips
+        self.assertIsNone(services.close_blocked_reason(gd))  # not a hard block
+        discrepancy = services.game_day_chip_discrepancy(gd)
+        self.assertEqual(discrepancy['direction'], 'short')
+        self.assertEqual(discrepancy['amount'], Decimal(500000))
+        with self.assertRaises(InvalidStateError):
+            services.close_game_day(
+                gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            )  # no discrepancy_reason
+
+    def test_chips_shortfall_closes_with_a_reason_and_fm_signoff(self):
+        gd = services.open_game_day(47, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.leave_table(gd, self.player, operator=self.cashier)
+        closed = services.close_game_day(
+            gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            discrepancy_reason='Player left with chips, refused to return them.',
+        )
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+        self.assertEqual(
+            closed.summary.chip_discrepancy_reason, 'Player left with chips, refused to return them.',
+        )
+
+    def test_chips_shortfall_closes_with_a_reason_and_owner_signoff_no_fm(self):
+        """The sign-off is Owner-OR-Floor-Manager for a discrepancy
+        specifically — wider than the Floor-Manager-only baseline."""
+        gd = services.open_game_day(48, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.leave_table(gd, self.player, operator=self.cashier)
+        closed = services.close_game_day(
+            gd, self.owner, discrepancy_reason='Owner personally witnessed the count.',
+        )
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+
+    def test_chips_excess_also_requires_acknowledgement(self):
+        """The other direction — more came back than makes sense once
+        rake/tips are accounted for (see game_day_chip_discrepancy) — same
+        acknowledge-and-sign-off path, not a separate mechanism."""
+        gd = services.open_game_day(49, timezone.now(), self.owner)
+        winner = Player.objects.create(account_code='WWI 64', display_name='Excess Winner')
+        services.seat_player(gd, self.owner, player=winner)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(100000), recorded_by=self.cashier,
+            game_day=gd, player=winner, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        # A void of the CHIPS_OUT after a matching CHIPS_IN already posted —
+        # one realistic way an excess shows up in practice (the earlier
+        # per-transaction CHIPS_IN check in record_transaction blocks
+        # over-returning at RECORD time, but can't see a later void).
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(100000), recorded_by=self.cashier,
+            game_day=gd, player=winner, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        chips_out_txn = Transaction.objects.get(game_day=gd, player=winner, type=Transaction.Type.CHIPS_OUT)
+        services.void_transaction(chips_out_txn, self.owner, 'test-induced excess')
+        services.leave_table(gd, winner, operator=self.cashier)
+
+        discrepancy = services.game_day_chip_discrepancy(gd)
+        self.assertEqual(discrepancy['direction'], 'excess')
+        with self.assertRaises(InvalidStateError):
+            services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
+        closed = services.close_game_day(
+            gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            discrepancy_reason='Voided a chips-out after the return already posted.',
+        )
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+
+    def test_rake_and_tips_are_not_a_discrepancy(self):
+        """Rake/tips are chips that legitimately never come back as a
+        CHIPS_IN — game_day_chip_discrepancy must not flag a perfectly
+        normal night just because rake was taken."""
+        gd = services.open_game_day(51, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(480000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.record_transaction(
+            type=Transaction.Type.RAKE, amount=Decimal(20000), recorded_by=self.cashier,
+            game_day=gd, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.leave_table(gd, self.player, operator=self.cashier)
+        self.assertIsNone(services.game_day_chip_discrepancy(gd))  # 500,000 - 480,000 - 20,000 rake = 0
+        closed = services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+
+    def test_can_close_once_everyone_has_left_and_chips_reconcile(self):
+        gd = services.open_game_day(45, timezone.now(), self.owner)
+        services.seat_player(gd, self.owner, player=self.player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.leave_table(gd, self.player, operator=self.cashier)
+        self.assertIsNone(services.close_blocked_reason(gd))
+        closed = services.close_game_day(gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+
+    def test_a_player_owing_money_but_having_returned_chips_does_not_block_close(self):
+        """The gate is about the PHYSICAL chip count game-day-wide, not
+        money owed by any one player — someone who lost chips at the table
+        to another player returns everything they still HAVE (which is
+        less than they took out) and still owes the club cash, carried to
+        the Outstanding ledger; the club's total chip count still
+        reconciles because the winner returns correspondingly more."""
+        gd = services.open_game_day(46, timezone.now(), self.owner)
+        winner = Player.objects.create(account_code='WWI 62', display_name='Winner')
+        services.seat_player(gd, self.owner, player=self.player)
+        services.seat_player(gd, self.owner, player=winner)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(100000), recorded_by=self.cashier,
+            game_day=gd, player=winner, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        # self.player only has 300,000 left to hand back (lost 200,000 at
+        # the table) — that's their FULL physical return, not a partial one.
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(300000), recorded_by=self.cashier,
+            game_day=gd, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        # winner cashes out with their winnings — the club's total still
+        # reconciles (600,000 out, 600,000 in) even though self.player
+        # personally still owes 200,000.
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(300000), recorded_by=self.cashier,
+            game_day=gd, player=winner, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+        services.leave_table(gd, self.player, operator=self.cashier)
+        services.leave_table(gd, winner, operator=self.cashier)
+        self.assertEqual(selectors.player_game_day_balance(self.player, gd), Decimal(-200000))
+        self.assertIsNone(services.close_blocked_reason(gd))
 
     def test_current_game_day_endpoint(self):
         self.client.force_authenticate(self.cashier)
@@ -587,7 +820,7 @@ class GameDayAndTransactionAPITests(APITestCase):
 
     def test_recording_against_closed_game_day_returns_400(self):
         game_day = services.open_game_day(4, timezone.now(), self.owner)
-        services.close_game_day(game_day, self.cashier)
+        services.close_game_day(game_day, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
         self.client.force_authenticate(self.cashier)
         response = self.client.post('/api/transactions/', {
             'game_day': game_day.id, 'player': self.player.id, 'type': Transaction.Type.CHIPS_OUT,
@@ -662,6 +895,7 @@ class GameDayAndTransactionAPITests(APITestCase):
     @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_test'})
     @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_test'})
     def test_payout_flow_requires_owner_approval_via_api(self, mock_create_recipient, mock_initiate_transfer):
+        _disable_payout_auto_approval()
         PlayerBankAccount.objects.create(
             player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
             account_name='Test Player', is_default=True,
@@ -742,6 +976,70 @@ class DashboardAndMainAccountAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('main_account_balance', response.data)
 
+    # total_rake_this_month replaced outstanding_chips on the Owner
+    # Dashboard's stat grid (2026-09-23) — Accountant's own dashboard is
+    # unaffected, still outstanding_chips only. See selectors.total_rake_this_month.
+    def test_owner_dashboard_includes_total_rake_this_month_not_outstanding_chips(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('total_rake_this_month', response.data)
+        self.assertNotIn('outstanding_chips', response.data)
+
+    def test_accountant_dashboard_includes_outstanding_chips_not_total_rake(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('outstanding_chips', response.data)
+        self.assertNotIn('total_rake_this_month', response.data)
+
+    # creditor_count (2026-09-23) — the "Owed to players" stat card's own
+    # player count was hardcoded "7 players" in DashboardView.vue until now;
+    # this checks the real number actually comes back and is correct.
+    def test_dashboard_creditor_count_is_computed_not_hardcoded(self):
+        debtor = Player.objects.create(account_code='WWI 90', display_name='Owes Money')
+        creditor_a = Player.objects.create(account_code='WWI 91', display_name='Is Owed A')
+        creditor_b = Player.objects.create(account_code='WWI 92', display_name='Is Owed B')
+        Transaction.objects.create(
+            player=debtor, type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000),
+            channel=Transaction.Channel.CHIPS, recorded_by=self.owner,
+        )
+        Transaction.objects.create(
+            player=creditor_a, type=Transaction.Type.WRITE_OFF, amount=Decimal(20000),
+            channel=Transaction.Channel.WRITE_OFF, recorded_by=self.owner,
+        )
+        Transaction.objects.create(
+            player=creditor_b, type=Transaction.Type.WRITE_OFF, amount=Decimal(15000),
+            channel=Transaction.Channel.WRITE_OFF, recorded_by=self.owner,
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.data['debtor_count'], 1)
+        self.assertEqual(response.data['creditor_count'], 2)
+
+    def test_total_rake_this_month_only_counts_this_calendar_month(self):
+        game_day = GameDay.objects.create(number=88, started_at=timezone.now(), opened_by=self.owner)
+        now = timezone.localtime(timezone.now())
+        this_month = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
+        last_month = (this_month - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+
+        in_month_txn = Transaction.objects.create(
+            game_day=game_day, type=Transaction.Type.RAKE, amount=Decimal(5000),
+            channel=Transaction.Channel.CHIPS, recorded_by=self.owner,
+        )
+        Transaction.objects.filter(pk=in_month_txn.pk).update(created_at=this_month)
+
+        out_of_month_txn = Transaction.objects.create(
+            game_day=game_day, type=Transaction.Type.RAKE, amount=Decimal(9000),
+            channel=Transaction.Channel.CHIPS, recorded_by=self.owner,
+        )
+        Transaction.objects.filter(pk=out_of_month_txn.pk).update(created_at=last_month)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(Decimal(response.data['total_rake_this_month']), Decimal(5000))
+
     def test_accountant_cannot_view_main_account_ledger(self):
         self.client.force_authenticate(self.accountant)
         response = self.client.get('/api/main-account/ledger/')
@@ -763,7 +1061,16 @@ class GameDaySeatingTests(APITestCase):
     def setUp(self):
         self.owner = StaffUser.objects.create_user(username='owner', password='x', role=StaffUser.Role.OWNER)
         self.cashier = StaffUser.objects.create_user(username='cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.fm = FloorManager(name='Floor Boss', created_by=self.owner)
+        self.fm.set_pin('4321')
+        self.fm.save()
         self.game_day = services.open_game_day(30, timezone.now(), self.owner)
+
+    def _seat_and_leave(self, gd, player):
+        """A payout requires the player to have left the table — same
+        fixture as AuthorizationTests' own helper of the same name."""
+        services.seat_player(gd, self.owner, player=player)
+        services.leave_table(gd, player, operator=self.cashier)
 
     def test_seating_new_player_creates_and_seats(self):
         player = services.seat_player(
@@ -789,7 +1096,7 @@ class GameDaySeatingTests(APITestCase):
         self.assertTrue(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).exists())
 
     def test_cannot_seat_a_player_against_a_closed_game_day(self):
-        services.close_game_day(self.game_day, self.owner)
+        services.close_game_day(self.game_day, self.owner, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
         player = Player.objects.create(account_code='WWI 33', display_name='Too Late')
         with self.assertRaises(InvalidStateError):
             services.seat_player(self.game_day, self.owner, player=player)
@@ -808,13 +1115,24 @@ class GameDaySeatingTests(APITestCase):
 
     def test_balance_on_seated_endpoint_is_game_day_scoped_not_lifetime(self):
         player = Player.objects.create(account_code='WWI 36', display_name='Scoped Balance')
+        winner = Player.objects.create(account_code='WWI 63', display_name='Old GD Winner')
         # A closed, older game-day debt that must NOT leak into today's figure.
         old_gd = services.open_game_day(31, timezone.now(), self.owner)
         Transaction.objects.create(
             game_day=old_gd, player=player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(200000),
             channel=Transaction.Channel.CASHIER,
         )
-        services.close_game_day(old_gd, self.owner)
+        # `player` never returns anything (lost it all at the table) and
+        # still owes 200,000 — the debt this test is actually about. `winner`
+        # returning the matching amount is just what satisfies the
+        # close-time chip-reconciliation gate (game-day-wide, not
+        # per-player — see close_blocked_reason), not a plot point here.
+        Transaction.objects.create(
+            game_day=old_gd, player=winner, type=Transaction.Type.CHIPS_IN, amount=Decimal(200000),
+            channel=Transaction.Channel.CASHIER,
+        )
+        services.close_game_day(old_gd, self.owner, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
+        self.assertEqual(selectors.player_game_day_balance(player, old_gd), Decimal(-200000))
         services.seat_player(self.game_day, self.owner, player=player)
 
         self.client.force_authenticate(self.cashier)
@@ -845,6 +1163,57 @@ class GameDaySeatingTests(APITestCase):
             f'/api/game-days/{self.game_day.id}/players/', {'account_code': 'WWI 39', 'display_name': 'Blocked'},
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_payout_failed_badge_surfaces_on_the_seated_players_endpoint(self):
+        """A payout stuck at TRANSFER_FAILED shows up as payout_failed on the
+        Cashier's own player panel — see selectors.player_has_failed_payout.
+        Not otherwise visible to a Cashier (only the Owner's Payouts view
+        showed TRANSFER_FAILED before this)."""
+        player = Player.objects.create(account_code='WWI 42', display_name='Stuck Payout')
+        bank = PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Stuck Payout', is_default=True,
+        )
+        self._seat_and_leave(self.game_day, player)
+        Transaction.objects.create(
+            game_day=self.game_day, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=self.game_day)
+        bank.delete()
+        services.approve_payout(payout, self.owner)
+        payout.refresh_from_db()
+        self.assertEqual(payout.status, Transaction.Status.TRANSFER_FAILED)
+        self.assertTrue(selectors.player_has_failed_payout(player, self.game_day))
+
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/{player.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['payout_failed'])
+
+    def test_payout_failed_badge_clears_once_the_owner_retries_successfully(self):
+        player = Player.objects.create(account_code='WWI 43', display_name='Retried Payout')
+        bank = PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Retried Payout', is_default=True,
+        )
+        self._seat_and_leave(self.game_day, player)
+        Transaction.objects.create(
+            game_day=self.game_day, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        payout = services.initiate_payout(player, Decimal(50000), self.cashier, game_day=self.game_day)
+        bank.delete()
+        services.approve_payout(payout, self.owner)
+        self.assertTrue(selectors.player_has_failed_payout(player, self.game_day))
+
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Retried Payout', is_default=True,
+        )
+        with patch('payments.services.initiate_payout_transfer', return_value='TRF_ok'):
+            services.approve_payout(payout, self.owner)
+        self.assertFalse(selectors.player_has_failed_payout(player, self.game_day))
 
     def test_single_seated_player_detail_endpoint(self):
         player = Player.objects.create(account_code='WWI 40', display_name='Detail Test')
@@ -1016,19 +1385,27 @@ class LeaveTableTests(APITestCase):
         seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
         self.assertIsNotNone(seat.left_at)  # untouched — still departed
 
-    def test_issuing_chips_to_a_departed_player_revives_them(self):
+    def test_issuing_chips_to_a_departed_player_raises(self):
+        """Revised 2026-09-22: Issue Chips no longer silently revives a
+        departed player (it used to put them back on whatever seat_number
+        they still carried from before, which could since have been taken
+        by someone else) — it now raises, directing to rejoin_at_seat
+        (explicit seat pick) instead. See _ensure_seated's block_departed."""
         services.leave_table(self.game_day, self.player, operator=self.cashier)
-        services.record_transaction(
-            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
-            game_day=self.game_day, player=self.player,
-            floor_manager_id=self.fm.pk, floor_manager_pin='4321',
-        )
+        with self.assertRaises(InvalidStateError):
+            services.record_transaction(
+                type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+                game_day=self.game_day, player=self.player,
+                floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+            )
         seat = GameDayPlayer.objects.get(game_day=self.game_day, player=self.player)
-        self.assertIsNone(seat.left_at)
+        self.assertIsNotNone(seat.left_at)  # still departed — untouched
 
     def test_any_other_transaction_type_does_not_revive_a_departed_player(self):
-        """Only CHIPS_OUT revives — Return Chips (CHIPS_IN), a payment, etc.
-        record normally against a departed player without seating them again."""
+        """Return Chips (CHIPS_IN), a payment, etc. record normally against
+        a departed player without seating them again — unaffected by the
+        CHIPS_OUT block above, and this is exactly the "correct a mistake
+        after the fact" path Return Chips is for."""
         services.leave_table(self.game_day, self.player, operator=self.cashier)
         services.record_transaction(
             type=Transaction.Type.PAYMENT_POS, amount=Decimal(5000), recorded_by=self.cashier,
@@ -1038,18 +1415,47 @@ class LeaveTableTests(APITestCase):
         self.assertIsNotNone(seat.left_at)  # still departed
         self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(5000))  # but recorded
 
-    def test_issuing_chips_to_a_departed_player_is_subject_to_the_active_cap(self):
+    def test_rejoin_at_seat_happy_path(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        seat = services.rejoin_at_seat(self.game_day, self.player, 4, operator=self.cashier)
+        self.assertIsNone(seat.left_at)
+        self.assertEqual(seat.seat_number, 4)
+        # Now active again — Issue Chips works exactly like any other player.
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
+
+    def test_rejoin_at_seat_onto_a_taken_seat_raises(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        occupant = Player.objects.create(account_code='WWI 52', display_name='Occupant')
+        services.seat_player(self.game_day, self.owner, player=occupant, seat_number=4)
+        with self.assertRaises(InvalidStateError):
+            services.rejoin_at_seat(self.game_day, self.player, 4, operator=self.cashier)
+
+    def test_rejoin_at_seat_on_a_still_active_player_raises(self):
+        with self.assertRaises(InvalidStateError):
+            services.rejoin_at_seat(self.game_day, self.player, 4, operator=self.cashier)
+
+    def test_rejoin_at_seat_is_subject_to_the_active_cap(self):
         services.leave_table(self.game_day, self.player, operator=self.cashier)
         fillers = [Player.objects.create(account_code=f'WWI RET{i}', display_name=f'Filler {i}')
                    for i in range(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)]
-        for p in fillers:
-            services.seat_player(self.game_day, self.owner, player=p)
+        for i, p in enumerate(fillers):
+            services.seat_player(self.game_day, self.owner, player=p, seat_number=i + 1)
         with self.assertRaises(TableFullError):
-            services.record_transaction(
-                type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
-                game_day=self.game_day, player=self.player,
-                floor_manager_id=self.fm.pk, floor_manager_pin='4321',
-            )
+            services.rejoin_at_seat(self.game_day, self.player, services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY, operator=self.cashier)
+
+    def test_cashier_can_rejoin_a_player_via_api(self):
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(
+            f'/api/game-days/{self.game_day.id}/players/{self.player.id}/rejoin/', {'seat_number': 3},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['left_at'])
+        self.assertEqual(response.data['seat_number'], 3)
 
     def test_a_brand_new_players_first_transaction_is_subject_to_the_active_cap(self):
         """Closes a gap found alongside the above: record_transaction seating
@@ -1080,6 +1486,158 @@ class LeaveTableTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class ChipsReturnedCannotExceedChipsOutTests(APITestCase):
+    """
+    gaming.services.record_transaction's CHIPS_IN branch — added 2026-09-22
+    per an explicit request: chips returned on a game-day can never exceed
+    what could still physically be on the table, checked before the entry
+    posts (not just at close, where chips_variance would otherwise be the
+    first place it surfaced). Deliberately game-day-wide, not per-player —
+    see the check's own comment in services.py.
+
+    Revised 2026-09-23: rake and tips are chips that legitimately never
+    come back as a CHIPS_IN — netted out of the ceiling the same way
+    chips_variance already nets them out at close, so this on-the-spot
+    check can't be looser than that one.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner2', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier2', password='x', role=StaffUser.Role.CASHIER)
+        self.game_day = services.open_game_day(60, timezone.now(), self.owner)
+        self.fm = FloorManager(name='Floor Boss 2', created_by=self.owner)
+        self.fm.set_pin('9999')
+        self.fm.save()
+        self.p1 = Player.objects.create(account_code='WWI 60', display_name='Player One')
+        self.p2 = Player.objects.create(account_code='WWI 61', display_name='Player Two')
+        services.seat_player(self.game_day, self.owner, player=self.p1)
+        services.seat_player(self.game_day, self.owner, player=self.p2)
+
+    def _chips_out(self, player, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def _chips_in(self, player, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def _rake(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.RAKE, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def _tip(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.TIP, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, tip_category=Transaction.TipCategory.SERVICE_STAFF,
+            floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def test_return_up_to_exactly_chips_out_is_allowed(self):
+        self._chips_out(self.p1, 500000)
+        self._chips_in(self.p1, 500000)  # exact match — the boundary, not an error
+
+    def test_return_exceeding_chips_out_raises(self):
+        self._chips_out(self.p1, 500000)
+        with self.assertRaises(InvalidStateError):
+            self._chips_in(self.p1, 500001)
+
+    def test_check_is_game_day_wide_not_per_player(self):
+        """A discrepancy is still a discrepancy even if it nets out across
+        different players — one player's excess return is still an excess
+        against the night's total chips in play."""
+        self._chips_out(self.p1, 500000)
+        self._chips_in(self.p1, 200000)
+        # p2 never had any chips out — this alone doesn't exceed the
+        # game-day total (500,000 out vs 200,000+250,000=450,000 in), so it
+        # should succeed even though it's a different player than the one
+        # who was issued chips.
+        self._chips_in(self.p2, 250000)
+        with self.assertRaises(InvalidStateError):
+            self._chips_in(self.p2, 50001)  # now 450,000 + 50,001 > 500,000
+
+    def test_a_voided_chips_out_no_longer_counts_toward_the_cap(self):
+        txn = self._chips_out(self.p1, 500000)
+        services.void_transaction(txn, self.owner, 'test voided')
+        with self.assertRaises(InvalidStateError):
+            self._chips_in(self.p1, 1)  # nothing left to return against
+
+    def test_error_message_reports_the_amounts(self):
+        self._chips_out(self.p1, 500000)
+        with self.assertRaises(InvalidStateError) as ctx:
+            self._chips_in(self.p1, 600000)
+        message = str(ctx.exception)
+        self.assertIn('600,000', message)
+        self.assertIn('500,000', message)
+
+    def test_api_surfaces_the_discrepancy_as_a_400(self):
+        self._chips_out(self.p1, 500000)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/', {
+            'type': 'CHIPS_IN', 'amount': '600000', 'game_day': self.game_day.id, 'player': self.p1.id,
+            'floor_manager_id': self.fm.pk, 'floor_manager_pin': '9999',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rake_lowers_the_returnable_ceiling(self):
+        """500,000 out, 50,000 raked — only 450,000 can still come back as
+        a CHIPS_IN, even though that's less than chips_out_total itself."""
+        self._chips_out(self.p1, 500000)
+        self._rake(50000)
+        self._chips_in(self.p1, 450000)  # exact new ceiling — allowed
+        with self.assertRaises(InvalidStateError):
+            self._chips_in(self.p2, 1)  # one more than what's left on the table
+
+    def test_tips_also_lower_the_returnable_ceiling(self):
+        self._chips_out(self.p1, 500000)
+        self._tip(20000)
+        self._chips_in(self.p1, 480000)  # exact new ceiling — allowed
+        with self.assertRaises(InvalidStateError):
+            self._chips_in(self.p2, 1)
+
+    def test_rake_and_tips_stack_against_the_ceiling(self):
+        self._chips_out(self.p1, 500000)
+        self._rake(50000)
+        self._tip(20000)
+        with self.assertRaises(InvalidStateError):
+            self._chips_in(self.p1, 430001)  # one above 500,000 - 50,000 - 20,000
+        self._chips_in(self.p1, 430000)  # exact ceiling — allowed
+
+    def test_error_message_reports_the_rake_and_tip_adjusted_ceiling(self):
+        self._chips_out(self.p1, 500000)
+        self._rake(50000)
+        with self.assertRaises(InvalidStateError) as ctx:
+            self._chips_in(self.p1, 460000)
+        message = str(ctx.exception)
+        self.assertIn('460,000', message)
+        self.assertIn('450,000', message)  # the rake-adjusted ceiling, not raw chips_out
+
+    def test_chips_totals_endpoint_includes_rake_and_tips(self):
+        """
+        Added 2026-09-23 fixing a live bug: the Cashier's chips-caption used
+        to derive rake/tips from `ledger`/`activity`, which exclude those
+        types entirely (they're day-level, not player-scoped) — so the
+        caption could never reflect them no matter how much chip was raked
+        or tipped. This dedicated endpoint is the fix.
+        """
+        self._chips_out(self.p1, 500000)
+        self._chips_in(self.p1, 100000)
+        self._rake(50000)
+        self._tip(20000)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/chips-totals/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(str(response.data['chips_out_total'])), Decimal(500000))
+        self.assertEqual(Decimal(str(response.data['chips_in_total'])), Decimal(100000))
+        self.assertEqual(Decimal(str(response.data['rake_total'])), Decimal(50000))
+        self.assertEqual(Decimal(str(response.data['tips_total'])), Decimal(20000))
+
+
 class DealOnClosedGameDayTests(APITestCase):
     """
     Corrected 2026-09-15: a Deal/write-off is not manually pointed at any
@@ -1092,12 +1650,17 @@ class DealOnClosedGameDayTests(APITestCase):
     def setUp(self):
         self.owner = StaffUser.objects.create_user(username='owner4', password='x', role=StaffUser.Role.OWNER)
         self.cashier = StaffUser.objects.create_user(username='cashier4', password='x', role=StaffUser.Role.CASHIER)
+        self.fm = FloorManager(name='Floor Boss 4', created_by=self.owner)
+        self.fm.set_pin('4321')
+        self.fm.save()
         self.player = Player.objects.create(account_code='WWI 60', display_name='Deal Target')
 
         self.old_gd = services.open_game_day(60, timezone.now(), self.owner)
-        services.close_game_day(self.old_gd, self.cashier)
+        services.close_game_day(self.old_gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321')
         self.last_closed_gd = services.open_game_day(61, timezone.now(), self.owner)
-        services.close_game_day(self.last_closed_gd, self.cashier)
+        services.close_game_day(
+            self.last_closed_gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
+        )
         self.open_gd = services.open_game_day(62, timezone.now(), self.owner)
 
     def test_deal_on_the_just_closed_game_day_is_accepted_and_lands_there(self):
@@ -1164,10 +1727,11 @@ class DealOnClosedGameDayTests(APITestCase):
 
 class TipCategoryTests(APITestCase):
     """
-    Dealer/Service tip categorization (added 2026-09-17) — Dealer stays
-    anonymous/aggregate exactly as every Tip did before this; Service
-    requires a named, active ServiceStaff recipient. See PLAN.md's entry
-    and gaming.services.record_transaction.
+    Service staff/Masseuse tip categorization (added 2026-09-17 as
+    Dealer/Service, renamed 2026-09-23 — see Transaction.TipCategory's own
+    comment) — Service staff stays anonymous/aggregate exactly as every Tip
+    did before this; Masseuse requires a named, active Masseuse recipient.
+    See PLAN.md's entry and gaming.services.record_transaction.
     """
 
     def setUp(self):
@@ -1177,7 +1741,9 @@ class TipCategoryTests(APITestCase):
         self.fm = FloorManager(name='Floor Boss 2', created_by=self.owner)
         self.fm.set_pin('4321')
         self.fm.save()
-        self.person = ServiceStaff.objects.create(name='Blessing', created_by=self.owner)
+        self.person = StaffMember.objects.create(
+            name='Blessing', role=StaffMember.Role.MASSEUSE, created_by=self.owner,
+        )
 
     def _tip(self, **kwargs):
         return services.record_transaction(
@@ -1185,28 +1751,36 @@ class TipCategoryTests(APITestCase):
             game_day=self.game_day, floor_manager_id=self.fm.pk, floor_manager_pin='4321', **kwargs,
         )
 
-    def test_dealer_tip_needs_no_recipient(self):
-        txn = self._tip(tip_category=Transaction.TipCategory.DEALER)
-        self.assertIsNone(txn.service_staff)
-        self.assertEqual(txn.tip_category, Transaction.TipCategory.DEALER)
+    def test_service_staff_tip_needs_no_recipient(self):
+        txn = self._tip(tip_category=Transaction.TipCategory.SERVICE_STAFF)
+        self.assertIsNone(txn.masseuse)
+        self.assertEqual(txn.tip_category, Transaction.TipCategory.SERVICE_STAFF)
 
-    def test_dealer_tip_rejects_a_recipient(self):
+    def test_service_staff_tip_rejects_a_recipient(self):
         with self.assertRaises(InvalidStateError):
-            self._tip(tip_category=Transaction.TipCategory.DEALER, service_staff=self.person)
+            self._tip(tip_category=Transaction.TipCategory.SERVICE_STAFF, masseuse=self.person)
 
-    def test_service_tip_requires_a_recipient(self):
+    def test_masseuse_tip_requires_a_recipient(self):
         with self.assertRaises(InvalidStateError):
-            self._tip(tip_category=Transaction.TipCategory.SERVICE)
+            self._tip(tip_category=Transaction.TipCategory.MASSEUSE)
 
-    def test_service_tip_with_a_recipient_succeeds(self):
-        txn = self._tip(tip_category=Transaction.TipCategory.SERVICE, service_staff=self.person)
-        self.assertEqual(txn.service_staff, self.person)
+    def test_masseuse_tip_with_a_recipient_succeeds(self):
+        txn = self._tip(tip_category=Transaction.TipCategory.MASSEUSE, masseuse=self.person)
+        self.assertEqual(txn.masseuse, self.person)
 
-    def test_service_tip_requires_an_active_recipient(self):
+    def test_masseuse_tip_requires_an_active_recipient(self):
         self.person.is_active = False
         self.person.save()
         with self.assertRaises(InvalidStateError):
-            self._tip(tip_category=Transaction.TipCategory.SERVICE, service_staff=self.person)
+            self._tip(tip_category=Transaction.TipCategory.MASSEUSE, masseuse=self.person)
+
+    def test_masseuse_tip_rejects_a_dealer_or_service_staffmember(self):
+        """A StaffMember's `masseuse` FK must actually be role=MASSEUSE — a
+        Dealer/Service record (added 2026-09-23, same roster, different
+        role) is never a valid tip recipient."""
+        dealer = StaffMember.objects.create(name='Femi', role=StaffMember.Role.DEALER, created_by=self.owner)
+        with self.assertRaises(InvalidStateError):
+            self._tip(tip_category=Transaction.TipCategory.MASSEUSE, masseuse=dealer)
 
     def test_tip_without_a_category_is_rejected(self):
         with self.assertRaises(InvalidStateError):
@@ -1216,29 +1790,29 @@ class TipCategoryTests(APITestCase):
         with self.assertRaises(InvalidStateError):
             services.record_transaction(
                 type=Transaction.Type.PAYMENT_CASH, amount=Decimal(1000), recorded_by=self.cashier,
-                game_day=self.game_day, tip_category=Transaction.TipCategory.DEALER,
+                game_day=self.game_day, tip_category=Transaction.TipCategory.SERVICE_STAFF,
                 floor_manager_id=self.fm.pk, floor_manager_pin='4321',
             )
 
-    def test_service_tip_via_api(self):
+    def test_masseuse_tip_via_api(self):
         self.client.force_authenticate(self.owner)
         response = self.client.post('/api/transactions/', {
             'type': 'TIP', 'amount': '2000', 'game_day': self.game_day.id,
-            'tip_category': 'SERVICE', 'service_staff': self.person.id,
+            'tip_category': 'MASSEUSE', 'masseuse': self.person.id,
             'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertEqual(response.data['service_staff'], self.person.id)
+        self.assertEqual(response.data['masseuse'], self.person.id)
 
-    def test_dealer_tip_via_api_without_recipient(self):
+    def test_service_staff_tip_via_api_without_recipient(self):
         self.client.force_authenticate(self.owner)
         response = self.client.post('/api/transactions/', {
             'type': 'TIP', 'amount': '2000', 'game_day': self.game_day.id,
-            'tip_category': 'DEALER',
+            'tip_category': 'SERVICE_STAFF',
             'floor_manager_id': self.fm.pk, 'floor_manager_pin': '4321',
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertIsNone(response.data['service_staff'])
+        self.assertIsNone(response.data['masseuse'])
 
 
 class DealTransferTests(APITestCase):
@@ -1604,3 +2178,365 @@ class StartGameDayFlowTests(APITestCase):
         self.assertEqual([row['id'] for row in response.data], [self.table.id])
 
 
+
+
+class ClubSettingsModelTests(TestCase):
+    """ClubSettings.load() — the pk=1 singleton convention. Added 2026-09-23
+    alongside the "Settings" screen — see ClubSettings' own docstring."""
+
+    def test_load_creates_the_row_with_documented_defaults(self):
+        self.assertFalse(ClubSettings.objects.exists())
+        obj = ClubSettings.load()
+        self.assertEqual(obj.pk, 1)
+        self.assertTrue(obj.require_approval_open_game_day)
+        self.assertTrue(obj.require_approval_close_game_day)
+        self.assertTrue(obj.require_approval_issue_chips)
+        self.assertTrue(obj.require_approval_return_chips)
+        self.assertTrue(obj.require_approval_add_tip)
+        self.assertTrue(obj.require_approval_add_rake)
+        self.assertEqual(obj.payout_auto_approve_threshold, Decimal('500000'))
+
+    def test_load_is_a_true_singleton(self):
+        first = ClubSettings.load()
+        first.require_approval_open_game_day = False
+        first.save()
+        second = ClubSettings.load()
+        self.assertEqual(second.pk, 1)
+        self.assertFalse(second.require_approval_open_game_day)
+        self.assertEqual(ClubSettings.objects.count(), 1)
+
+
+class RequireApprovalTogglesTests(APITestCase):
+    """
+    ClubSettings.require_approval_* — each toggle governs whether its
+    action needs an Owner-or-Floor-Manager (or Floor-Manager-only) PIN at
+    all. Off doesn't touch anything else about the action — see
+    gaming.services.open_game_day/close_game_day/record_transaction.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='rat_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='rat_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.fm = FloorManager(name='RAT Floor Boss', created_by=self.owner)
+        self.fm.set_pin('7777')
+        self.fm.save()
+
+    def test_open_game_day_requires_pin_by_default(self):
+        with self.assertRaises(AuthorizationError):
+            services.open_game_day(200, timezone.now(), self.cashier)
+
+    def test_open_game_day_needs_no_pin_once_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_open_game_day = False
+        settings_obj.save()
+        gd = services.open_game_day(201, timezone.now(), self.cashier)
+        self.assertIsNone(gd.opened_by)
+        self.assertIsNone(gd.opened_by_floor_manager)
+
+    def test_ordinary_close_needs_no_pin_once_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_close_game_day = False
+        settings_obj.save()
+        gd = services.open_game_day(202, timezone.now(), self.owner)
+        closed = services.close_game_day(gd, self.cashier)  # no floor_manager_id/pin at all
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+        self.assertIsNone(closed.closed_by_floor_manager)
+
+    def test_discrepancy_close_still_requires_sign_off_even_when_disabled(self):
+        """The toggle only streamlines the ROUTINE close — a chip
+        discrepancy is a genuine anomaly and always needs sign-off."""
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_close_game_day = False
+        settings_obj.save()
+        gd = services.open_game_day(203, timezone.now(), self.owner)
+        player = Player.objects.create(account_code='WWI 200', display_name='Discrepancy Player')
+        services.seat_player(gd, self.owner, player=player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+        services.leave_table(gd, player, operator=self.cashier)  # left with chips still out — the discrepancy
+        with self.assertRaises(AuthorizationError):
+            services.close_game_day(gd, self.cashier, discrepancy_reason='Player walked with chips.')
+        # Sign off with the FM PIN still works, exactly as before this toggle existed.
+        closed = services.close_game_day(
+            gd, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+            discrepancy_reason='Player walked with chips.',
+        )
+        self.assertEqual(closed.status, GameDay.Status.CLOSED)
+
+    def _open_and_seat(self, number):
+        gd = services.open_game_day(number, timezone.now(), self.owner)
+        player = Player.objects.create(account_code=f'WWI {number}', display_name=f'Player {number}')
+        services.seat_player(gd, self.owner, player=player)
+        return gd, player
+
+    def test_payment_cash_always_requires_a_pin_regardless_of_toggles(self):
+        """PAYMENT_CASH has no toggle at all — turning every other toggle
+        (including issue chips) off must not affect it."""
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_issue_chips = False
+        settings_obj.require_approval_return_chips = False
+        settings_obj.require_approval_add_tip = False
+        settings_obj.require_approval_add_rake = False
+        settings_obj.save()
+        gd, player = self._open_and_seat(210)
+        with self.assertRaises(AuthorizationError):
+            services.record_transaction(
+                type=Transaction.Type.PAYMENT_CASH, amount=Decimal(1000), recorded_by=self.cashier,
+                game_day=gd, player=player,
+            )
+
+    def test_issue_chips_needs_no_pin_once_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_issue_chips = False
+        settings_obj.save()
+        gd, player = self._open_and_seat(214)
+        txn = services.record_transaction(  # no PIN supplied at all
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=gd, player=player,
+        )
+        self.assertIsNotNone(txn.pk)
+
+    def test_issue_chips_still_requires_a_pin_by_default(self):
+        gd, player = self._open_and_seat(215)
+        with self.assertRaises(AuthorizationError):
+            services.record_transaction(
+                type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+                game_day=gd, player=player,
+            )
+
+    def test_return_chips_needs_no_pin_once_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_return_chips = False
+        settings_obj.save()
+        gd, player = self._open_and_seat(211)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+        txn = services.record_transaction(  # no PIN supplied at all
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(20000), recorded_by=self.cashier,
+            game_day=gd, player=player,
+        )
+        self.assertIsNotNone(txn.pk)
+
+    def test_add_tip_needs_no_pin_once_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_add_tip = False
+        settings_obj.save()
+        gd, player = self._open_and_seat(212)
+        txn = services.record_transaction(
+            type=Transaction.Type.TIP, amount=Decimal(5000), recorded_by=self.cashier,
+            game_day=gd, tip_category=Transaction.TipCategory.SERVICE_STAFF,
+        )
+        self.assertIsNotNone(txn.pk)
+
+    def test_add_rake_needs_no_pin_once_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_add_rake = False
+        settings_obj.save()
+        gd, player = self._open_and_seat(213)
+        txn = services.record_transaction(
+            type=Transaction.Type.RAKE, amount=Decimal(15000), recorded_by=self.cashier, game_day=gd,
+        )
+        self.assertIsNotNone(txn.pk)
+
+
+class MaxChipsIssuablePerTableTests(APITestCase):
+    """
+    Table.max_chips_issuable (added 2026-09-23, corrected same day) — a
+    ceiling on any ONE issuance, not a running/cumulative total: a player
+    can buy in at the cap as many times as they like over the night, and
+    there's no limit at all on total chips outstanding at once. See
+    record_transaction's CHIPS_OUT branch.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='mcit_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='mcit_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.fm = FloorManager(name='MCIT Floor Boss', created_by=self.owner)
+        self.fm.set_pin('3333')
+        self.fm.save()
+        self.game = Game.objects.create(name='Test Game — Max Chips')
+        self.table = Table.objects.create(
+            game=self.game, name='Capped Table', default_buy_in=Decimal(100000),
+            max_chips_issuable=Decimal(300000),
+        )
+        # buy_in_amount=0 (falsy) — otherwise seat_player's own auto buy-in
+        # (see its docstring) would issue the table's default_buy_in to
+        # each seated player below, throwing off this test's own amounts.
+        self.game_day = services.open_game_day(
+            220, timezone.now(), self.owner, game=self.game, table=self.table, buy_in_amount=Decimal(0),
+        )
+        self.p1 = Player.objects.create(account_code='WWI 220', display_name='Capped Player One')
+        self.p2 = Player.objects.create(account_code='WWI 221', display_name='Capped Player Two')
+        services.seat_player(self.game_day, self.owner, player=self.p1)
+        services.seat_player(self.game_day, self.owner, player=self.p2)
+
+    def _chips_out(self, player, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='3333',
+        )
+
+    def test_issuing_up_to_the_cap_in_one_go_is_allowed(self):
+        self._chips_out(self.p1, 300000)  # exact cap — allowed
+
+    def test_issuing_beyond_the_cap_in_one_go_raises(self):
+        with self.assertRaises(InvalidStateError):
+            self._chips_out(self.p1, 300001)
+
+    def test_multiple_buy_ins_at_the_cap_are_each_allowed_no_running_total(self):
+        """There is no limit on total chips outstanding at once — only on
+        the size of any single issuance."""
+        self._chips_out(self.p1, 300000)
+        self._chips_out(self.p1, 300000)  # a second buy-in at the same player, still fine
+        self._chips_out(self.p2, 300000)  # and a different player, also fine
+
+    def test_a_table_with_no_cap_set_is_unaffected(self):
+        uncapped = Table.objects.create(
+            game=self.game, name='Uncapped Table', default_buy_in=Decimal(100000),
+        )
+        gd = services.open_game_day(221, timezone.now(), self.owner, game=self.game, table=uncapped)
+        player = Player.objects.create(account_code='WWI 222', display_name='Uncapped Player')
+        services.seat_player(gd, self.owner, player=player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(5000000), recorded_by=self.cashier,
+            game_day=gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='3333',
+        )  # far beyond the OTHER table's cap — should not raise, this table has none
+
+    def test_error_message_reports_the_requested_amount_and_the_cap(self):
+        with self.assertRaises(InvalidStateError) as ctx:
+            self._chips_out(self.p1, 300001)
+        message = str(ctx.exception)
+        self.assertIn('300,001', message)
+        self.assertIn('300,000', message)
+
+
+class TableMaxPlayersOverrideTests(TestCase):
+    """selectors.max_active_players' table-first tier (added 2026-09-23)."""
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='tmp_owner', password='x', role=StaffUser.Role.OWNER)
+        self.game = Game.objects.create(name='Test Game — Max Players', max_players=9)
+
+    def test_table_override_wins_over_the_games_value(self):
+        table = Table.objects.create(
+            game=self.game, name='Small Table', default_buy_in=Decimal(100000), max_players=4,
+        )
+        gd = services.open_game_day(230, timezone.now(), self.owner, game=self.game, table=table)
+        self.assertEqual(selectors.max_active_players(gd), 4)
+
+    def test_null_table_override_falls_back_to_the_game(self):
+        table = Table.objects.create(game=self.game, name='Default Table', default_buy_in=Decimal(100000))
+        gd = services.open_game_day(231, timezone.now(), self.owner, game=self.game, table=table)
+        self.assertEqual(selectors.max_active_players(gd), 9)
+
+
+class PayoutAutoApprovalThresholdTests(APITestCase):
+    """
+    ClubSettings.payout_auto_approve_threshold (added 2026-09-23, default
+    ₦500,000) — a payout at or under it skips PENDING_APPROVAL entirely.
+    See gaming.services.initiate_payout/_execute_payout_transfer.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='paat_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='paat_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.game_day = services.open_game_day(240, timezone.now(), self.owner)
+
+    def _winning_player(self, code, winnings):
+        player = Player.objects.create(account_code=code, display_name=code)
+        PlayerBankAccount.objects.create(
+            player=player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name=code, is_default=True,
+        )
+        services.seat_player(self.game_day, self.owner, player=player)
+        services.leave_table(self.game_day, player, operator=self.cashier)
+        # Funds the Main Account too (TRANSFER_DVA), so the funds guard inside
+        # _execute_payout_transfer doesn't get in the way of this test.
+        Transaction.objects.create(
+            game_day=self.game_day, player=player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(winnings),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        return player
+
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_auto'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_auto'})
+    def test_at_or_under_threshold_auto_approves(self, mock_recipient, mock_transfer):
+        player = self._winning_player('WWI 240', 500000)
+        payout = services.initiate_payout(player, Decimal(500000), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.status, Transaction.Status.APPROVED)
+        self.assertIsNone(payout.approved_by)
+        self.assertIsNotNone(payout.approved_at)
+        self.assertEqual(payout.external_reference, 'TRF_auto')
+
+    def test_over_threshold_stays_pending(self):
+        player = self._winning_player('WWI 241', 500001)
+        payout = services.initiate_payout(player, Decimal(500001), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
+        self.assertIsNone(payout.approved_by)
+
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_custom'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_custom'})
+    def test_owner_can_lower_the_threshold(self, mock_recipient, mock_transfer):
+        settings_obj = ClubSettings.load()
+        settings_obj.payout_auto_approve_threshold = Decimal('10000')
+        settings_obj.save()
+        player = self._winning_player('WWI 242', 10000)
+        payout = services.initiate_payout(player, Decimal(10000), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.status, Transaction.Status.APPROVED)
+
+        other = self._winning_player('WWI 243', 10001)
+        other_payout = services.initiate_payout(other, Decimal(10001), self.cashier, game_day=self.game_day)
+        self.assertEqual(other_payout.status, Transaction.Status.PENDING_APPROVAL)
+
+
+class ClubSettingsAndTablePermissionsAPITests(APITestCase):
+    """
+    ClubSettingsView (Owner writes, everyone reads) and TableViewSet's
+    write half (Owner-or-Floor-Manager, added 2026-09-23 for the
+    "Settings" screen).
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='csp_owner', password='x', role=StaffUser.Role.OWNER)
+        self.fm_user = StaffUser.objects.create_user(username='csp_fm', password='x', role=StaffUser.Role.FLOOR_MANAGER)
+        self.cashier = StaffUser.objects.create_user(username='csp_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.game = Game.objects.create(name='Test Game — Settings Perms')
+        self.table = Table.objects.create(game=self.game, name='Perms Table', default_buy_in=Decimal(100000))
+
+    def test_any_authenticated_role_can_read_club_settings(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/club-settings/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('payout_auto_approve_threshold', response.data)
+
+    def test_only_owner_can_write_club_settings(self):
+        self.client.force_authenticate(self.fm_user)
+        response = self.client.patch('/api/club-settings/', {'require_approval_open_game_day': False})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch('/api/club-settings/', {'require_approval_open_game_day': False})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(ClubSettings.load().require_approval_open_game_day)
+
+    def test_floor_manager_and_owner_can_edit_a_table(self):
+        for user in (self.fm_user, self.owner):
+            self.client.force_authenticate(user)
+            response = self.client.patch(f'/api/tables/{self.table.id}/', {'default_buy_in': '150000'})
+            self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_cashier_cannot_edit_a_table(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.patch(f'/api/tables/{self.table.id}/', {'default_buy_in': '150000'})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_table_identity_fields_stay_locked(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch(f'/api/tables/{self.table.id}/', {'name': 'Renamed Table'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.name, 'Perms Table')  # read_only_fields silently ignores it, not rejects

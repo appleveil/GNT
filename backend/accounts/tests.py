@@ -156,12 +156,14 @@ class StaffAndFloorManagerAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
-class FloorManagerRoleAndServiceStaffTests(APITestCase):
+class FloorManagerRoleAndStaffMemberTests(APITestCase):
     """
     Floor Manager as a real logged-in role, added 2026-09-17 alongside the
-    Service Staff roster it's meant to manage — see PLAN.md's entry. The
-    existing PIN-witness FloorManager model/mechanic is unaffected; this
-    covers only the new login + Service Staff pieces.
+    named-staff roster it's meant to manage (named "Service Staff", then
+    "Masseuse", then generalized to StaffMember on 2026-09-23 to also cover
+    Dealer/Service — see StaffMember's own docstring and PLAN.md's entries).
+    The existing PIN-witness FloorManager model/mechanic is unaffected;
+    this covers only the login + StaffMember-roster pieces.
     """
 
     def setUp(self):
@@ -186,36 +188,54 @@ class FloorManagerRoleAndServiceStaffTests(APITestCase):
         self.assertEqual(fm.staff_user, self.fm_login)
         self.assertTrue(fm.check_pin('1234'))  # unaffected by the link
 
-    def test_floor_manager_can_create_service_staff(self):
+    def test_floor_manager_can_create_a_staff_member(self):
         self.client.force_authenticate(self.fm_login)
-        response = self.client.post('/api/service-staff/', {'name': 'Tunde the Dealer Assistant'})
+        response = self.client.post('/api/staff-members/', {'name': 'Tunde', 'role': 'MASSEUSE'})
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-    def test_owner_can_also_create_service_staff(self):
+    def test_owner_can_also_create_a_staff_member(self):
+        """Added 2026-09-23 — Masseuse/Dealer/Service are addable from the
+        Admin page's own section, none of them a real login (see
+        StaffUser.Role's own comment for why that was reverted)."""
         self.client.force_authenticate(self.owner)
-        response = self.client.post('/api/service-staff/', {'name': 'Blessing'})
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        for role in ('MASSEUSE', 'DEALER', 'SERVICE'):
+            response = self.client.post('/api/staff-members/', {'name': f'Person {role}', 'role': role})
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+            self.assertEqual(response.data['role'], role)
 
-    def test_cashier_cannot_create_service_staff(self):
+    def test_cashier_cannot_create_a_staff_member(self):
         self.client.force_authenticate(self.cashier)
-        response = self.client.post('/api/service-staff/', {'name': 'Blessing'})
+        response = self.client.post('/api/staff-members/', {'name': 'Blessing', 'role': 'MASSEUSE'})
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_any_staff_can_list_service_staff(self):
-        """Needed for the Tip entry form's Service-staff picker."""
-        from .models import ServiceStaff
-        ServiceStaff.objects.create(name='Blessing', created_by=self.owner)
+    def test_any_staff_can_list_staff_members(self):
+        """Needed for the Tip entry form's Masseuse picker."""
+        from .models import StaffMember
+        StaffMember.objects.create(name='Blessing', role='MASSEUSE', created_by=self.owner)
         self.client.force_authenticate(self.cashier)
-        response = self.client.get('/api/service-staff/')
+        response = self.client.get('/api/staff-members/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('Blessing', [row['name'] for row in response.data])
 
-    def test_inactive_service_staff_hidden_from_non_floor_manager_non_owner(self):
-        from .models import ServiceStaff
-        ServiceStaff.objects.create(name='Retired Server', created_by=self.owner, is_active=False)
+    def test_inactive_staff_member_hidden_from_non_floor_manager_non_owner(self):
+        from .models import StaffMember
+        StaffMember.objects.create(name='Retired Server', role='SERVICE', created_by=self.owner, is_active=False)
         self.client.force_authenticate(self.cashier)
-        response = self.client.get('/api/service-staff/')
+        response = self.client.get('/api/staff-members/')
         self.assertNotIn('Retired Server', [row['name'] for row in response.data])
+
+    def test_role_query_param_filters_the_list(self):
+        """Added 2026-09-23 — the Tip picker (and the Floor Manager's own
+        "Masseuses" screen) only ever want role=MASSEUSE, not Dealer/Service
+        too. Mirrors StaffUserViewSet.owners' own role-filtering pattern."""
+        from .models import StaffMember
+        StaffMember.objects.create(name='Blessing', role='MASSEUSE', created_by=self.owner)
+        StaffMember.objects.create(name='Femi', role='DEALER', created_by=self.owner)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/staff-members/?role=MASSEUSE')
+        names = [row['name'] for row in response.data]
+        self.assertIn('Blessing', names)
+        self.assertNotIn('Femi', names)
 
 
 class PlayerBankAccountAPITests(APITestCase):

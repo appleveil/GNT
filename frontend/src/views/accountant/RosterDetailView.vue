@@ -209,7 +209,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           </div>
           <div v-else class="limit-edit">
             <input
-              :value="displayLimitInput" type="text" inputmode="decimal" placeholder="No cap" class="limit-input"
+              :value="displayLimitInput" type="text" inputmode="numeric" placeholder="No cap" class="limit-input"
               @input="e => (limitInput = parseAmountInput(e.target.value))"
             />
             <button class="link-btn" type="button" :disabled="savingLimit" @click="onSaveLimit">{{ savingLimit ? 'Saving…' : 'Save' }}</button>
@@ -265,7 +265,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
                 </label>
               </div>
               <input
-                :value="displayDealAmount" type="text" inputmode="decimal" placeholder="Amount" required class="deal-input"
+                :value="displayDealAmount" type="text" inputmode="numeric" placeholder="Amount" required class="deal-input"
                 @input="e => (dealAmount = parseAmountInput(e.target.value))"
               />
               <input v-model="dealReason" type="text" placeholder="Reason" required class="deal-input" />
