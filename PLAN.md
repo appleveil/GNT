@@ -1095,6 +1095,27 @@ Four small frontend fixes from a lo-fi nav review:
   `tokens.css`), instead of both cases reading as a plain "APPROVED". No
   backend change needed — `approved_by` was already on `TransactionSerializer`.
 
+### Game Days page: user follow-up pass on the hi-fi build (2026-09-23)
+Built on top of the user's own edits to `GameDaysListView.vue` (they'd
+already dropped the page-header subtitle, the Status/View-link columns, the
+5-card club-wide stat-grid, and the "View full profile" link — cleaned up
+the dead code those left behind: an undefined `closeDetail()` call the
+first edit left in place, the now-unused `displayStats`/`stats`/
+`chipsVariance` computeds and their close-preview fetch, and the CSS for
+everything removed). Then the actual asks:
+- **Club-wide "Full ledger" panel removed outright** — this page now only
+  ever shows a per-player ledger (the "tap a player" pill drill-down);
+  there's no way to see every player's activity interleaved here anymore.
+  `ledger`/`ledgerRows`/`playerTo` and the `/ledger/` fetch went with it.
+- **List columns**: `#, Date, Rake, Balance, Payments, Chips out, Chips,
+  Players` — reordered, with Payments and Chips out newly added (from the
+  same frozen `GameDaySummary` the row already had).
+- **Pagination dropped to 5/page** (was 7).
+- **The topmost (most recent) game-day's detail now opens automatically on
+  page load** — `openGameDay()` factored out of the click handler so the
+  initial auto-open can reuse it without also triggering the scroll-into-
+  view a real click gets.
+
 ### Hi-fi Game Days page: paginated list + inline detail + per-player drill-down (2026-09-23)
 Implements the lo-fi Game Days wireframe from this session for real.
 `GameDayDetailView.vue` and its standalone `/game-days/:id` route are gone —
