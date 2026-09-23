@@ -2124,6 +2124,30 @@ class ProfitSplitArrangementTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data['is_active'])
 
+    # --- bulk active-arrangements endpoint (2026-09-23, feeds the web
+    # Deals player list's "active" badge without an N+1 per-player call) ---
+
+    def test_active_arrangements_endpoint_lists_only_active_ones(self):
+        other = Player.objects.create(account_code='WWI PS2', display_name='Other Player')
+        active = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+        )
+        ended = services.create_profit_split_arrangement(
+            other, self.owner, house_stake_pct=Decimal(30), cap_amount=Decimal(50000),
+        )
+        services.deactivate_profit_split_arrangement(ended, self.owner)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/deals/profit-split/active/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [row['id'] for row in response.data]
+        self.assertEqual(ids, [active.pk])
+
+    def test_cashier_cannot_view_active_arrangements(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/deals/profit-split/active/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class StartGameDayFlowTests(APITestCase):
     """

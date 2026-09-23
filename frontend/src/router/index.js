@@ -13,9 +13,9 @@
  * meta.roles is a defense-in-depth check mirroring what the API itself would
  * 403 for the wrong role. It's set on /dashboard, /game-days, /roster
  * (ACCOUNTANT + OWNER — the "back office" surface Cashier has no use for)
- * and, OWNER-only, on /admin and /payouts (Phase C, 2026-09-14). /outstanding
- * was in this same group until 2026-09-23, when it was folded into
- * /dashboard and retired as its own route.
+ * and, OWNER-only, on /admin, /payouts (Phase C, 2026-09-14), and /deals
+ * (2026-09-23). /outstanding was in this same group until 2026-09-23, when
+ * it was folded into /dashboard and retired as its own route.
  *
  * The original Cashier routes (/game-day, /game-day/:id/ledger, /players/:id)
  * are deliberately left unrestricted: Owner still has no dedicated
@@ -80,6 +80,24 @@ const PayoutsView = () => import('@/views/owner/PayoutsView.vue')
 // that Main Account visibility excludes the Accountant.
 const MainAccountLedgerView = () => import('@/views/owner/MainAccountLedgerView.vue')
 
+// "Deals" web version (2026-09-23) — the backend (Fixed write-off, Transfer,
+// Stake and Profit Split) has existed since 2026-09-20; the Expo mobile app
+// built against it is deliberately local-only for now (no backend calls on
+// any write — see PLAN.md's mobile-app entries), a stopgap explicitly
+// waiting on "the rest of the Owner app" existing. It does now, so this is
+// the real, backend-wired version: every action here creates actual
+// Transaction/ProfitSplitArrangement rows immediately, same endpoints the
+// mobile app's local-only build never called. Owner-only throughout,
+// matching every "Deals" backend permission (IsOwner) exactly. Same
+// player-picker -> deal-type-picker -> form flow as the mobile app's own
+// navigation stack.
+const DealsListView = () => import('@/views/owner/deals/DealsListView.vue')
+const DealsHistoryView = () => import('@/views/owner/deals/DealsHistoryView.vue')
+const DealTypePickerView = () => import('@/views/owner/deals/DealTypePickerView.vue')
+const DealFixedView = () => import('@/views/owner/deals/DealFixedView.vue')
+const DealTransferView = () => import('@/views/owner/deals/DealTransferView.vue')
+const DealProfitSplitView = () => import('@/views/owner/deals/DealProfitSplitView.vue')
+
 const BACK_OFFICE_ROLES = ['ACCOUNTANT', 'OWNER']
 const OWNER_ONLY_ROLES = ['OWNER']
 // Owner can also reach Masseuses (MasseuseViewSet allows both) even
@@ -108,6 +126,12 @@ const routes = [
       { path: 'admin', name: 'admin', component: AdminView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'main-account', name: 'main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'deals', name: 'deals', component: DealsListView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'deals/history', name: 'deals-history', component: DealsHistoryView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'deals/:playerId', name: 'deal-type-picker', component: DealTypePickerView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'deals/:playerId/fixed', name: 'deal-fixed', component: DealFixedView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'deals/:playerId/transfer', name: 'deal-transfer', component: DealTransferView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'deals/:playerId/profit-split', name: 'deal-profit-split', component: DealProfitSplitView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'masseuses', name: 'masseuses', component: MasseuseListView, meta: { roles: FLOOR_MANAGER_ROLES } },
       { path: 'settings', name: 'club-settings', component: ClubSettingsView, meta: { roles: FLOOR_MANAGER_ROLES } },
     ],

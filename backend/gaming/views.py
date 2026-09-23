@@ -465,6 +465,22 @@ class DealTransferView(APIView):
         )
 
 
+class ActiveProfitSplitArrangementsView(APIView):
+    """
+    Every currently-active arrangement, club-wide — added 2026-09-23 for the
+    web Deals player list's "Stake/Profit split active" badge (mirrors the
+    mobile app's own getActiveProfitSplitPlayerIds, computed there from its
+    local deal log instead). One query instead of an N+1
+    PlayerProfitSplitStatusView call per player in the roster.
+    """
+
+    permission_classes = [IsOwner]
+
+    def get(self, request):
+        arrangements = ProfitSplitArrangement.objects.filter(is_active=True)
+        return Response(ProfitSplitArrangementSerializer(arrangements, many=True).data)
+
+
 class ProfitSplitArrangementView(APIView):
     """
     "Deals" Profit Split — Owner-only, added 2026-09-20. Creating one

@@ -37,6 +37,16 @@ export const TRANSACTION_TYPES = {
   WRITE_OFF: { label: 'Write-off', actionLabel: 'Write-off', lane: 'other', physicalCount: false },
   RAKE: { label: 'Rake', actionLabel: 'Rake', lane: 'other', physicalCount: true, general: true },
   TIP: { label: 'Tip', actionLabel: 'Tip', lane: 'other', physicalCount: true, general: true },
+  // "Deals" Transfer's linked pair (added 2026-09-20, given a real label
+  // here 2026-09-23 once the web Deals History feed started showing them —
+  // previously only ever rendered via their raw enum name, nothing read
+  // them through this constant before then).
+  DEAL_TRANSFER_OUT: { label: 'Deal Transfer (out)', actionLabel: 'Deal Transfer', lane: 'other', physicalCount: false, amountTone: 'debit' },
+  DEAL_TRANSFER_IN: { label: 'Deal Transfer (in)', actionLabel: 'Deal Transfer', lane: 'other', physicalCount: false, amountTone: 'credit' },
+  // "Deals" Profit Split's house-covered portion of a buy-in — never a
+  // player-initiated entry, always auto-created by record_transaction's
+  // CHIPS_OUT branch. Same reason for adding a label 2026-09-23.
+  PROFIT_SPLIT_STAKE: { label: 'Profit Split Stake', actionLabel: 'Profit Split Stake', lane: 'other', physicalCount: false },
 }
 
 // Status colors reuse the same badge--* classes as GameDay/Payout status

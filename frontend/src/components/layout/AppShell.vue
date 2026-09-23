@@ -73,6 +73,7 @@ const tabs = computed(() => {
     base.push(
       { name: 'payouts', label: 'Payouts', path: '/payouts' },
       { name: 'main-account', label: 'Main Account', path: '/main-account' },
+      { name: 'deals', label: 'Deals', path: '/deals' },
       { name: 'admin', label: 'Admin', path: '/admin' },
       { name: 'club-settings', label: 'Settings', path: '/settings' },
     )

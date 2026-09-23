@@ -18,6 +18,10 @@ urlpatterns = [
     path('deals/transfer/', views.DealTransferView.as_view(), name='deal-transfer'),
     path('deals/profit-split/', views.ProfitSplitArrangementView.as_view(), name='profit-split-create'),
     path(
+        'deals/profit-split/active/', views.ActiveProfitSplitArrangementsView.as_view(),
+        name='profit-split-active',
+    ),
+    path(
         'deals/profit-split/<int:player_pk>/', views.PlayerProfitSplitStatusView.as_view(),
         name='profit-split-status',
     ),

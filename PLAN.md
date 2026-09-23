@@ -1207,6 +1207,89 @@ balance (maintained incrementally by `record_transaction`, the way
 `GameDayPlayer`/`GameDaySummary` already snapshot other totals) rather than
 recomputing the whole ledger on every dashboard load.
 
+### "Deals" — web version, backend-wired (2026-09-23)
+The Expo mobile app (2026-09-20/21 entries) is deliberately local-only —
+every Deal write goes to on-device SQLite, exported as CSV for manual
+reconciliation later, an explicit stopgap "before the rest of the Owner app
+exists on mobile." It does now, so this is the real version: a new
+Owner-only "Deals" section in the web app, calling the same backend
+endpoints the mobile app's local-only build never did
+(`/api/deals/transfer/`, `/api/deals/profit-split/`, `/api/transactions/`
+for Fixed) — every action here creates real `Transaction`/
+`ProfitSplitArrangement` rows immediately, no CSV step. New player list ->
+deal-type picker -> form flow, same shape as the mobile app's own
+navigation stack (`DealsHomeScreen` -> `DealTypePickerScreen` -> Fixed/
+Transfer/ProfitSplit).
+
+- [x] **New backend endpoint**: `GET /deals/profit-split/active/`
+  (`ActiveProfitSplitArrangementsView`, Owner-only) — every currently-active
+  arrangement club-wide, one query, feeding the player list's "Stake/Profit
+  split active" badge without an N+1 per-player status call (the mobile
+  app's own `getActiveProfitSplitPlayerIds` computed this from its local
+  log instead, since it had one; the web version doesn't). 2 new tests
+  (252/252... see full-suite count below).
+- [x] **`DealsListView.vue`** (`/deals`) — player list, search, live
+  balance, the active-arrangement badge; a History link.
+- [x] **`DealTypePickerView.vue`** (`/deals/:playerId`) — Fixed/Transfer/
+  Stake-and-Profit-Split, same eligibility rules as mobile (Fixed needs
+  debt, Transfer needs a positive balance, Stake/Profit Split always
+  available with an ACTIVE badge) — a UX nicety only, since
+  `record_transaction`/`record_deal_transfer` enforce the same caps
+  server-side regardless of what this page allows clicking.
+- [x] **`DealFixedView.vue`** (`/deals/:playerId/fixed`) — write-off form,
+  `POST /transactions/ {type: WRITE_OFF}`. Attaches to whichever game-day
+  is open right now (else Outstanding) — a narrower default than
+  `RosterDetailView.vue`'s existing Deal/Write-off mini-form (which also
+  offers backdating onto the just-closed game-day); that fuller control
+  still lives there for anyone who needs it. This is an *additional*,
+  more guided entry point, not a replacement.
+- [x] **`DealTransferView.vue`** (`/deals/:playerId/transfer`) — target
+  picker + amount/reason, `POST /deals/transfer/`. Always Outstanding
+  (`game_day=null`), matching the backend endpoint itself, which takes no
+  game-day at all. Same "changing recipient mid-entry confirms first"
+  guard as mobile.
+- [x] **`DealProfitSplitView.vue`** (`/deals/:playerId/profit-split`) —
+  current-arrangement status card (live `covered_this_period`/
+  `cumulative_covered`/`available_stake_this_period`/exhausted state) +
+  End action (confirm-only — see below), plus the create form (Stake/
+  Payout as separate opt-in toggle sections, matching the mobile mockup).
+  **Two real departures from the mobile version, both because this talks
+  to the actual model instead of a local log:**
+  - Stake/Payout "off" isn't an omitted field — the model has no such
+    state. "Stake off" sends `house_stake_pct`/`cap_amount` as `0`;
+    "Payout off" sends `payout_split_method: CUSTOM_RATIO,
+    custom_ratio_pct: 0` (a real, harmless no-op) rather than the default
+    `STAKE_RATIO`, which the backend rejects outright when
+    `house_stake_pct` is 0 (`_validate_profit_split_arrangement`).
+    "Ratio: according to stake" auto-switches away (to Custom Ratio) the
+    moment Stake is toggled off, same rule as mobile.
+  - Ending an arrangement has **no reason field** — mobile's local-only
+    "End confirm+reason" doesn't correspond to any real column;
+    `deactivate_profit_split_arrangement` only ever sets
+    `is_active`/`deactivated_at`. Confirm-only here.
+- [x] **`DealsHistoryView.vue`** (`/deals/history`) — every
+  `WRITE_OFF`/`DEAL_TRANSFER_OUT`/`DEAL_TRANSFER_IN`/`PROFIT_SPLIT_STAKE`
+  transaction ever recorded, filter chips, void wired the same as every
+  other ledger view (voiding a Transfer leg voids its linked leg too,
+  already true server-side since 2026-09-20). Money-movement feed only —
+  doesn't separately list an arrangement's own create/end events (no
+  money moves on either); see the player's own Profit Split screen for
+  that.
+- [x] `constants/transactionTypes.js` gained real labels for
+  `DEAL_TRANSFER_OUT`/`DEAL_TRANSFER_IN`/`PROFIT_SPLIT_STAKE` — previously
+  unregistered there entirely (rendered as raw enum text wherever
+  `LedgerTable.vue` showed one, which nothing had until this History page).
+- [x] New "Deals" sidebar tab, Owner-only, between Main Account and Admin.
+- Verified live against the dev DB: created two throwaway players, gave
+  one debt (CHIPS_OUT + close-with-discrepancy) and one a positive balance
+  (PAYMENT_TRANSFER credit), then hit every new endpoint with the exact
+  payload shapes the Vue forms construct — Fixed write-off, Transfer, and
+  both Profit Split "off" mappings (Stake-off-Payout-on and
+  Stake-on-Payout-off) — all confirmed correct via curl before cleaning up
+  every created row (arrangements, transactions, game-day, players).
+  `npm run build` clean; `makemigrations --check` clean (view/URL-only
+  backend change, no model change).
+
 ### Phase D — Platform Administrator role + Integration Settings
 Today the Paystack integration (secret/public keys) is env-var-only (`settings.PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY`, read directly by `payments/paystack_client.py`) — there is no interface to configure it, by anyone. This phase gives it a real interface, owned by a **new role**, not folded into Owner:
 - [ ] Add `PLATFORM_ADMIN` to `StaffUser.Role` (currently `OWNER`/`CASHIER`/`ACCOUNTANT`) — new migration, new permission class(es) alongside the existing `IsOwner`/`IsCashierOrOwner`/`IsOwnerOrAccountant`
