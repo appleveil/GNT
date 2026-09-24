@@ -85,11 +85,11 @@ function statusBadgeText(row) {
 // Netting against a prior outstanding balance (2026-09-27, see
 // gaming.services.initiate_payout) — requested_amount is only ever set when
 // a payout got automatically reduced to clear an older debt first. Shown as
-// TWO rows per the user's own explicit spec (2026-09-27 follow-up): a
-// leading, non-voidable "Payout BBF" (Balance Brought Forward) informational
-// row — Amount = what was actually requested, Balance = what was actually
-// available once the older balance is accounted for — followed by the real
-// PAYOUT row, rendered completely normally (own amount/status/void). No new
+// TWO rows per the user's own explicit spec (2026-09-27 follow-up): the real
+// PAYOUT row, rendered completely normally (own amount/status/void), followed
+// by a trailing, non-voidable "Payout BBF" (Balance Brought Forward)
+// informational row — Amount = what was actually requested, Balance = what
+// was actually available once the older balance is accounted for. No new
 // Transaction/data is needed for this: whenever requested_amount is set,
 // the real row's own `amount` field IS mathematically the lifetime balance
 // immediately before it was applied (min(requested, lifetime) only ever
@@ -108,14 +108,23 @@ function statusBadgeText(row) {
 // the real prior debt is larger (see gaming.services.initiate_payout's
 // net_amount<=0 branch, which now records a ₦0 payout precisely so this
 // row has real data to render instead of nothing being recorded at all).
+//
+// ORDER (2026-09-27, second fix same day): the real row now comes BEFORE
+// the BBF row, not after. In a most-recent-first list these two land
+// adjacent at the very top for a fresh payout — leading with the BBF row
+// put its ₦600,000 intermediate figure on the very first line a Cashier
+// sees, with the corrected ₦0 one line below and easy to miss (exactly
+// this — "the last entry still says 600,000" — reported live). Leading
+// with the real row puts the true current balance first; the BBF line
+// right after it still explains how that figure was reached.
 const expandedRows = computed(() => {
   const out = []
   for (const row of props.rows) {
+    out.push({ ...row, _key: row.id })
     if (row.type === 'PAYOUT' && row.requested_amount) {
       const cleared = Number(row.requested_amount) - Number(row.amount)
       out.push({ ...row, _bbf: true, _key: `${row.id}-bbf`, _cleared: cleared })
     }
-    out.push({ ...row, _key: row.id })
   }
   return out
 })
