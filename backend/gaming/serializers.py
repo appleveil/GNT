@@ -39,7 +39,21 @@ class ClubSettingsSerializer(serializers.ModelSerializer):
             'require_approval_open_game_day', 'require_approval_close_game_day', 'require_approval_issue_chips',
             'require_approval_return_chips', 'require_approval_add_tip', 'require_approval_add_rake',
             'payout_auto_approve_threshold', 'owner_dashboard_game_day_enabled',
+            'cashier_can_initiate_payout',
+            'observe_min_player_time', 'min_player_time_minutes',
+            'track_away_from_table', 'away_max_minutes',
         ]
+
+    # 30-minute floor, 30-minute increments — see ClubSettings' own
+    # docstring. Only enforced when the field is actually being written
+    # (partial PATCHes are the norm here — see ClubSettingsView), and only
+    # meaningfully matters once observe_min_player_time is on, but validated
+    # unconditionally so a stored value can never drift out of the shape the
+    # frontend's stepped input promises.
+    def validate_min_player_time_minutes(self, value):
+        if value < 30 or value % 30 != 0:
+            raise serializers.ValidationError('Must be at least 30 minutes, in 30-minute increments.')
+        return value
 
 
 class GameDaySummarySerializer(serializers.ModelSerializer):

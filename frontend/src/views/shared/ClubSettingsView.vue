@@ -88,6 +88,79 @@ async function onSaveTable(table) {
   }
 }
 
+// ── Floor rules (Owner + Floor Manager) ─────────────────────────────────
+// Added 2026-09-27 — the first fields on ClubSettings a Floor Manager can
+// write at all (see gaming.views.ClubSettingsView.FLOOR_MANAGER_EDITABLE_FIELDS);
+// lives alongside Tables above (outside the Owner-only template block
+// below), not with the Owner-only Approvals section. observe_min_player_time
+// gates RETURNING chips only — a player can always leave the table, see
+// ClubSettings' own docstring. track_away_from_table's own away-tracking
+// mechanism (an actual "player got up"/"player's back" action pair on the
+// Cashier screen) is deliberately NOT built yet — this round only adds the
+// two settings fields it'll need, ahead of that work.
+const floorRuleTogglingField = ref('')
+async function onToggleFloorRule(field) {
+  floorRuleTogglingField.value = field
+  try {
+    const { data } = await api.patch('/club-settings/', { [field]: !clubSettings.current[field] })
+    clubSettings.current = data
+  } catch {
+    toast.error('Could not update that setting.')
+  } finally {
+    floorRuleTogglingField.value = ''
+  }
+}
+
+const minPlayerTimeInput = ref('')
+const minPlayerTimeSaving = ref(false)
+const minPlayerTimeError = ref('')
+async function onSaveMinPlayerTime() {
+  minPlayerTimeSaving.value = true
+  minPlayerTimeError.value = ''
+  try {
+    const { data } = await api.patch('/club-settings/', { min_player_time_minutes: minPlayerTimeInput.value })
+    clubSettings.current = data
+    toast.success('Minimum player time updated.')
+  } catch (err) {
+    minPlayerTimeError.value = err.response?.data?.min_player_time_minutes?.[0] || 'Could not save this.'
+  } finally {
+    minPlayerTimeSaving.value = false
+  }
+}
+
+const awayMaxInput = ref('')
+const awayMaxSaving = ref(false)
+const awayMaxError = ref('')
+async function onSaveAwayMax() {
+  awayMaxSaving.value = true
+  awayMaxError.value = ''
+  try {
+    const { data } = await api.patch('/club-settings/', { away_max_minutes: awayMaxInput.value })
+    clubSettings.current = data
+    toast.success('Away time updated.')
+  } catch (err) {
+    awayMaxError.value = err.response?.data?.away_max_minutes?.[0] || 'Could not save this.'
+  } finally {
+    awayMaxSaving.value = false
+  }
+}
+
+// ── Cashier permissions (Owner-only) ────────────────────────────────────
+const cashierPayoutToggling = ref(false)
+async function onToggleCashierCanInitiatePayout() {
+  cashierPayoutToggling.value = true
+  try {
+    const { data } = await api.patch('/club-settings/', {
+      cashier_can_initiate_payout: !clubSettings.current.cashier_can_initiate_payout,
+    })
+    clubSettings.current = data
+  } catch {
+    toast.error('Could not update that setting.')
+  } finally {
+    cashierPayoutToggling.value = false
+  }
+}
+
 // ── Approvals (Owner-only) ──────────────────────────────────────────────
 const APPROVAL_TOGGLES = [
   { field: 'require_approval_open_game_day', label: 'Open a game-day' },
@@ -214,7 +287,11 @@ function formatDate(iso) {
 onMounted(async () => {
   loadTables()
   if (!clubSettings.current) await clubSettings.fetchCurrent().catch(() => {})
-  if (clubSettings.current) thresholdInput.value = clubSettings.current.payout_auto_approve_threshold
+  if (clubSettings.current) {
+    thresholdInput.value = clubSettings.current.payout_auto_approve_threshold
+    minPlayerTimeInput.value = clubSettings.current.min_player_time_minutes
+    awayMaxInput.value = clubSettings.current.away_max_minutes
+  }
   if (auth.user?.role === 'OWNER') loadRates()
 })
 
@@ -284,6 +361,70 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </template>
     </div>
 
+    <div class="card section-card">
+      <div class="section-title">Floor rules</div>
+      <p class="section-note">Owner or Floor Manager can edit these.</p>
+      <p v-if="!clubSettings.current" class="muted">Loading…</p>
+      <div v-else class="toggle-list">
+        <div class="toggle-row">
+          <div class="row-info">
+            <div class="row-name">Observe minimum player time</div>
+            <div class="row-sub">
+              A player can leave the table any time, but chips can't be returned for them until this long
+              has passed since they sat down — a Floor Manager PIN overrides it early.
+            </div>
+          </div>
+          <button
+            class="switch" type="button" :class="{ 'switch--on': clubSettings.current.observe_min_player_time }"
+            :disabled="floorRuleTogglingField === 'observe_min_player_time'" role="switch"
+            :aria-checked="clubSettings.current.observe_min_player_time"
+            @click="onToggleFloorRule('observe_min_player_time')"
+          >
+            <span class="switch-knob" />
+          </button>
+        </div>
+        <form v-if="clubSettings.current.observe_min_player_time" class="sub-form" @submit.prevent="onSaveMinPlayerTime">
+          <label class="field">
+            <span class="field-label">Minimum player time (minutes)</span>
+            <input v-model="minPlayerTimeInput" type="number" min="30" step="30" required class="ff" />
+          </label>
+          <button class="btn btn--secondary" type="submit" :disabled="minPlayerTimeSaving">
+            {{ minPlayerTimeSaving ? 'Saving…' : 'Save' }}
+          </button>
+          <p v-if="minPlayerTimeError" class="form-error">{{ minPlayerTimeError }}</p>
+        </form>
+
+        <div class="toggle-row">
+          <div class="row-info">
+            <div class="row-name">Track away from table</div>
+            <div class="row-sub">
+              A player away longer than the max below has that extra time added to their own minimum player
+              time — only while it hasn't already elapsed. Marking a player away/back on the Cashier screen
+              isn't built yet; this just stores the setting ahead of that.
+            </div>
+          </div>
+          <button
+            class="switch" type="button" :class="{ 'switch--on': clubSettings.current.track_away_from_table }"
+            :disabled="floorRuleTogglingField === 'track_away_from_table'" role="switch"
+            :aria-checked="clubSettings.current.track_away_from_table"
+            @click="onToggleFloorRule('track_away_from_table')"
+          >
+            <span class="switch-knob" />
+          </button>
+        </div>
+        <form v-if="clubSettings.current.track_away_from_table" class="sub-form" @submit.prevent="onSaveAwayMax">
+          <label class="field">
+            <span class="field-label">Max time away (minutes)</span>
+            <input v-model="awayMaxInput" type="number" min="1" step="1" required class="ff" />
+          </label>
+          <button class="btn btn--secondary" type="submit" :disabled="awayMaxSaving">
+            {{ awayMaxSaving ? 'Saving…' : 'Save' }}
+          </button>
+          <p v-if="awayMaxError" class="form-error">{{ awayMaxError }}</p>
+        </form>
+      </div>
+    </div>
+
     <template v-if="auth.user?.role === 'OWNER'">
       <div class="card section-card">
         <div class="section-title">Require approval</div>
@@ -321,6 +462,27 @@ const N = n => `₦${Number(n).toLocaleString()}`
               :disabled="dashboardTogglingField === 'owner_dashboard_game_day_enabled'" role="switch"
               :aria-checked="clubSettings.current.owner_dashboard_game_day_enabled"
               @click="onToggleDashboardGameDay"
+            >
+              <span class="switch-knob" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card section-card">
+        <div class="section-title">Cashier permissions</div>
+        <p v-if="!clubSettings.current" class="muted">Loading…</p>
+        <div v-else class="toggle-list">
+          <div class="toggle-row">
+            <div class="row-info">
+              <div class="row-name">Cashier can initiate a payout</div>
+              <div class="row-sub">Off hides/disables the Payout button on the Cashier's own screen — the Owner's own Players-page payout is unaffected.</div>
+            </div>
+            <button
+              class="switch" type="button" :class="{ 'switch--on': clubSettings.current.cashier_can_initiate_payout }"
+              :disabled="cashierPayoutToggling" role="switch"
+              :aria-checked="clubSettings.current.cashier_can_initiate_payout"
+              @click="onToggleCashierCanInitiatePayout"
             >
               <span class="switch-knob" />
             </button>
@@ -429,6 +591,14 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .toggle-list { display: flex; flex-direction: column; }
 .toggle-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .toggle-row:last-child { border-bottom: none; }
+
+/* The number field that appears directly under a toggle-row once it's on
+   (min-player-time minutes, away-max minutes) — sits inside the same
+   border-bottom rhythm as the toggle rows around it. */
+.sub-form { display: flex; align-items: center; gap: 10px; padding: 4px 0 14px; border-bottom: 1px solid var(--border); }
+.sub-form:last-child { border-bottom: none; }
+.sub-form .field { flex-direction: row; align-items: center; gap: 8px; }
+.sub-form .ff { width: 100px; }
 
 .switch {
   width: 40px;

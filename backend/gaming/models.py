@@ -115,6 +115,44 @@ class ClubSettings(models.Model):
     doing it straight from Dashboard (no PIN, under their own login — see
     DashboardView.vue's onOpenGameDay) is an opt-in convenience, not the
     expected path.
+
+    Five more added 2026-09-27, a genuinely different pair of concerns —
+    not sign-off routing, but whether an action is available at all
+    (cashier_can_initiate_payout) and a first table-stakes floor rule
+    (minimum player time). Split Owner-only vs both-editable per the
+    request: `cashier_can_initiate_payout` is Owner-only (it's about who
+    holds the purse strings); the minimum-player-time pair and the
+    track-away-from-table pair are editable by BOTH Owner and Floor
+    Manager — see ClubSettingsView.FLOOR_MANAGER_EDITABLE_FIELDS, since
+    this is the first time a Floor Manager needs write access to this
+    model at all (every require_approval_* toggle above stays Owner-only).
+
+    cashier_can_initiate_payout — off hides/disables the Payout button on
+    the Cashier's own Active Game-Day screen (ActiveGameDayView.vue) AND is
+    enforced server-side in gaming.services.initiate_payout (a Cashier
+    calling the endpoint directly is rejected too) — Owner-initiated payout
+    (initiate_direct_payout, from the Players page) is a completely
+    separate flow and is never affected by this.
+
+    observe_min_player_time / min_player_time_minutes — how long a player
+    must have been seated (GameDayPlayer.added_at) before chips can be
+    RETURNED for them (CHIPS_IN) — see record_transaction. They can still
+    LEAVE the table any time (leave_table has no time gate at all) — this
+    only blocks cashing out early, and even then only without a Floor
+    Manager PIN override. Off by default (a new restriction, opt-in like
+    every other new gate added this way — see max_chips_issuable/
+    owner_dashboard_game_day_enabled's own precedent). Default 240 minutes
+    (4 hours) once on; the frontend steps this in 30-minute increments with
+    a 30-minute floor, enforced server-side too (see
+    ClubSettingsSerializer.validate_min_player_time_minutes).
+
+    track_away_from_table / away_max_minutes — added as SETTINGS ONLY this
+    round, deliberately not enforced anywhere yet (no model field tracks a
+    player's away time, no view surfaces an "away"/"returned" action) — the
+    mechanism itself (a player who's away longer than away_max_minutes has
+    that excess added to their own min_player_time_minutes, but only while
+    it hasn't already elapsed) is left for a later pass. Stored now so the
+    Settings screen has a stable place for it ahead of that work.
     """
 
     require_approval_open_game_day = models.BooleanField(default=True)
@@ -127,6 +165,14 @@ class ClubSettings(models.Model):
     # instead of sitting PENDING_APPROVAL for the Owner to act on.
     payout_auto_approve_threshold = models.DecimalField(max_digits=14, decimal_places=0, default=Decimal('500000'))
     owner_dashboard_game_day_enabled = models.BooleanField(default=False)
+
+    cashier_can_initiate_payout = models.BooleanField(default=True)
+
+    observe_min_player_time = models.BooleanField(default=False)
+    min_player_time_minutes = models.PositiveIntegerField(default=240)  # 4 hours; 30-min increments, 30-min floor
+
+    track_away_from_table = models.BooleanField(default=False)
+    away_max_minutes = models.PositiveIntegerField(default=10)
 
     def save(self, *args, **kwargs):
         self.pk = 1

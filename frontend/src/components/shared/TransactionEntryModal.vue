@@ -178,8 +178,34 @@ async function onSubmit() {
     },
   }
   const settingKey = APPROVAL_SETTING_BY_TYPE[props.type]
-  if (settingKey && clubSettings.current?.[settingKey] === false) plainConfirm(opts)
-  else confirmFm(opts)
+  if (settingKey && clubSettings.current?.[settingKey] === false) {
+    // Independent of the toggle above: a too-early Return Chips still needs
+    // a Floor Manager PIN (ClubSettings.observe_min_player_time, added
+    // 2026-09-27) even when this type's own approval toggle is off. The
+    // plain-confirm sheet has no PIN field at all, so a rejection here
+    // can't just show inline like plainConfirm normally does — escalate
+    // straight to the real PIN sheet instead, reusing the same `opts` (same
+    // onSubmit closure) so entering the PIN there completes the original
+    // entry. Distinguished via requires_floor_manager_pin on the response,
+    // not by matching the error text — see MinimumPlayerTimeNotMetError.
+    plainConfirm({
+      ...opts,
+      onSubmit: async () => {
+        try {
+          await doSave()
+          emit('saved')
+        } catch (err) {
+          if (err.response?.data?.requires_floor_manager_pin) {
+            confirmFm(opts)
+            return
+          }
+          throw err
+        }
+      },
+    })
+  } else {
+    confirmFm(opts)
+  }
 }
 
 const N = n => `₦${Number(n || 0).toLocaleString()}`

@@ -133,10 +133,10 @@ async function onSubmitExisting() {
   error.value = ''
   submitting.value = true
   try {
-    await api.post(`/game-days/${gameDay.current.id}/players/`, {
+    const { data: seated } = await api.post(`/game-days/${gameDay.current.id}/players/`, {
       player_id: selectedId.value, seat_number: props.seatNumber,
     })
-    emit('added')
+    emit('added', seated.id)
     emit('close')
   } catch (err) {
     error.value = err.response?.data?.detail || 'Could not seat this player.'
@@ -166,7 +166,7 @@ async function onSubmitNew() {
         is_default: true,
       })
     }
-    emit('added')
+    emit('added', seated.id)
     emit('close')
   } catch (err) {
     if (err.response?.data?.registered_not_seated) {

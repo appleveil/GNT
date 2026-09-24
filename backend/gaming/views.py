@@ -326,18 +326,39 @@ class ClubSettingsView(APIView):
     require_approval_* toggles + the payout auto-approval threshold).
     Reading is open to every role: the frontend needs these flags to
     decide whether to show the PIN sheet or a plain confirm for each
-    gated action, regardless of who's using it. Writing is Owner-only.
+    gated action, regardless of who's using it. Writing was Owner-only
+    until 2026-09-27, when the minimum-player-time/track-away-from-table
+    pairs became the first fields on this model a Floor Manager can also
+    write — see FLOOR_MANAGER_EDITABLE_FIELDS below; every other field
+    (the require_approval_* toggles, payout threshold,
+    cashier_can_initiate_payout, ...) stays Owner-only.
     """
+
+    # The only fields a Floor Manager may PATCH — everything else on
+    # ClubSettings stays Owner-only. Checked explicitly in patch() below
+    # rather than via a second endpoint, matching how TableViewSet already
+    # lets a Floor Manager write a subset of Table's own fields.
+    FLOOR_MANAGER_EDITABLE_FIELDS = {
+        'observe_min_player_time', 'min_player_time_minutes',
+        'track_away_from_table', 'away_max_minutes',
+    }
 
     def get_permissions(self):
         if self.request.method == 'GET':
             return [IsAuthenticated()]
-        return [IsOwner()]
+        return [IsFloorManagerOrOwner()]
 
     def get(self, request):
         return Response(ClubSettingsSerializer(ClubSettings.load()).data)
 
     def patch(self, request):
+        if request.user.role != StaffUser.Role.OWNER:
+            disallowed = set(request.data.keys()) - self.FLOOR_MANAGER_EDITABLE_FIELDS
+            if disallowed:
+                return Response(
+                    {'detail': f'A Floor Manager can only change: {", ".join(sorted(self.FLOOR_MANAGER_EDITABLE_FIELDS))}.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         serializer = ClubSettingsSerializer(ClubSettings.load(), data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()

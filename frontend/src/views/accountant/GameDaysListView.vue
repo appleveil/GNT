@@ -7,6 +7,7 @@ import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
 import { describeChipsVariance } from '@/utils/chipsVariance'
+import { currentPlayerBalance } from '@/utils/nettedPayout'
 import { useToast } from '@/composables/useToast'
 
 // Game-day history (Phase B, 2026-09-14) — GET /api/game-days/ is
@@ -189,7 +190,12 @@ const selectedPlayerStats = computed(() => {
     else if (PAYMENT_TYPES.has(r.type)) payments += amt
   }
   const last = playerLedger.value[playerLedger.value.length - 1]
-  return { chipsOut, payments, chipsReturned, balance: last ? Number(last.running_balance) : 0 }
+  const rawBalance = last ? Number(last.running_balance) : 0
+  // See utils/nettedPayout.js — a netted payout's game-day-scoped
+  // running_balance understates what's actually still owed once cleared;
+  // this was the third of three independently-drifting copies of the same
+  // fact, found 2026-09-27 while fixing the live bug in the other two.
+  return { chipsOut, payments, chipsReturned, balance: currentPlayerBalance(playerLedger.value, rawBalance) }
 })
 
 async function loadPlayerLedger(playerId) {

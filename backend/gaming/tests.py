@@ -2386,6 +2386,176 @@ class RequireApprovalTogglesTests(APITestCase):
         self.assertIsNotNone(txn.pk)
 
 
+class CashierCanInitiatePayoutToggleTests(APITestCase):
+    """
+    ClubSettings.cashier_can_initiate_payout (Owner-only, default True,
+    added 2026-09-27) — off rejects a Cashier's call to initiate_payout
+    outright, before any other check. Owner's own initiate_direct_payout
+    is a separate flow, never affected.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='ccip_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='ccip_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='CCIP 1', display_name='CCIP Player')
+        PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456700',
+            account_name='CCIP Player', is_default=True,
+        )
+        self.gd = services.open_game_day(260, timezone.now(), self.owner)
+        services.seat_player(self.gd, self.owner, player=self.player)
+        services.leave_table(self.gd, self.player, operator=self.cashier)
+        Transaction.objects.create(
+            game_day=self.gd, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+
+    def test_cashier_blocked_when_disabled(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.cashier_can_initiate_payout = False
+        settings_obj.save()
+        with self.assertRaises(AuthorizationError):
+            services.initiate_payout(self.player, Decimal(50000), self.cashier, game_day=self.gd)
+
+    def test_cashier_allowed_by_default(self):
+        _disable_payout_auto_approval()
+        payout = services.initiate_payout(self.player, Decimal(50000), self.cashier, game_day=self.gd)
+        self.assertIsNotNone(payout.pk)
+
+    def test_toggle_off_does_not_affect_owner_direct_payout(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.cashier_can_initiate_payout = False
+        settings_obj.save()
+        # A separate lifetime-balance credit, independent of tonight's game-day.
+        Transaction.objects.create(
+            game_day=None, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(10000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        txn = services.initiate_direct_payout(self.player, Decimal(10000), self.owner)
+        self.assertIsNotNone(txn.pk)
+
+
+class MinimumPlayerTimeTests(APITestCase):
+    """
+    ClubSettings.observe_min_player_time / min_player_time_minutes (Owner-
+    or-Floor-Manager-editable, off by default, added 2026-09-27) — a
+    player can leave the table any time, but chips can't be RETURNED
+    (CHIPS_IN) for them until min_player_time_minutes have passed since
+    they were seated, unless a Floor Manager PIN overrides it.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='mpt_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='mpt_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.fm = FloorManager(name='MPT Floor Boss', created_by=self.owner)
+        self.fm.set_pin('9999')
+        self.fm.save()
+        self.gd = services.open_game_day(270, timezone.now(), self.owner)
+        # Isolates the min-player-time gate from the separate, pre-existing
+        # require_approval_return_chips toggle (default True — would
+        # otherwise demand a PIN on every test here regardless of this
+        # feature). test_one_pin_satisfies_both... turns it back on deliberately.
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_return_chips = False
+        settings_obj.save()
+
+    def _seat(self, code, seated_minutes_ago):
+        player = Player.objects.create(account_code=code, display_name=code)
+        services.seat_player(self.gd, self.owner, player=player)
+        seat = GameDayPlayer.objects.get(game_day=self.gd, player=player)
+        seat.added_at = timezone.now() - timedelta(minutes=seated_minutes_ago)
+        seat.save(update_fields=['added_at'])
+        Transaction.objects.create(
+            game_day=self.gd, player=player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(100000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        return player
+
+    def test_off_by_default_no_gate_at_all(self):
+        player = self._seat('MPT 1', seated_minutes_ago=1)  # just sat down
+        txn = services.record_transaction(  # no PIN supplied — off means off
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=self.gd, player=player,
+        )
+        self.assertIsNotNone(txn.pk)
+
+    def test_blocked_before_minimum_time_without_a_pin(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.observe_min_player_time = True
+        settings_obj.min_player_time_minutes = 240
+        settings_obj.save()
+        player = self._seat('MPT 2', seated_minutes_ago=30)  # well under 240
+        with self.assertRaises(AuthorizationError):
+            services.record_transaction(
+                type=Transaction.Type.CHIPS_IN, amount=Decimal(50000), recorded_by=self.cashier,
+                game_day=self.gd, player=player,
+            )
+
+    def test_floor_manager_pin_overrides_it(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.observe_min_player_time = True
+        settings_obj.min_player_time_minutes = 240
+        settings_obj.save()
+        player = self._seat('MPT 3', seated_minutes_ago=30)
+        txn = services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=self.gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        self.assertIsNotNone(txn.pk)
+        self.assertEqual(txn.floor_manager, self.fm)
+
+    def test_allowed_once_minimum_time_has_elapsed(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.observe_min_player_time = True
+        settings_obj.min_player_time_minutes = 240
+        settings_obj.save()
+        player = self._seat('MPT 4', seated_minutes_ago=241)  # just over the line
+        txn = services.record_transaction(  # no PIN supplied
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=self.gd, player=player,
+        )
+        self.assertIsNotNone(txn.pk)
+
+    def test_one_pin_satisfies_both_the_general_toggle_and_the_time_override(self):
+        """When require_approval_return_chips is ALSO on, the same single PIN
+        covers both requirements — no second prompt."""
+        settings_obj = ClubSettings.load()
+        settings_obj.observe_min_player_time = True
+        settings_obj.min_player_time_minutes = 240
+        settings_obj.require_approval_return_chips = True
+        settings_obj.save()
+        player = self._seat('MPT 5', seated_minutes_ago=30)
+        txn = services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=self.gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        self.assertIsNotNone(txn.pk)
+
+    def test_leaving_the_table_has_no_time_gate_at_all(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.observe_min_player_time = True
+        settings_obj.min_player_time_minutes = 240
+        settings_obj.save()
+        player = self._seat('MPT 6', seated_minutes_ago=1)
+        seat = services.leave_table(self.gd, player, operator=self.cashier)  # should not raise
+        self.assertIsNotNone(seat.left_at)
+
+    def test_api_response_flags_requires_floor_manager_pin(self):
+        """The frontend needs to tell this apart from any other 403 without
+        string-matching the message — see TransactionEntryModal.vue's onSubmit."""
+        settings_obj = ClubSettings.load()
+        settings_obj.observe_min_player_time = True
+        settings_obj.min_player_time_minutes = 240
+        settings_obj.save()
+        player = self._seat('MPT 7', seated_minutes_ago=5)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/', {
+            'type': 'CHIPS_IN', 'amount': '10000', 'game_day': self.gd.id, 'player': player.id,
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(response.data['requires_floor_manager_pin'])
+
+
 class MaxChipsIssuablePerTableTests(APITestCase):
     """
     Table.max_chips_issuable (added 2026-09-23, corrected same day) — a
@@ -2796,9 +2966,10 @@ class GameDaysForPlayerFilterTests(APITestCase):
 
 class ClubSettingsAndTablePermissionsAPITests(APITestCase):
     """
-    ClubSettingsView (Owner writes, everyone reads) and TableViewSet's
-    write half (Owner-or-Floor-Manager, added 2026-09-23 for the
-    "Settings" screen).
+    ClubSettingsView (everyone reads; writes are Owner-only except the 4
+    fields in FLOOR_MANAGER_EDITABLE_FIELDS, added 2026-09-27 — see that
+    class) and TableViewSet's write half (Owner-or-Floor-Manager, added
+    2026-09-23 for the "Settings" screen).
     """
 
     def setUp(self):
@@ -2833,6 +3004,56 @@ class ClubSettingsAndTablePermissionsAPITests(APITestCase):
         response = self.client.patch('/api/club-settings/', {'require_approval_open_game_day': False})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(ClubSettings.load().require_approval_open_game_day)
+
+    def test_cashier_cannot_write_club_settings_at_all(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.patch('/api/club-settings/', {'observe_min_player_time': True})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_floor_manager_can_write_min_player_time_and_track_away_fields(self):
+        self.client.force_authenticate(self.fm_user)
+        response = self.client.patch('/api/club-settings/', {
+            'observe_min_player_time': True, 'min_player_time_minutes': 90,
+            'track_away_from_table': True, 'away_max_minutes': 15,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        obj = ClubSettings.load()
+        self.assertTrue(obj.observe_min_player_time)
+        self.assertEqual(obj.min_player_time_minutes, 90)
+        self.assertTrue(obj.track_away_from_table)
+        self.assertEqual(obj.away_max_minutes, 15)
+
+    def test_floor_manager_cannot_write_owner_only_fields(self):
+        self.client.force_authenticate(self.fm_user)
+        response = self.client.patch('/api/club-settings/', {'cashier_can_initiate_payout': False})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(ClubSettings.load().cashier_can_initiate_payout)  # unchanged
+
+    def test_floor_manager_cannot_mix_an_owner_only_field_into_an_otherwise_allowed_request(self):
+        self.client.force_authenticate(self.fm_user)
+        response = self.client.patch('/api/club-settings/', {
+            'observe_min_player_time': True, 'require_approval_open_game_day': False,
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ClubSettings.load().observe_min_player_time)  # neither field was written
+
+    def test_owner_can_write_every_field_including_floor_manager_ones(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch('/api/club-settings/', {
+            'cashier_can_initiate_payout': False, 'observe_min_player_time': True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        obj = ClubSettings.load()
+        self.assertFalse(obj.cashier_can_initiate_payout)
+        self.assertTrue(obj.observe_min_player_time)
+
+    def test_min_player_time_minutes_rejects_sub_30_and_non_increments(self):
+        self.client.force_authenticate(self.owner)
+        for bad_value in (0, 15, 45, 100):
+            response = self.client.patch('/api/club-settings/', {'min_player_time_minutes': bad_value})
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, bad_value)
+        response = self.client.patch('/api/club-settings/', {'min_player_time_minutes': 90})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_floor_manager_and_owner_can_edit_a_table(self):
         for user in (self.fm_user, self.owner):

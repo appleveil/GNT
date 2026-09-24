@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
+import { nettedPayoutBalance } from '@/utils/nettedPayout'
 
 // Shared tabular ledger row renderer (2026-09-17) — replaces 7 near-identical
 // hand-rolled `.feed-row`/`.ledger-row`/`.activity-row` implementations
@@ -152,6 +153,12 @@ const expandedRows = computed(() => {
           <td class="num mono">
             <span v-if="row._bbf">{{ N(row.amount) }}</span>
             <span v-else-if="row.is_voided" class="voided-label">VOIDED</span>
+            <!-- A netted real Payout row's own game-day-scoped
+                 running_balance looks like more is still owed than is true
+                 (see the BBF comment above) — nettedPayoutBalance is the
+                 single shared source for what to show instead, also used by
+                 ActiveGameDayView and GameDaysListView. -->
+            <span v-else-if="row.requested_amount">{{ N(nettedPayoutBalance(row)) }}</span>
             <span v-else>{{ N(row.running_balance) }}</span>
           </td>
           <td v-if="showStatus">

@@ -4,6 +4,7 @@ rule is independently callable/testable. See CONCEPT.md's "Scope decisions"
 and "Floor Manager" sections for the rules encoded here.
 """
 
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction as db_transaction
@@ -12,7 +13,7 @@ from django.utils import timezone
 from accounts.models import AccountCode, FloorManager, Player, StaffMember, StaffUser
 
 from . import selectors
-from .exceptions import AuthorizationError, InvalidStateError, TableFullError
+from .exceptions import AuthorizationError, InvalidStateError, MinimumPlayerTimeNotMetError, TableFullError
 from .models import ClubSettings, ConversionRate, GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
 
 # A real table only has so many seats. Revised 2026-09-15: a departed player
@@ -781,6 +782,39 @@ def record_transaction(
             fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
             if fm is None:
                 raise AuthorizationError('A Floor Manager PIN is required to record this entry.')
+
+    # Minimum player time (added 2026-09-27, ClubSettings.observe_min_player_time)
+    # — a player can LEAVE the table any time (leave_table has no time gate
+    # at all) but chips can't be RETURNED for them until they've been
+    # seated at least min_player_time_minutes, unless a Floor Manager PIN
+    # overrides it. Independent of require_approval_return_chips above —
+    # even when that toggle is off (no PIN normally needed to return
+    # chips), a too-early return still forces one; if `fm` was already
+    # resolved by the block above, that same PIN satisfies both, no second
+    # prompt. GameDayPlayer.added_at is the anchor — a player who leaves and
+    # rejoins doesn't get their clock reset (Track Away From Table, when
+    # it's actually built, is the mechanism for adjusting this, not a
+    # reset). Player-facing debt/time figures stay visible here (unlike the
+    # Cashier's lifetime-balance blind spot) — this isn't about hiding
+    # history, just gating an early cash-out.
+    if type == Transaction.Type.CHIPS_IN and game_day is not None and player is not None:
+        settings_obj = ClubSettings.load()
+        if settings_obj.observe_min_player_time:
+            seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
+            if seat is not None:
+                minimum = timedelta(minutes=settings_obj.min_player_time_minutes)
+                elapsed = timezone.now() - seat.added_at
+                if elapsed < minimum:
+                    if fm is None:
+                        fm = _resolve_floor_manager(floor_manager_id, floor_manager_pin)
+                    if fm is None:
+                        elapsed_minutes = int(elapsed.total_seconds() // 60)
+                        raise MinimumPlayerTimeNotMetError(
+                            f'{player.display_name} must be seated at least {settings_obj.min_player_time_minutes} '
+                            f'minutes before chips can be returned (seated {elapsed_minutes} minute(s) so far) — '
+                            f'a Floor Manager PIN is required to override this.'
+                        )
+
     if game_day is not None and game_day.status == GameDay.Status.OPEN:
         _ensure_seated(game_day, player, recorded_by, block_departed=(type == Transaction.Type.CHIPS_OUT))
 
@@ -978,10 +1012,21 @@ def initiate_payout(player, amount, operator, game_day=None):
     ask preserved on requested_amount and spelled out in notes so it's
     visible on the ledger rather than silently substituted. If the netted
     amount is zero (this game-day's win doesn't even cover the old debt),
-    no payout is created at all — the Cashier is told there's nothing
-    payable, without being told why, and the Owner (who already has
-    lifetime-balance visibility) is left to explain it if asked.
+    a ₦0 payout is still recorded (revised 2026-09-27 — see the net_amount
+    <= 0 branch below), settled immediately since there's nothing to
+    actually transfer; the Cashier still isn't told the debt figure itself.
+
+    Revised 2026-09-27 — ClubSettings.cashier_can_initiate_payout (Owner-
+    only, default True): off rejects a Cashier's call to this outright,
+    before any of the checks below run. Mirrored in the frontend (the
+    Payout button hides/disables on ActiveGameDayView.vue), but enforced
+    here too since this is reachable directly via the API regardless of
+    what the UI shows. Doesn't affect initiate_direct_payout (the Owner's
+    own, separate Players-page flow) at all.
     """
+    if operator.role == StaffUser.Role.CASHIER and not ClubSettings.load().cashier_can_initiate_payout:
+        raise AuthorizationError('A Cashier is not currently permitted to initiate a payout — ask the Owner.')
+
     game_day = game_day or selectors.current_open_game_day()
     if game_day is None:
         raise InvalidStateError('A game-day must be open to initiate a payout.')

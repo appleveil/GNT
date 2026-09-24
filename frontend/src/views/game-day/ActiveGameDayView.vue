@@ -2,6 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
+import { useClubSettingsStore } from '@/stores/clubSettings'
 import TransactionEntryModal from '@/components/shared/TransactionEntryModal.vue'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
@@ -9,11 +10,13 @@ import AddPlayerModal from '@/components/shared/AddPlayerModal.vue'
 import StartGameDayModal from '@/components/shared/StartGameDayModal.vue'
 import PlayerBankAccountModal from '@/components/shared/PlayerBankAccountModal.vue'
 import { canVoidTransaction } from '@/utils/canVoid'
+import { currentPlayerBalance } from '@/utils/nettedPayout'
 import { useToast } from '@/composables/useToast'
 import api from '@/api/axios'
 
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
+const clubSettings = useClubSettingsStore()
 const toast = useToast()
 
 const opening = ref(false)
@@ -159,8 +162,15 @@ function onAddPlayerClosed() {
   seatTarget.value = null
   newPlayerFlow.value = false
 }
-function onPlayerAdded() {
-  refreshAll()
+// Auto-focus a newly seated player (2026-09-27, explicit follow-up) —
+// AddPlayerModal now emits the seated player's own id (both the existing-
+// player and new-player submit paths). refreshAll() first so `players`
+// actually contains them before selectedPlayer's own computed looks them
+// up; setting selectedPlayerId before that resolves would just render
+// blank for one tick, not break anything, but this reads cleaner.
+async function onPlayerAdded(playerId) {
+  await refreshAll()
+  if (playerId) selectedPlayerId.value = playerId
 }
 
 const moveSeatTarget = ref(null) // player being moved, or null
@@ -213,11 +223,22 @@ async function onPickRejoinSeat(seatNumber) {
 
 const payoutSubmitting = ref(false)
 
+// ClubSettings.cashier_can_initiate_payout (Owner-only, default True, added
+// 2026-09-27) — off disables this for a Cashier specifically (an Owner
+// using this same screen is unaffected, matching how the setting is
+// enforced server-side too — see gaming.services.initiate_payout). `===
+// false` (not just falsy), same convention as every other clubSettings
+// check in this app — only an explicit false short-circuits; a still-
+// loading/failed fetch defaults to allowed, not blocked.
+const cashierPayoutBlocked = computed(
+  () => auth.user?.role === 'CASHIER' && clubSettings.current?.cashier_can_initiate_payout === false,
+)
+
 // A payout only makes sense once the club owes the player (balance > 0) and
 // they've left the table — left_at doubles as "has returned/never held chips."
 const payoutDisabled = computed(() => {
   const p = selectedPlayer.value
-  return !p || !(p.balance > 0) || !p.left_at || payoutSubmitting.value
+  return !p || !(p.balance > 0) || !p.left_at || payoutSubmitting.value || cashierPayoutBlocked.value
 })
 
 const bankModalOpen = ref(false)
@@ -332,34 +353,15 @@ const playerLedgerRows = computed(() => {
   return ledgerRows.value.filter(row => row.player === selectedPlayerId.value)
 })
 
-// The hero balance figure — normally just today's own game-day balance
-// (selectedPlayer.balance), UNLESS this player has a netted payout on
-// record today (requested_amount set — see gaming.services.initiate_payout
-// and LedgerTable's "Payout BBF" row). Uses the MOST RECENT such row
-// (ledgerRows is already most-recent-first — see loadLedger) so a later,
-// fresh payout attempt naturally supersedes an earlier rejected one.
-//
-// FIXED 2026-09-27 (live bug: approving Moses/WWI 12's payout left this
-// showing 600,000 instead of 0) — a netted payout's OWN debit already
-// fully accounts for the balance it consumed the moment it exists, for
-// every status EXCEPT rejected: PENDING_APPROVAL and TRANSFER_FAILED both
-// already reserve it (same "a pending payout already reduces this figure"
-// convention every other balance in this app follows), and APPROVED means
-// it's genuinely gone. is_voided (REJECTED) is the ONE state where the
-// debit gets cancelled, so the true balance really does go back to exactly
-// that payout's own `amount` (Balance Brought Forward) — not the raw
-// game-day balance, which would silently un-net the still-real prior debt.
-// Known limitation: this is a point-in-time snapshot tied to that one
-// payout — further activity after it (e.g. a rejoin-and-keep-playing) isn't
-// reflected. Accepted as an edge case, not built for.
-const nettedPayout = computed(() =>
-  playerLedgerRows.value.find(row => row.type === 'PAYOUT' && row.requested_amount),
+// The hero balance figure — today's own game-day balance
+// (selectedPlayer.balance), unless a netted payout overrides it. See
+// utils/nettedPayout.js for why — that's the single shared source for
+// this fact, also used by LedgerTable's balance column and
+// GameDaysListView's per-player stats after all three drifted out of
+// sync on 2026-09-27.
+const displayedBalance = computed(() =>
+  currentPlayerBalance(playerLedgerRows.value, selectedPlayer.value?.balance ?? 0),
 )
-const displayedBalance = computed(() => {
-  const netted = nettedPayout.value
-  if (netted) return netted.is_voided ? Number(netted.amount) : 0
-  return selectedPlayer.value?.balance ?? 0
-})
 
 // Same game-day-wide scope record_transaction's CHIPS_IN ceiling checks —
 // from the dedicated chipsTotals fetch, not `ledger` (which excludes RAKE/TIP).
@@ -380,11 +382,6 @@ const paymentsTonight = computed(() =>
 )
 const chipsInTonight = computed(() =>
   playerLedgerRows.value.filter(r => r.type === 'CHIPS_IN' && !r.is_voided).reduce((sum, r) => sum + Number(r.amount), 0)
-)
-// Positive = the club owes this player, negative = they owe the club — matches
-// selectedPlayer.balance's own convention; NOT negated like a club-wide total would be.
-const playerBalanceTonight = computed(() =>
-  playerLedgerRows.value.filter(r => !r.is_voided).reduce((sum, r) => sum + Number(r.signed_amount), 0)
 )
 
 const voidTarget = ref(null) // ledger row being voided, or null
@@ -526,6 +523,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <button class="action-btn" type="button" :disabled="!selectedPlayer" @click="paymentPickerOpen = true">Payment &#9662;</button>
             <button
               class="action-btn" type="button" :disabled="payoutDisabled"
+              :title="cashierPayoutBlocked ? 'The Owner has turned off Cashier-initiated payouts' : null"
               @click="onPayoutClick"
             >{{ payoutSubmitting ? 'Paying out…' : 'Payout' }}</button>
             <button
@@ -567,7 +565,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           </div>
           <div class="stat stat--accent">
             <div class="stat-label">Balance</div>
-            <div class="stat-value">{{ selectedPlayer ? N(playerBalanceTonight) : '--' }}</div>
+            <div class="stat-value">{{ selectedPlayer ? N(displayedBalance) : '--' }}</div>
           </div>
         </div>
 

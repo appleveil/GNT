@@ -2,6 +2,22 @@ class AuthorizationError(Exception):
     """Raised when an actor/PIN isn't authorized to perform a gated action."""
 
 
+class MinimumPlayerTimeNotMetError(AuthorizationError):
+    """
+    Raised by gaming.services.record_transaction's minimum-player-time gate
+    (added 2026-09-27, ClubSettings.observe_min_player_time) — a subclass
+    of AuthorizationError, not a new status code (still maps to 403 via the
+    global exception handler), but distinguishable so the response can
+    carry requires_floor_manager_pin=True. The frontend needs to tell "this
+    specific action needs a PIN override" apart from any other 403 without
+    string-matching the message (same reasoning as TableFullError's own
+    extra response fields) — see TransactionEntryModal.vue's onSubmit,
+    which escalates from its plain-confirm attempt straight to the real
+    Floor-Manager PIN sheet on this signal, instead of just showing the
+    error with no way to actually provide one.
+    """
+
+
 class InvalidStateError(Exception):
     """Raised when an action is attempted against an object in the wrong state
     (e.g. recording a transaction against an already-closed game-day)."""

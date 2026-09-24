@@ -1863,6 +1863,81 @@ against a ₦1,000,000 win confirmed the ₦0-payout path records
 ₦200,000 remainder correctly left outstanding afterward — cleaned up
 after. Full backend suite green (275/275), `npm run build` clean.
 
+### A live "still 400,000" report → 2 more Balance spots fixed; new Owner/Floor Manager settings: Cashier payout toggle, minimum player time, track-away-from-table (2026-09-27, same day)
+
+1. **Two more spots showing the stale today-only figure**, same bug class
+   as the hero-value fix above, found live: the stats-row's own "Balance"
+   tile (`playerBalanceTonight`, today-only sum) and — the one actually
+   named "the ledger part" — `LedgerTable.vue`'s own row-level Balance
+   column on the real (non-BBF) Payout row, whose `running_balance` is
+   inherently today-only by that selector's own scope. Both fixed the same
+   way: for a netted, non-voided PAYOUT row, show 0 (mathematically always
+   correct once netting has happened and nothing's been voided — see the
+   BBF comment). `playerBalanceTonight` was retired outright in favor of
+   reusing `displayedBalance` in both places, rather than keeping two
+   separately-computed "Balance" figures that could drift again.
+
+2. **`cashier_can_initiate_payout`** (Owner-only, default True) — off
+   disables/tooltips the Payout button on ActiveGameDayView.vue for a
+   Cashier specifically (an Owner using the same screen is unaffected) AND
+   is enforced in `gaming.services.initiate_payout` itself (checked first,
+   before any other logic) — the API is reachable directly regardless of
+   what the button shows.
+
+3. **`observe_min_player_time` / `min_player_time_minutes`** (both Owner-
+   and Floor-Manager-editable, off by default, 240 min/4h default, 30-min
+   floor and increments enforced via
+   `ClubSettingsSerializer.validate_min_player_time_minutes`) — a player
+   can leave the table any time (`leave_table` untouched, no time gate at
+   all) but chips can't be RETURNED (CHIPS_IN) until this long has passed
+   since `GameDayPlayer.added_at`, unless a Floor Manager PIN overrides it.
+   Wired into `record_transaction` as an INDEPENDENT check from the
+   pre-existing `require_approval_return_chips` toggle — even when that's
+   off (no PIN normally needed), an early return still forces one; if a PIN
+   was already resolved by the general check, the same one satisfies both
+   (no second prompt). New `MinimumPlayerTimeNotMetError` (a distinguishable
+   `AuthorizationError` subclass, same pattern as `TableFullError`'s own
+   extra response fields) carries `requires_floor_manager_pin: true` on the
+   403 so the frontend can react without string-matching the message:
+   `TransactionEntryModal.vue`'s plain-confirm attempt (used when
+   `require_approval_return_chips` is off) now catches exactly this signal
+   and escalates straight to the real PIN sheet, reusing the same
+   `onSubmit` closure, rather than just showing an error with no way to
+   actually provide a PIN.
+
+4. **`track_away_from_table` / `away_max_minutes`** (both Owner- and
+   Floor-Manager-editable, off by default, 10-min default) — settings
+   fields ONLY this round, deliberately not enforced anywhere: no model
+   field tracks a player's away time yet, no "player got up"/"player's
+   back" action exists on the Cashier screen. Stored now so Settings has a
+   stable place for it ahead of that later pass, per explicit instruction.
+
+5. **`ClubSettingsView`'s write permission split** — the first fields on
+   `ClubSettings` a Floor Manager can write at all (every `require_approval_*`
+   toggle, the payout threshold, and `cashier_can_initiate_payout` all stay
+   Owner-only). `FLOOR_MANAGER_EDITABLE_FIELDS` is checked explicitly in
+   `patch()` — a Floor Manager whose request mixes in even one Owner-only
+   field is rejected outright (nothing partially applied), verified by its
+   own test. `ClubSettingsView.vue` gained a new "Floor rules" card
+   (outside the Owner-only template block, alongside Tables) for the
+   shared pair, and a small Owner-only "Cashier permissions" card for the
+   payout toggle.
+
+6. **Newly-seated player auto-focus** (separate small follow-up, same
+   message) — `AddPlayerModal.vue`'s two submit paths (existing player,
+   new player) now emit the seated player's own id on `added`;
+   `ActiveGameDayView.vue`'s `onPlayerAdded` awaits `refreshAll()` then
+   sets `selectedPlayerId` to it, so a Cashier lands straight on the
+   player they just seated instead of needing a second click.
+
+Verified: 21 new backend tests (`CashierCanInitiatePayoutToggleTests` ×3,
+`MinimumPlayerTimeTests` ×8, `ClubSettingsAndTablePermissionsAPITests` +6),
+full suite green, `makemigrations --check --dry-run` clean before writing
+`gaming.0025_clubsettings_away_max_minutes_and_more` by hand, `npm run
+build` clean, migration applied live to the `test1` tenant proactively
+this time (via `tenant_command migrate`, not just the test DB) — direct
+lesson from this same day's earlier missed-migration live 500.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.
