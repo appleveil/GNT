@@ -62,6 +62,8 @@ const GameDaysListView = () => import('@/views/accountant/GameDaysListView.vue')
 // route below went with it.
 const RosterListView = () => import('@/views/accountant/RosterListView.vue')
 const RosterDetailView = () => import('@/views/accountant/RosterDetailView.vue')
+const PlayerLedgerView = () => import('@/views/accountant/PlayerLedgerView.vue')
+const PlayerPayoutView = () => import('@/views/accountant/PlayerPayoutView.vue')
 
 // Floor Manager's own screen (2026-09-17) — a real logged-in role now,
 // managing the Masseuse roster (named "Service Staff" until the
@@ -124,8 +126,14 @@ const routes = [
       { path: 'game-days', name: 'game-days', component: GameDaysListView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'roster', name: 'roster', component: RosterListView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'roster/:id', name: 'roster-detail', component: RosterDetailView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'roster/:id/ledger', name: 'roster-ledger', component: PlayerLedgerView, meta: { roles: BACK_OFFICE_ROLES } },
+      { path: 'roster/:id/payout', name: 'roster-payout', component: PlayerPayoutView, meta: { roles: OWNER_ONLY_ROLES } },
 
-      { path: 'admin', name: 'admin', component: AdminView, meta: { roles: OWNER_ONLY_ROLES } },
+      // Broadened from OWNER_ONLY_ROLES to BACK_OFFICE_ROLES 2026-09-25 —
+      // the Accountant needs the Account Codes section added that day;
+      // AdminView.vue itself still wraps every OTHER section in
+      // v-if="auth.isOwner", so this doesn't hand Accountant anything else.
+      { path: 'admin', name: 'admin', component: AdminView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'main-account', name: 'main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'deals/:playerId', name: 'deal-type-picker', component: DealTypePickerView, meta: { roles: OWNER_ONLY_ROLES } },

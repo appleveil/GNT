@@ -9,7 +9,7 @@ from decimal import Decimal
 from django.db import transaction as db_transaction
 from django.utils import timezone
 
-from accounts.models import FloorManager, Player, StaffMember, StaffUser
+from accounts.models import AccountCode, FloorManager, Player, StaffMember, StaffUser
 
 from . import selectors
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
@@ -329,6 +329,25 @@ def _validate_seat_number(game_day, seat_number, exclude_player=None):
         raise InvalidStateError(f'Seat {seat_number} is already taken.')
 
 
+def _assign_next_account_code(display_name):
+    """
+    Creates a new Player, consuming the oldest available AccountCode row —
+    added 2026-09-25, see AccountCode's own docstring. select_for_update
+    inside its own atomic block so two Cashiers registering a new player at
+    the same instant can never be handed the same code.
+    """
+    with db_transaction.atomic():
+        code_row = AccountCode.objects.select_for_update().filter(linked_player__isnull=True).first()
+        if code_row is None:
+            raise InvalidStateError(
+                'No available account codes — add more from the Admin page before registering a new player.'
+            )
+        player = Player.objects.create(account_code=code_row.code, display_name=display_name)
+        code_row.linked_player = player
+        code_row.save(update_fields=['linked_player'])
+        return player
+
+
 def seat_player(game_day, operator, player=None, player_fields=None, seat_number=None):
     """
     The explicit "add a player for tonight" action — see CONCEPT.md's Buy-in
@@ -360,12 +379,20 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
     seating itself: a rejection here (e.g. the default exceeds this
     player's chips_limit) rolls the seat back too, rather than leaving
     them seated but unchipped.
+
+    Revised 2026-09-25: `player_fields` no longer carries `account_code` —
+    a brand-new player is assigned the next available one from the
+    AccountCode pool (see _assign_next_account_code) instead of a Cashier
+    typing one in free-hand. Raises InvalidStateError if the pool is empty;
+    the Add Player form is expected to check GET
+    /account-codes/available-count/ first and disable itself, but this is
+    the real, authoritative gate.
     """
     _require_open_game_day(game_day)
     if player is None:
         if not player_fields:
             raise ValueError('Either player or player_fields is required.')
-        player = Player.objects.create(**player_fields)
+        player = _assign_next_account_code(player_fields['display_name'])
 
     existing_seat = GameDayPlayer.objects.filter(game_day=game_day, player=player).first()
     if existing_seat is not None and existing_seat.left_at is not None:

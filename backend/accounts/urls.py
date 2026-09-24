@@ -9,6 +9,7 @@ router.register('staff-users', views.StaffUserViewSet, basename='staffuser')
 router.register('floor-managers', views.FloorManagerViewSet, basename='floormanager')
 router.register('staff-members', views.StaffMemberViewSet, basename='staffmember')
 router.register('players', views.PlayerViewSet, basename='player')
+router.register('account-codes', views.AccountCodeViewSet, basename='accountcode')
 
 bank_accounts = views.PlayerBankAccountViewSet
 urlpatterns = [

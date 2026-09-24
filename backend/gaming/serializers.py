@@ -193,16 +193,29 @@ class SetConversionRateSerializer(serializers.Serializer):
 
 
 class TransactionSerializer(serializers.ModelSerializer):
+    # Added 2026-09-25 so a ledger row can show WHO auto-approved a payout
+    # stood in for — "Auto-<Cashier Name>" replaces the old generic
+    # "Auto-approved" badge (see LedgerTable.vue/PayoutsView.vue). Only ever
+    # meaningful for status=APPROVED + approved_by=None (the auto-approval
+    # marker, see services._execute_payout_transfer), but resolved for every
+    # row since who recorded any entry is generally useful, not payout-only.
+    recorded_by_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Transaction
         fields = [
             'id', 'game_day', 'player', 'type', 'amount', 'currency', 'conversion_rate',
-            'channel', 'notes', 'recorded_by', 'floor_manager', 'confirmed_at', 'status',
+            'channel', 'notes', 'recorded_by', 'recorded_by_name', 'floor_manager', 'confirmed_at', 'status',
             'approved_by', 'approved_at', 'is_voided', 'voided_by', 'voided_at', 'void_reason',
             'external_reference', 'created_at', 'tip_category', 'masseuse',
             'linked_transaction', 'profit_split_arrangement',
         ]
         read_only_fields = [f for f in fields if f not in ('game_day', 'player', 'type', 'amount', 'notes')]
+
+    def get_recorded_by_name(self, obj):
+        if obj.recorded_by_id is None:
+            return None
+        return obj.recorded_by.get_full_name() or obj.recorded_by.username
 
 
 class LedgerEntrySerializer(TransactionSerializer):
@@ -382,12 +395,15 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
 class SeatPlayerSerializer(serializers.Serializer):
     """
     Input for "add a player for tonight" — either `player_id` (seat an
-    existing club player) or `account_code` + `display_name` (create a new
-    one and seat it in the same call). See CONCEPT.md's Buy-in flow.
+    existing club player) or `display_name` (create a new one and seat it
+    in the same call). See CONCEPT.md's Buy-in flow.
+
+    `account_code` was dropped from this input 2026-09-25 — a new player's
+    code is now auto-assigned from the AccountCode pool (see
+    gaming.services._assign_next_account_code), not typed in by hand.
     """
 
     player_id = serializers.PrimaryKeyRelatedField(source='player', queryset=Player.objects.all(), required=False)
-    account_code = serializers.CharField(required=False)
     display_name = serializers.CharField(required=False)
     # Optional — the specific seat tapped on the Cashier's screen. Omitted
     # (e.g. the bulk "+ Add Player" flow) leaves the player unassigned.
@@ -395,13 +411,11 @@ class SeatPlayerSerializer(serializers.Serializer):
 
     def validate(self, data):
         has_existing = 'player' in data
-        has_new_fields = 'account_code' in data or 'display_name' in data
+        has_new_fields = 'display_name' in data
         if not has_existing and not has_new_fields:
             raise serializers.ValidationError(
-                'Provide either player_id (existing player) or account_code + display_name (new player).'
+                'Provide either player_id (existing player) or display_name (new player).'
             )
         if has_existing and has_new_fields:
-            raise serializers.ValidationError('Provide player_id OR new-player fields, not both.')
-        if has_new_fields and not ('account_code' in data and 'display_name' in data):
-            raise serializers.ValidationError('A new player needs both account_code and display_name.')
+            raise serializers.ValidationError('Provide player_id OR display_name, not both.')
         return data

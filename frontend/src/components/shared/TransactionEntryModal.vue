@@ -201,7 +201,7 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
       <div class="lbl">
         Amount
         <span v-if="chipsRemaining !== null" class="lbl-hint" :class="{ 'lbl-hint--danger': exceedsChipsLimit }">
-          ({{ N(chipsRemaining) }} left of chips limit tonight)
+          ({{ N(chipsRemaining) }} left of credit limit tonight)
         </span>
       </div>
       <div class="amount-box" :class="{ 'amount-box--danger': exceedsChipsLimit }">
@@ -212,7 +212,7 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
         />
       </div>
       <p v-if="exceedsChipsLimit" class="warn-text">
-        This exceeds {{ player.display_name }}'s chips limit for tonight ({{ N(player.chips_limit) }} total,
+        This exceeds {{ player.display_name }}'s credit limit for tonight ({{ N(player.chips_limit) }} total,
         {{ N(player.chips_used_today) }} already used). Lower the amount, or ask the Owner to raise the limit.
       </p>
 

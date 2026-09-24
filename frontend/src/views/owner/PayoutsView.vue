@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
 import RejectPayoutModal from '@/components/shared/RejectPayoutModal.vue'
+import { usePayoutRequestsStore } from '@/stores/payoutRequests'
 import { useToast } from '@/composables/useToast'
 
 // Owner-only payout approval queue (Phase C, 2026-09-14). No "list pending"
@@ -19,13 +20,16 @@ import { useToast } from '@/composables/useToast'
 // payout would render as a bare "VOIDED" instead of "Declined" with its reason.
 //
 // Auto-approval (2026-09-23, ClubSettings.payout_auto_approve_threshold):
-// initiate_payout immediately approves a payout at or under the threshold,
-// with approved_by left null as the marker that no one manually signed off
-// (see _execute_payout_transfer in gaming/services.py). A status of APPROVED
-// with no approved_by is what distinguishes "Auto-approved" from a manual
-// "Approved" in the history badge below — never inferred from amount here,
-// since the threshold can change after the fact.
+// initiate_payout/initiate_direct_payout immediately approve a payout at or
+// under the threshold, with approved_by left null as the marker that no one
+// manually signed off (see _execute_payout_transfer in gaming/services.py).
+// A status of APPROVED with no approved_by is what distinguishes an
+// auto-approval from a manual "Approved" in the history badge below — never
+// inferred from amount here, since the threshold can change after the fact.
+// Labeled "Auto-<Cashier Name>" (recorded_by_name, 2026-09-25) rather than a
+// generic "Auto-approved" — names who actually initiated it.
 const toast = useToast()
+const payoutRequests = usePayoutRequestsStore()
 
 const players = ref([])
 const transactions = ref([])
@@ -47,6 +51,7 @@ async function load() {
   } finally {
     loading.value = false
   }
+  payoutRequests.fetchPendingCount() // keeps the sidebar badge in step with whatever changed here
 }
 
 onMounted(load)
@@ -138,7 +143,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
               <RouterLink :to="`/roster/${t.player}`" class="player-link">{{ playerName(t.player) }}</RouterLink>
               <span v-if="t.status === 'REJECTED'" class="badge badge--rejected">Declined</span>
               <span v-else-if="t.is_voided" class="badge badge--voided">VOIDED</span>
-              <span v-else-if="t.status === 'APPROVED' && !t.approved_by" class="badge badge--auto-approved">Auto-approved</span>
+              <span v-else-if="t.status === 'APPROVED' && !t.approved_by" class="badge badge--auto-approved">Auto-{{ t.recorded_by_name || 'Cashier' }}</span>
               <span v-else class="badge badge--approved">{{ t.status.replace('_', ' ') }}</span>
             </div>
             <div class="row-sub">

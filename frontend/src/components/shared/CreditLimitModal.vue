@@ -4,11 +4,17 @@ import api from '@/api/axios'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
 
-// Owner-only "Chips limit" action (2026-09-24), reached from the Players
-// page's ⋮ menu — same PATCH /players/{id}/ {chips_limit} RosterDetailView's
-// own inline edit already used (Owner-gated server-side in
-// PlayerSerializer.validate_chips_limit), just as a modal so it's reachable
-// straight from the list, no page nav required.
+// Owner-only "Credit limit" action (2026-09-24, relabeled 2026-09-25 — see
+// PLAN.md), reached from the Players page's ⋮ menu — same PATCH
+// /players/{id}/ {chips_limit} RosterDetailView's own inline edit already
+// used (Owner-gated server-side in PlayerSerializer.validate_chips_limit),
+// just as a modal so it's reachable straight from the list, no page nav
+// required. The API field is still `chips_limit` (not renamed — a DB/API
+// change, not what was asked); only the user-facing label changed. This is
+// NOT the same thing as a table's own max_chips_issuable (Settings screen,
+// per-buy-in cap) — this caps how much a player can owe (unpaid chips) at
+// once before they have to settle up, see services.record_transaction's
+// CHIPS_OUT branch.
 const props = defineProps({
   player: { type: Object, required: true }, // { id, display_name, chips_limit }
 })
@@ -27,10 +33,10 @@ async function onSubmit() {
     const { data } = await api.patch(`/players/${props.player.id}/`, {
       chips_limit: limitInput.value === '' ? null : limitInput.value,
     })
-    toast.success('Chips limit updated.')
+    toast.success('Credit limit updated.')
     emit('saved', data)
   } catch (err) {
-    error.value = err.response?.data?.chips_limit?.[0] || 'Could not update the chips limit.'
+    error.value = err.response?.data?.chips_limit?.[0] || 'Could not update the credit limit.'
   } finally {
     submitting.value = false
   }
@@ -41,17 +47,18 @@ async function onSubmit() {
   <div class="overlay" @click.self="emit('close')">
     <div class="dialog card">
       <div class="head">
-        <div class="eyebrow">{{ player.display_name }} &mdash; chips limit</div>
+        <div class="eyebrow">{{ player.display_name }} &mdash; credit limit</div>
         <button class="close-btn" type="button" @click="emit('close')">&times;</button>
       </div>
 
       <form class="form" @submit.prevent="onSubmit">
         <label class="field">
-          <span class="field-label">Max chips issuable at once</span>
+          <span class="field-label">Max unpaid chips before settling up</span>
           <input
             :value="displayLimitInput" type="text" inputmode="numeric" placeholder="No cap" class="ff"
             @input="e => (limitInput = parseAmountInput(e.target.value))"
           />
+          <span class="field-hint">Resets each game-day — not the same as a table's own per-buy-in chip cap (set in Settings).</span>
         </label>
         <p v-if="error" class="form-error">{{ error }}</p>
         <div class="actions">
@@ -81,6 +88,7 @@ async function onSubmit() {
 .form { display: flex; flex-direction: column; gap: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.field-hint { font-size: 11.5px; color: var(--text-tertiary); line-height: 1.4; }
 .ff {
   height: var(--control-row-min);
   border: 1px solid var(--border-strong);

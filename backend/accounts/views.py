@@ -1,5 +1,5 @@
 from django.db import transaction as db_transaction
-from rest_framework import status, viewsets
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -8,12 +8,13 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
-from .permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner
+from .models import AccountCode, FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
+from .permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner, IsOwnerOrAccountant
 
 PIN_MIN_LENGTH = 4
 PIN_MAX_LENGTH = 8
 from .serializers import (
+    AccountCodeSerializer,
     FloorManagerSerializer,
     PlayerBankAccountSerializer,
     PlayerSerializer,
@@ -208,3 +209,51 @@ class PlayerBankAccountViewSet(viewsets.ModelViewSet):
             if serializer.validated_data.get('is_default'):
                 self.get_queryset().exclude(pk=serializer.instance.pk).update(is_default=False)
             serializer.save()
+
+
+class AccountCodeViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet):
+    """
+    The Account Code / DVA pool (Admin page, added 2026-09-25) — Owner or
+    Accountant stage codes ahead of time; gaming.services._assign_next_account_code
+    auto-consumes the oldest available one when a new player registers, so
+    a Cashier never types one in by hand any more (see AddPlayerModal.vue).
+
+    List/create (managing the pool) are Owner-or-Accountant only.
+    `available-count` is open to every authenticated role instead — the
+    Cashier's Add Player form needs it to disable itself / show a notice
+    when the pool is empty, without exposing the full pool listing (which
+    names every linked player) to that role.
+    """
+
+    queryset = AccountCode.objects.all().order_by('-created_at')
+    serializer_class = AccountCodeSerializer
+    permission_classes = [IsOwnerOrAccountant]
+
+    def create(self, request, *args, **kwargs):
+        # A single {"code": "..."} still works via the default ModelSerializer
+        # path below; {"codes": [...]} is the bulk-paste path the Admin page
+        # actually uses — a club stages a batch of DVAs at once, not one at a
+        # time. Duplicates (already in the pool) are reported, not fatal —
+        # every other code in the batch still gets added.
+        codes = request.data.get('codes')
+        if codes is None:
+            return super().create(request, *args, **kwargs)
+        codes = [c.strip() for c in codes if isinstance(c, str) and c.strip()]
+        if not codes:
+            return Response({'detail': 'Provide at least one code.'}, status=status.HTTP_400_BAD_REQUEST)
+        existing = set(AccountCode.objects.filter(code__in=codes).values_list('code', flat=True))
+        errors = [f'{code} already exists.' for code in codes if code in existing]
+        to_create = [
+            AccountCode(code=code, created_by=request.user)
+            for code in dict.fromkeys(codes)  # de-dupe within the batch itself, preserve order
+            if code not in existing
+        ]
+        created = AccountCode.objects.bulk_create(to_create)
+        return Response(
+            {'created': AccountCodeSerializer(created, many=True).data, 'errors': errors},
+            status=status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST,
+        )
+
+    @action(detail=False, methods=['get'], url_path='available-count', permission_classes=[IsAuthenticated])
+    def available_count(self, request):
+        return Response({'count': AccountCode.objects.filter(linked_player__isnull=True).count()})

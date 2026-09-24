@@ -37,10 +37,29 @@ const mode = ref(props.newOnly ? 'new' : 'existing')
 const submitting = ref(false)
 const error = ref('')
 
-// New player
-const accountCode = ref('')
+// New player — the "Account code" text field is gone (2026-09-25): a new
+// player's code is now auto-assigned from the AccountCode pool
+// (services._assign_next_account_code), not typed in by hand. This form
+// checks the pool's available count up front so it can disable itself
+// with a clear notice instead of failing only after submit — see
+// codeAvailable/loadCodeAvailability below. The real, authoritative gate
+// is still server-side either way.
 const displayName = ref('')
 const bank = ref({ bank_name: '', bank_code: '', account_number: '', account_name: '' })
+const codeAvailable = ref(true) // optimistic until the check below resolves
+const codeAvailabilityLoading = ref(true)
+
+async function loadCodeAvailability() {
+  codeAvailabilityLoading.value = true
+  try {
+    const { data } = await api.get('/account-codes/available-count/')
+    codeAvailable.value = data.count > 0
+  } catch {
+    codeAvailable.value = true // fail open — the server-side check still guards the actual submit
+  } finally {
+    codeAvailabilityLoading.value = false
+  }
+}
 
 // Existing player (seat-tap only — see newOnly above) — select against the
 // roster MINUS anyone with a GameDayPlayer row for tonight at all, active
@@ -96,8 +115,13 @@ async function loadRoster() {
 
 // newOnly never shows the existing-player tab, so there's nothing for the
 // roster fetch to serve — skip it entirely rather than loading data that'll
-// never render.
-onMounted(() => { if (!props.newOnly) loadRoster() })
+// never render. Account-code availability is checked eagerly either way
+// (cheap single GET) so the "New player" tab never flashes enabled before
+// disabling itself once the user switches to it.
+onMounted(() => {
+  if (!props.newOnly) loadRoster()
+  loadCodeAvailability()
+})
 
 function toggleSelect(id) {
   // One seat, one person — picking a different row replaces the selection.
@@ -123,12 +147,11 @@ async function onSubmitExisting() {
 }
 
 async function onSubmitNew() {
-  if (submitting.value) return
+  if (submitting.value || !codeAvailable.value) return
   error.value = ''
   submitting.value = true
   try {
     const { data: seated } = await api.post(`/game-days/${gameDay.current.id}/players/`, {
-      account_code: accountCode.value,
       display_name: displayName.value,
       seat_number: props.seatNumber,
     })
@@ -151,13 +174,14 @@ async function onSubmitNew() {
       // created, just not seated (table's full). Say so plainly rather than
       // showing this in the same red error state as a validation failure.
       toast.success(`${displayName.value} was registered but the table is full — seat them once a spot opens up.`)
-      accountCode.value = ''
       displayName.value = ''
       bank.value = { bank_name: '', bank_code: '', account_number: '', account_name: '' }
+      loadCodeAvailability() // that registration just consumed a code — refresh the count
     } else {
       error.value = Object.values(err.response?.data || {})[0]?.[0]
         || err.response?.data?.detail
         || 'Could not add player.'
+      if (err.response?.data?.detail?.includes('No available account codes')) codeAvailable.value = false
     }
   } finally {
     submitting.value = false
@@ -230,13 +254,13 @@ function onModeChange(next) {
       </template>
 
       <form v-else class="form" @submit.prevent="onSubmitNew">
-        <label class="field">
-          <span class="eyebrow">Account code</span>
-          <input v-model="accountCode" type="text" placeholder="e.g. WWI 15" required />
-        </label>
+        <p v-if="!codeAvailabilityLoading && !codeAvailable" class="dva-note dva-note--danger">
+          No account codes available — ask the Owner or Accountant to add more from the Admin page before
+          registering a new player.
+        </p>
         <label class="field">
           <span class="eyebrow">Name</span>
-          <input v-model="displayName" type="text" required />
+          <input v-model="displayName" type="text" required :disabled="!codeAvailable" />
         </label>
         <p class="section-note">Bank account (optional — for future winnings)</p>
         <BankAccountFields v-model="bank" />
@@ -247,7 +271,7 @@ function onModeChange(next) {
 
         <p v-if="error" class="form-error">{{ error }}</p>
 
-        <button class="btn btn--primary" type="submit" :disabled="submitting">
+        <button class="btn btn--primary" type="submit" :disabled="submitting || !codeAvailable">
           {{ submitting ? 'Adding…' : (seatNumber ? `Seat in Seat ${seatNumber}` : 'Add Player') }}
         </button>
       </form>
@@ -360,6 +384,7 @@ function onModeChange(next) {
   border-radius: var(--radius-sm);
   padding: 10px 12px;
 }
+.dva-note--danger { color: var(--danger); background: var(--danger-bg); margin-bottom: 12px; }
 .form-error {
   font-size: 13px;
   color: var(--danger);

@@ -17,6 +17,13 @@ import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transac
 // with no separate density prop needed here.
 const props = defineProps({
   rows: { type: Array, required: true },
+  // A row may carry its own `type_label`, overriding TRANSACTION_TYPES'
+  // shared label for just that row — added 2026-09-25 for
+  // MainAccountLedgerView, which shows PAYMENT_TRANSFER as "Deposit" on
+  // that one table only (real bank money coming in) without renaming
+  // "Transfer" everywhere else this type renders. The parent sets it per
+  // row when building its own `rows` array; most callers never set it.
+  //
   // Each row needs a `player_name` field already resolved by the parent
   // (name-lookup is a per-view concern today, e.g. via its own players list)
   // — this component never fetches or looks up a name itself.
@@ -59,6 +66,19 @@ function amountToneClass(type) {
   const tone = TRANSACTION_TYPES[type]?.amountTone
   return tone ? `amount--${tone}` : ''
 }
+
+// Auto-approval attribution (2026-09-25) — a payout that cleared the
+// auto-approval threshold (status APPROVED, approved_by null — see
+// services._execute_payout_transfer) now shows WHO INITIATED it
+// (recorded_by_name, resolved server-side by TransactionSerializer)
+// instead of a generic "Auto-approved" badge, on every ledger that renders
+// through this component.
+function isAutoApprovedPayout(row) {
+  return row.type === 'PAYOUT' && row.status === 'APPROVED' && !row.approved_by
+}
+function statusBadgeText(row) {
+  return isAutoApprovedPayout(row) ? `Auto-${row.recorded_by_name || 'Cashier'}` : row.status.replace('_', ' ')
+}
 </script>
 
 <template>
@@ -83,7 +103,7 @@ function amountToneClass(type) {
         <tr v-for="row in rows" :key="row.id" :class="{ 'row--voided': row.is_voided }">
           <td class="col-lane"><span :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" /></td>
           <td class="mono">{{ dateFormat === 'datetime' ? formatDateTime(row.created_at) : formatTime(row.created_at) }}</td>
-          <td>{{ TRANSACTION_TYPES[row.type]?.label || row.type }}</td>
+          <td>{{ row.type_label || TRANSACTION_TYPES[row.type]?.label || row.type }}</td>
           <td v-if="showPlayer">
             <RouterLink v-if="playerTo?.(row)" :to="playerTo(row)" class="player-link" @click.stop>{{ row.player_name }}</RouterLink>
             <span v-else>{{ row.player_name }}</span>
@@ -94,7 +114,8 @@ function amountToneClass(type) {
             <span v-else>{{ N(row.running_balance) }}</span>
           </td>
           <td v-if="showStatus">
-            <span v-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ row.status.replace('_', ' ') }}</span>
+            <span v-if="isAutoApprovedPayout(row)" class="badge badge--auto-approved">{{ statusBadgeText(row) }}</span>
+            <span v-else-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ statusBadgeText(row) }}</span>
           </td>
           <td v-if="voidable" class="col-action">
             <button v-if="canVoidFn(row)" class="void-trigger" type="button" title="Void this entry" @click="$emit('void', row)">&#8942;</button>

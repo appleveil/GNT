@@ -1399,6 +1399,126 @@ default+write), `makemigrations --check --dry-run` clean before writing
 `0022_clubsettings_owner_dashboard_game_day_enabled.py` by hand, and
 `npm run build` clean.
 
+### A round of 8 follow-up requests: Credit limit rename, ledger/payout pages, indicator icons, payout badges, Main Account defaults, Account Code pool (2026-09-25)
+
+1. **"Chips limit" → "Credit limit" (display-only).** The player-level
+   `chips_limit` field (max unpaid chips before settling up, per-game-day)
+   was being confused with a table's own `max_chips_issuable` (Settings
+   screen, a different, per-buy-in cap). Every user-facing label renamed —
+   RosterListView/RosterDetailView/ActiveGameDayView/TransactionEntryModal —
+   the API field name is untouched (a bigger, unrequested change).
+   `ChipsLimitModal.vue` renamed `CreditLimitModal.vue`; its "Max chips
+   issuable at once" field label was actually WRONG before this pass (that
+   description belongs to the table's cap, not this one) — fixed to "Max
+   unpaid chips before settling up" with a clarifying hint.
+
+2. **View ledger / Payout: pop-up → page.** `PlayerLedgerModal.vue` /
+   `DirectPayoutModal.vue` deleted, replaced by routed pages
+   `PlayerLedgerView.vue` (`/roster/:id/ledger`, BACK_OFFICE_ROLES) and
+   `PlayerPayoutView.vue` (`/roster/:id/payout`, OWNER_ONLY_ROLES) — same
+   logic, page chrome (back-link, `.page-header`) instead of an overlay.
+   The Payout page's "add a bank account" step stays a stacked modal
+   (`PlayerBankAccountModal.vue`) — only the two entry points themselves
+   moved off pop-ups.
+
+3. **Ledger performance — challenged, not built.** Proposed: a write-time
+   cache, updated on every change, so a ledger never recomputes at load.
+   Pushed back: every ledger read is already scoped (one game-day, one
+   player-within-a-game-day, Outstanding, Main Account) and computed via a
+   single indexed SQL window function — milliseconds at this club's scale,
+   not felt-slow. A write-time cache doesn't remove that O(n) cost, it
+   moves it to write-time and makes it *conditional*: voiding a row or
+   backdating a Deal onto a just-closed game-day changes every downstream
+   running balance, so a missed invalidation path silently drifts a
+   balance — the worst kind of bug in a money app. Precedent already in
+   this schema: `GameDaySummary` IS exactly this snapshot pattern, applied
+   deliberately only to an immutable, CLOSED state — not to a live,
+   still-being-written-to ledger. Decision (confirmed): leave the
+   recompute-at-read architecture as-is; do add one more index anyway
+   (`Transaction`, `(game_day, created_at)`, migration
+   `0023_transaction_gaming_tran_game_da_9f670a_idx`) — cheap, safe,
+   reversible, satisfies `game_day_ledger`'s filter+sort directly from the
+   index. No behavior change, no problem it's fixing today — confirmed
+   explicitly as "cheap insurance" rather than a response to anything
+   measured.
+
+4. **Players table: Deal/Bank indicator columns.** Proposed 3 options
+   (inline badges next to name, two icon columns, text-pill chips) with
+   ASCII previews; user picked **two small icon columns** (✓/· for Deal
+   and Bank, between Name and Balance) over the other two. "Deal" = an
+   ACTIVE Stake/Profit Split arrangement specifically (one-off Fixed/
+   Transfer deals don't count — confirmed assumption), from
+   `GET /deals/profit-split/active/` — broadened from Owner-only to
+   Owner-or-Accountant (read-only, informational; the Deal ACTION stays
+   Owner-only) since the Players page is shared. "Bank" is just
+   `bank_accounts.length > 0`, already in the `/players/` payload.
+
+5. **"Payouts" → "Payout requests" + a pending-count badge.** New
+   Owner-only `GET /transactions/pending-payouts-count/` (same
+   PENDING_APPROVAL/TRANSFER_FAILED pair `PayoutsView.vue`'s own `pending`
+   computed already uses); new tiny `stores/payoutRequests.js` (just the
+   count, not the full payout list — that stays `PayoutsView.vue`'s own
+   fetch) feeds a superscript badge on the sidebar tab, fetched once at
+   shell mount and refreshed after anything that could change it
+   (`PayoutsView.vue`'s own `load()`, and a new direct-payout landing
+   PENDING).
+
+6. **Auto-approved payouts now name who initiated them.** New
+   `TransactionSerializer.recorded_by_name` (resolves
+   `recorded_by.get_full_name() or .username`, `select_related` added
+   everywhere a Transaction list serializes to avoid an N+1). "Auto-approved"
+   badge text → `Auto-<Cashier Name>`, in both `LedgerTable.vue` (every
+   ledger that renders through it) and `PayoutsView.vue`'s own hand-rolled
+   history row.
+
+7. **Main Account ledger: Payout wasn't showing by default.** Its
+   "successful only" default filter checked `status === 'POSTED'` — but a
+   PAYOUT transaction never reaches POSTED at all (it goes
+   PENDING_APPROVAL → APPROVED), so every successful payout was silently
+   excluded from the default view, only visible via "Show all statuses"
+   (which then also showed every pending/rejected/failed one — too much
+   noise). Fixed: default filter is now POSTED-for-a-deposit OR
+   APPROVED-for-a-payout. Also, `PAYMENT_TRANSFER` rows relabeled
+   "Deposit" **on this table only** — new `LedgerTable.vue` per-row
+   `row.type_label` override (falls back to the shared `TRANSACTION_TYPES`
+   label everywhere else this type renders, e.g. the Cashier's own ledger).
+
+8. **Account Code (DVA) pool — new feature.** New `accounts.AccountCode`
+   model (`code`, `linked_player` OneToOne-nullable, `created_by`,
+   `created_at`; never unlinked once consumed, same never-un-record
+   convention as everything else here). New `AccountCodeViewSet`
+   (`/api/account-codes/`, list/bulk-create Owner-or-Accountant;
+   `available-count` open to every role) — bulk-create takes
+   `{"codes": [...]}`, a newline/comma-separated textarea on the Admin
+   page, not one-at-a-time (a club stages a batch from its bank at once).
+   `gaming.services._assign_next_account_code` (select_for_update inside
+   its own atomic block, race-safe) replaces `seat_player`'s old
+   `player_fields={'account_code': ..., 'display_name': ...}` path — a new
+   player now gets `player_fields={'display_name': ...}` only, and the
+   oldest available pool row is consumed automatically; raises
+   InvalidStateError (→ 400) if the pool is empty. `AddPlayerModal.vue`'s
+   "Account code" text field is gone — checks
+   `GET /account-codes/available-count/` on open and disables the New
+   Player form with a clear notice when the pool is empty (server-side
+   check stays authoritative either way). `AdminView.vue` gets a new
+   "Account Codes" section, visible to both roles — every OTHER section on
+   that page stays Owner-only via its own `v-if`, so `/admin`'s route
+   meta was broadened (OWNER_ONLY_ROLES → BACK_OFFICE_ROLES) without
+   actually widening what an Accountant sees there.
+
+Verified: full backend suite green throughout (263 → 268 → 207 gaming-only
+after the account-code fixes → confirmed green again after the final round
+of changes), `makemigrations --check --dry-run` clean before each of the
+two new migrations (`accounts.0008_accountcode`,
+`gaming.0023_transaction_gaming_tran_game_da_9f670a_idx`), `npm run build`
+clean, and a live curl pass against the `test1` dev tenant (bulk-add
+codes → available-count → seat a brand-new player via the real
+`/game-days/{id}/players/` endpoint with no account_code in the payload →
+confirmed the pool's oldest code was auto-assigned and available-count
+dropped → confirmed `recorded_by_name` resolves correctly on a real
+transaction) with all throwaway data (player, transaction, seat, both
+codes) cleaned up afterward.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

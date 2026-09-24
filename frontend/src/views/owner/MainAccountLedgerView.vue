@@ -14,12 +14,19 @@ import { useToast } from '@/composables/useToast'
 // total) — this is a second, focused view of real money movement across
 // every game-day and Outstanding combined.
 //
-// "Successful only" by default (status === POSTED — Paystack's
-// transfer.success webhook, the only place POSTED is ever set — not
-// APPROVED, which is just Paystack synchronously *accepting* the transfer;
-// completion is confirmed later and can still turn into TRANSFER_FAILED). A
-// toggle reveals every status, each with its usual badge, matching every
-// other ledger in the app.
+// "Successful only" by default — POSTED for a deposit (Paystack's
+// transfer.success webhook, the only place POSTED is ever set on a
+// TRANSFER_DVA row) OR APPROVED for a payout (services._execute_payout_transfer
+// — a payout never reaches POSTED at all, so filtering on POSTED alone was
+// hiding every successful payout from the default view, fixed 2026-09-25).
+// A toggle still reveals every status, each with its usual badge, matching
+// every other ledger in the app.
+//
+// PAYMENT_TRANSFER rows are relabeled "Deposit" on THIS table only (real
+// bank money actually landing) — the shared "Transfer" label stays
+// everywhere else this type renders (e.g. the Cashier's own ledger, a
+// manual in-person transfer at the table). See LedgerTable.vue's
+// `row.type_label` for how a per-row override works.
 const toast = useToast()
 
 const players = ref([])
@@ -53,9 +60,19 @@ function playerName(playerId) {
 }
 const playerTo = row => (row.player ? `/roster/${row.player}` : null)
 
+// A deposit is "successful" at POSTED; a payout is "successful" at
+// APPROVED — it has no POSTED status of its own (see the comment above).
+function isSuccessful(row) {
+  return row.status === 'POSTED' || (row.type === 'PAYOUT' && row.status === 'APPROVED')
+}
+
 const feed = computed(() => {
-  const visible = showAllStatuses.value ? rows.value : rows.value.filter(r => r.status === 'POSTED')
-  return visible.slice().reverse().map(row => ({ ...row, player_name: playerName(row.player) }))
+  const visible = showAllStatuses.value ? rows.value : rows.value.filter(isSuccessful)
+  return visible.slice().reverse().map(row => ({
+    ...row,
+    player_name: playerName(row.player),
+    type_label: row.type === 'PAYMENT_TRANSFER' ? 'Deposit' : undefined,
+  }))
 })
 
 const N = n => `₦${Number(n).toLocaleString()}`
@@ -85,7 +102,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           </label>
         </div>
         <p v-if="!feed.length" class="muted">
-          {{ showAllStatuses ? 'Nothing recorded yet.' : 'No successful transfers yet — try "Show all statuses".' }}
+          {{ showAllStatuses ? 'Nothing recorded yet.' : 'No successful deposits or payouts yet — try "Show all statuses".' }}
         </p>
         <LedgerTable v-else :rows="feed" show-player :player-to="playerTo" date-format="datetime" />
       </div>

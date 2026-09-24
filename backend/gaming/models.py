@@ -509,6 +509,16 @@ class Transaction(models.Model):
         indexes = [
             models.Index(fields=['game_day', 'player']),
             models.Index(fields=['player', 'created_at']),
+            # Added 2026-09-25, discussed but deliberately not acted on
+            # alongside a bigger proposal (a write-time running-balance
+            # cache — see PLAN.md's dated entry for the full reasoning) to
+            # keep ledgers on their current recompute-at-read model. This
+            # index is unrelated to that decision except in spirit: cheap,
+            # safe, reversible insurance for game_day_ledger's own
+            # filter-by-game_day-then-sort-by-created_at query, letting
+            # Postgres walk it pre-sorted instead of a separate sort step.
+            # No behavior change, no measured problem today — see PLAN.md.
+            models.Index(fields=['game_day', 'created_at']),
         ]
 
     def __str__(self):

@@ -7,7 +7,7 @@ from rest_framework import status
 
 from lpc_backend.testing import APITestCase, TestCase
 
-from accounts.models import FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
+from accounts.models import AccountCode, FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 
 from . import selectors, services
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
@@ -1073,8 +1073,9 @@ class GameDaySeatingTests(APITestCase):
         services.leave_table(gd, player, operator=self.cashier)
 
     def test_seating_new_player_creates_and_seats(self):
+        AccountCode.objects.create(code='WWI 30')
         player = services.seat_player(
-            self.game_day, self.owner, player_fields={'account_code': 'WWI 30', 'display_name': 'New Guy'},
+            self.game_day, self.owner, player_fields={'display_name': 'New Guy'},
         )
         self.assertEqual(Player.objects.filter(account_code='WWI 30').count(), 1)
         self.assertTrue(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).exists())
@@ -1148,19 +1149,28 @@ class GameDaySeatingTests(APITestCase):
         self.assertEqual(response.data['account_code'], 'WWI 37')
 
     def test_cashier_can_seat_new_player_via_api(self):
+        AccountCode.objects.create(code='WWI 38')
         self.client.force_authenticate(self.cashier)
         response = self.client.post(
             f'/api/game-days/{self.game_day.id}/players/',
-            {'account_code': 'WWI 38', 'display_name': 'Brand New'},
+            {'display_name': 'Brand New'},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(Player.objects.filter(account_code='WWI 38').exists())
+
+    def test_seating_new_player_fails_without_an_available_account_code(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post(
+            f'/api/game-days/{self.game_day.id}/players/', {'display_name': 'No Code Left'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('No available account codes', response.data['detail'])
 
     def test_accountant_cannot_seat_a_player(self):
         accountant = StaffUser.objects.create_user(username='acct2', password='x', role=StaffUser.Role.ACCOUNTANT)
         self.client.force_authenticate(accountant)
         response = self.client.post(
-            f'/api/game-days/{self.game_day.id}/players/', {'account_code': 'WWI 39', 'display_name': 'Blocked'},
+            f'/api/game-days/{self.game_day.id}/players/', {'display_name': 'Blocked'},
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -1252,10 +1262,11 @@ class GameDaySeatingTests(APITestCase):
         )
 
     def test_new_player_registration_succeeds_even_when_table_is_full(self):
+        AccountCode.objects.create(code='WWI NEWFULL')
         self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
         with self.assertRaises(TableFullError):
             services.seat_player(
-                self.game_day, self.owner, player_fields={'account_code': 'WWI NEWFULL', 'display_name': 'Hopeful'},
+                self.game_day, self.owner, player_fields={'display_name': 'Hopeful'},
             )
         self.assertTrue(Player.objects.filter(account_code='WWI NEWFULL').exists())  # registered anyway
         self.assertFalse(
@@ -1263,11 +1274,12 @@ class GameDaySeatingTests(APITestCase):
         )
 
     def test_table_full_api_response_carries_registered_not_seated(self):
+        AccountCode.objects.create(code='WWI APIFULL')
         self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
         self.client.force_authenticate(self.cashier)
         response = self.client.post(
             f'/api/game-days/{self.game_day.id}/players/',
-            {'account_code': 'WWI APIFULL', 'display_name': 'Via API'},
+            {'display_name': 'Via API'},
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(response.data['registered_not_seated'])
@@ -2147,6 +2159,13 @@ class ProfitSplitArrangementTests(APITestCase):
         self.client.force_authenticate(self.cashier)
         response = self.client.get('/api/deals/profit-split/active/')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_accountant_can_view_active_arrangements(self):
+        """Broadened 2026-09-25 — feeds the Players table's own 'Deal' icon column, a shared page."""
+        accountant = StaffUser.objects.create_user(username='ps_acct', password='x', role=StaffUser.Role.ACCOUNTANT)
+        self.client.force_authenticate(accountant)
+        response = self.client.get('/api/deals/profit-split/active/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
 
 class StartGameDayFlowTests(APITestCase):

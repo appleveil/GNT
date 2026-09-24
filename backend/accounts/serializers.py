@@ -3,7 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
+from .models import AccountCode, FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 
 
 class StaffLoginSerializer(TokenObtainPairSerializer):
@@ -102,6 +102,27 @@ class StaffMemberSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         return StaffMember.objects.create(**validated_data, created_by=self.context['request'].user)
+
+
+class AccountCodeSerializer(serializers.ModelSerializer):
+    """The Account Code / DVA pool (Admin page, added 2026-09-25) — see AccountCode's own docstring."""
+
+    is_linked = serializers.SerializerMethodField()
+    linked_player_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AccountCode
+        fields = ['id', 'code', 'is_linked', 'linked_player', 'linked_player_name', 'created_by', 'created_at']
+        read_only_fields = ['id', 'linked_player', 'created_by', 'created_at']
+
+    def get_is_linked(self, obj):
+        return obj.linked_player_id is not None
+
+    def get_linked_player_name(self, obj):
+        return obj.linked_player.display_name if obj.linked_player_id else None
+
+    def create(self, validated_data):
+        return AccountCode.objects.create(**validated_data, created_by=self.context['request'].user)
 
 
 class PlayerBankAccountSerializer(serializers.ModelSerializer):

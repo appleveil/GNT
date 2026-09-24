@@ -118,9 +118,9 @@ async function onSaveLimit() {
     })
     player.value = data
     editingLimit.value = false
-    toast.success('Chips limit updated.')
+    toast.success('Credit limit updated.')
   } catch (err) {
-    toast.error(err.response?.data?.chips_limit?.[0] || 'Could not update the chips limit.')
+    toast.error(err.response?.data?.chips_limit?.[0] || 'Could not update the credit limit.')
   } finally {
     savingLimit.value = false
   }
@@ -202,7 +202,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <div class="stat-value" :class="player.balance > 0 ? 'money--pos' : player.balance < 0 ? 'money--neg' : ''">{{ N(player.balance) }}</div>
         </div>
         <div class="card stat-card">
-          <div class="stat-label">Chips limit</div>
+          <div class="stat-label">Credit limit</div>
           <div v-if="!auth.isOwner || !editingLimit" class="limit-row">
             <div class="stat-value">{{ player.chips_limit != null ? N(player.chips_limit) : 'No cap' }}</div>
             <button v-if="auth.isOwner" class="link-btn" type="button" @click="onStartEditLimit">Edit</button>

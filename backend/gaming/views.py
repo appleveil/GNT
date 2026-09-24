@@ -173,8 +173,9 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         GET: players seated at this game-day (see GameDayPlayer) — the
         Cashier-facing Players list, scoped to the current game-day only.
         POST: seat a player for this game-day — either an existing player
-        (player_id) or a brand-new one (account_code + display_name), per
-        CONCEPT.md's Buy-in flow. Cashier or Owner only, same as PlayerViewSet.
+        (player_id) or a brand-new one (display_name only — their
+        account_code is auto-assigned, see services._assign_next_account_code),
+        per CONCEPT.md's Buy-in flow. Cashier or Owner only, same as PlayerViewSet.
         """
         game_day = self.get_object()
         if request.method == 'GET':
@@ -189,10 +190,7 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             player = services.seat_player(
                 game_day, request.user, player=data.get('player'),
-                player_fields=(
-                    {'account_code': data['account_code'], 'display_name': data['display_name']}
-                    if 'player' not in data else None
-                ),
+                player_fields=({'display_name': data['display_name']} if 'player' not in data else None),
                 seat_number=data.get('seat_number'),
             )
         except TableFullError as exc:
@@ -365,7 +363,9 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
     action below delegates to.
     """
 
-    queryset = Transaction.objects.all().order_by('-created_at')
+    # select_related('recorded_by') — recorded_by_name (the "Auto-<Cashier
+    # Name>" badge, added 2026-09-25) would otherwise be an N+1 query per row.
+    queryset = Transaction.objects.all().select_related('recorded_by').order_by('-created_at')
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
 
@@ -446,6 +446,22 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         txn = services.reject_payout(txn, request.user, serializer.validated_data['reason'])
         return Response(TransactionSerializer(txn).data)
 
+    @action(detail=False, methods=['get'], url_path='pending-payouts-count')
+    def pending_payouts_count(self, request):
+        """
+        Owner-only — feeds the "Payout requests" sidebar tab's superscript
+        badge (AppShell.vue, added 2026-09-25). Same PENDING_APPROVAL/
+        TRANSFER_FAILED pair PayoutsView.vue's own `pending` computed
+        already treats as "needs the Owner's attention."
+        """
+        if request.user.role != StaffUser.Role.OWNER:
+            return Response({'detail': 'Owner only.'}, status=status.HTTP_403_FORBIDDEN)
+        count = Transaction.objects.filter(
+            type=Transaction.Type.PAYOUT,
+            status__in=[Transaction.Status.PENDING_APPROVAL, Transaction.Status.TRANSFER_FAILED],
+        ).count()
+        return Response({'count': count})
+
 
 class OutstandingLedgerView(APIView):
     """
@@ -498,13 +514,19 @@ class DealTransferView(APIView):
 class ActiveProfitSplitArrangementsView(APIView):
     """
     Every currently-active arrangement, club-wide — added 2026-09-23 for the
-    web Deals player list's "Stake/Profit split active" badge (mirrors the
-    mobile app's own getActiveProfitSplitPlayerIds, computed there from its
-    local deal log instead). One query instead of an N+1
-    PlayerProfitSplitStatusView call per player in the roster.
+    (since-retired) standalone Deals player list's "Stake/Profit split
+    active" badge, now the Players table's own "Deal" icon column
+    (RosterListView.vue, 2026-09-25). Mirrors the mobile app's own
+    getActiveProfitSplitPlayerIds, computed there from its local deal log
+    instead. One query instead of an N+1 PlayerProfitSplitStatusView call
+    per player in the roster.
+
+    Read-only, so Owner-or-Accountant (broadened from Owner-only
+    2026-09-25) — the Players page is shared, and this is purely
+    informational there, not the Deal action itself (still Owner-only).
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [IsOwnerOrAccountant]
 
     def get(self, request):
         arrangements = ProfitSplitArrangement.objects.filter(is_active=True)

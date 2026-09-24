@@ -75,7 +75,13 @@ def _with_running_balance(queryset, partition_by=None):
     # seating auto-issuing a CHIPS_OUT) can share a created_at down to the
     # microsecond; `id` guarantees a stable, insertion-order sort instead of
     # leaving ties to the database's whim.
-    queryset = _with_signed_amount(queryset).order_by('created_at', 'id')
+    #
+    # select_related('recorded_by') added 2026-09-25 alongside
+    # TransactionSerializer.recorded_by_name (the "Auto-<Cashier Name>"
+    # badge) — every caller of this helper serializes through
+    # TransactionSerializer/LedgerEntrySerializer, so this avoids an N+1
+    # query per row for that field.
+    queryset = _with_signed_amount(queryset).select_related('recorded_by').order_by('created_at', 'id')
     queryset = queryset.annotate(
         contribution=Case(
             When(is_voided=True, then=ZERO),

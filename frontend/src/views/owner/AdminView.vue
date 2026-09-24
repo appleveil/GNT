@@ -1,21 +1,29 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
+import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 
-// Owner-only admin page (Phase C, 2026-09-14) — CRUD-lite sections on one
-// page rather than separate nav tabs, since each is small: Staff accounts,
-// Other Staff (added 2026-09-23), Floor Managers. See PLAN.md's Phase C for
-// why each backend piece here is either already-built (Floor Manager PIN
-// reset, chips_limit... not here, that's RosterDetailView) or the one
-// genuinely new backend addition (staff password reset —
-// StaffUserSerializer used for update has no password field at all; POST
+// Admin page (Phase C, 2026-09-14) — CRUD-lite sections on one page rather
+// than separate nav tabs, since each is small: Staff accounts, Other Staff
+// (added 2026-09-23), Floor Managers. See PLAN.md's Phase C for why each
+// backend piece here is either already-built (Floor Manager PIN reset,
+// chips_limit... not here, that's RosterDetailView) or the one genuinely
+// new backend addition (staff password reset — StaffUserSerializer used
+// for update has no password field at all; POST
 // /staff-users/{id}/reset-password/ is new).
 //
 // FX Rates lived here as a 4th section until 2026-09-23, when it moved to
 // the Settings page's own Owner-only block (ClubSettingsView.vue) — same
 // data/endpoints, just grouped with the club's other Owner-tunable numbers
 // instead of the staff-roster sections here.
+//
+// 2026-09-25: this page is no longer Owner-only (see router/index.js — the
+// route now allows BACK_OFFICE_ROLES) so the Accountant can reach the new
+// "Account Codes" section below. Every OTHER section here still needs a
+// real login/PIN and stays wrapped in `v-if="auth.isOwner"` — broadening
+// the route doesn't mean broadening what an Accountant can see on it.
+const auth = useAuthStore()
 const toast = useToast()
 
 // ── Staff accounts ────────────────────────────────────────────────────────
@@ -203,10 +211,57 @@ async function onSubmitFmReset(fm) {
   }
 }
 
+// ── Account Codes (DVAs) — Owner or Accountant ──────────────────────────
+// Added 2026-09-25: the pool AddPlayerModal.vue's new-player flow now
+// auto-consumes from (see gaming.services._assign_next_account_code)
+// instead of a Cashier typing a code in by hand. One codes-per-line
+// textarea rather than an add-one-at-a-time form — a club stages a batch
+// of DVAs from its bank at once, not one at a time.
+const accountCodes = ref([])
+const accountCodesLoading = ref(true)
+const newCodesInput = ref('')
+const accountCodesCreating = ref(false)
+const accountCodesError = ref('')
+
+const availableCodesCount = computed(() => accountCodes.value.filter(c => !c.is_linked).length)
+
+async function loadAccountCodes() {
+  accountCodesLoading.value = true
+  try {
+    const { data } = await api.get('/account-codes/')
+    accountCodes.value = data
+  } catch {
+    toast.error('Could not load account codes.')
+  } finally {
+    accountCodesLoading.value = false
+  }
+}
+
+async function onAddAccountCodes() {
+  accountCodesError.value = ''
+  const codes = newCodesInput.value.split(/[\n,]/).map(c => c.trim()).filter(Boolean)
+  if (!codes.length) return
+  accountCodesCreating.value = true
+  try {
+    const { data } = await api.post('/account-codes/', { codes })
+    newCodesInput.value = ''
+    await loadAccountCodes()
+    toast.success(`${data.created.length} code${data.created.length === 1 ? '' : 's'} added.`)
+    if (data.errors?.length) accountCodesError.value = data.errors.join(' ')
+  } catch (err) {
+    accountCodesError.value = err.response?.data?.detail || err.response?.data?.errors?.join(' ') || 'Could not add these codes.'
+  } finally {
+    accountCodesCreating.value = false
+  }
+}
+
 onMounted(() => {
-  loadStaff()
-  loadOtherStaff()
-  loadFloorManagers()
+  loadAccountCodes()
+  if (auth.isOwner) {
+    loadStaff()
+    loadOtherStaff()
+    loadFloorManagers()
+  }
 })
 </script>
 
@@ -214,9 +269,41 @@ onMounted(() => {
   <div class="page">
     <div class="page-header">
       <h1>Admin</h1>
-      <p>Staff accounts, other staff, and Floor Managers.</p>
+      <p>{{ auth.isOwner ? 'Staff accounts, other staff, Floor Managers, and account codes.' : 'Account codes.' }}</p>
     </div>
 
+    <div class="card section-card">
+      <div class="section-title">Account Codes</div>
+      <p class="section-note">
+        DVAs staged ahead of time — the next available one here is auto-assigned to every new player
+        registered, so a Cashier never types one in by hand.
+        <template v-if="!accountCodesLoading"> {{ availableCodesCount }} available of {{ accountCodes.length }}.</template>
+      </p>
+      <p v-if="accountCodesLoading" class="muted">Loading…</p>
+      <template v-else>
+        <p v-if="!accountCodes.length" class="muted">No codes added yet.</p>
+        <div v-for="c in accountCodes" :key="c.id" class="row">
+          <div class="row-info">
+            <div class="row-name">{{ c.code }}</div>
+            <div v-if="c.linked_player_name" class="row-sub">linked to {{ c.linked_player_name }}</div>
+          </div>
+          <span class="badge" :class="c.is_linked ? 'badge--closed' : 'badge--approved'">{{ c.is_linked ? 'linked' : 'available' }}</span>
+        </div>
+
+        <form class="create-form create-form--stacked" @submit.prevent="onAddAccountCodes">
+          <textarea
+            v-model="newCodesInput" class="ff codes-textarea" rows="3"
+            placeholder="One code per line (or comma-separated) — e.g.&#10;WWI 20&#10;WWI 21"
+          />
+          <button class="btn btn--primary" type="submit" :disabled="accountCodesCreating || !newCodesInput.trim()">
+            {{ accountCodesCreating ? 'Adding…' : '+ Add codes' }}
+          </button>
+        </form>
+        <p v-if="accountCodesError" class="form-error">{{ accountCodesError }}</p>
+      </template>
+    </div>
+
+    <template v-if="auth.isOwner">
     <div class="card section-card">
       <div class="section-title">Staff accounts</div>
       <p v-if="staffLoading" class="muted">Loading…</p>
@@ -320,6 +407,7 @@ onMounted(() => {
         <p v-if="fmError" class="form-error">{{ fmError }}</p>
       </template>
     </div>
+    </template>
   </div>
 </template>
 
@@ -355,6 +443,8 @@ onMounted(() => {
 .inline-input:focus { outline: none; border-color: var(--accent); }
 
 .create-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
+.create-form--stacked { flex-direction: column; align-items: stretch; }
+.codes-textarea { height: auto; padding: 8px 10px; resize: vertical; font-family: var(--font-mono); }
 .ff {
   height: 36px;
   border: 1px solid var(--border-strong);

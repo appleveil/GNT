@@ -460,7 +460,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
               <div v-if="selectedPlayer?.payout_failed" class="payout-failed-badge">Payout failed — ask the Owner</div>
               <div v-if="selectedPlayer?.left_at" class="left-badge">Left the table</div>
               <div v-else-if="selectedPlayer?.chips_limit != null" class="chips-limit-badge">
-                Chips limit: {{ N(selectedPlayer.chips_used_today) }} of {{ N(selectedPlayer.chips_limit) }} used
+                Credit limit: {{ N(selectedPlayer.chips_used_today) }} of {{ N(selectedPlayer.chips_limit) }} used
               </div>
             </div>
           </div>

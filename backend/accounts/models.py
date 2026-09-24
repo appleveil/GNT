@@ -118,14 +118,49 @@ class Player(models.Model):
     display_name = models.CharField(max_length=150)
     # Per-game-day credit ceiling, Owner-set-and-edited only; null = no cap. Checked
     # against the player's *current game-day* debt, not a lifetime total — see
-    # CONCEPT.md's "Chips limit."
-    # Whole Naira only — no kobo anywhere in this club's figures (2026-09-23).
+    # CONCEPT.md's "Chips limit." Labeled "Credit limit" in the UI as of
+    # 2026-09-25 (this field name is unchanged — a display-only rename, to
+    # stop it being confused with a table's own max_chips_issuable, a
+    # different, per-buy-in cap set in Settings): this is the max a player
+    # can owe in unpaid chips before settling up, not the max issuable at once.
     chips_limit = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f'{self.account_code} ({self.display_name})'
+
+
+class AccountCode(models.Model):
+    """
+    A pre-provisioned club-assigned short code/DVA ("WWI 15"), staged ahead
+    of time by the Owner or Accountant from the Admin page (added
+    2026-09-25). Replaces a Cashier typing one in free-hand at registration
+    (AddPlayerModal.vue's old "Account code" field) — the next available row
+    here is auto-assigned to a new Player instead, see
+    gaming.services.seat_player.
+
+    `linked_player` is null while available; set exactly once, the moment
+    it's consumed by a new player, and never freed again — same
+    never-un-record convention as everything else in this schema (a
+    linked code doesn't go back in the pool even if that player is later
+    deactivated).
+    """
+
+    code = models.CharField(max_length=20, unique=True)
+    linked_player = models.OneToOneField(
+        Player, on_delete=models.PROTECT, null=True, blank=True, related_name='account_code_entry',
+    )
+    created_by = models.ForeignKey(
+        StaffUser, on_delete=models.PROTECT, null=True, blank=True, related_name='account_codes_added',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.code} ({"linked" if self.linked_player_id else "available"})'
 
 
 class PlayerBankAccount(models.Model):

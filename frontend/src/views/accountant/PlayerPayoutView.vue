@@ -1,24 +1,26 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import PlayerBankAccountModal from '@/components/shared/PlayerBankAccountModal.vue'
+import { usePayoutRequestsStore } from '@/stores/payoutRequests'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
 
-// Owner-only "Payout" action (2026-09-24), reached from the Players page's
-// ⋮ menu — POST /transactions/direct-payout/ (services.initiate_direct_payout),
-// distinct from the Cashier's game-day-scoped payout (ActiveGameDayView.vue):
-// no game-day involved, capped at the player's LIFETIME balance, and the
-// Owner picks how much of it to send (not forced to pay out everything —
-// "this isn't a bank"). Fetches its own fresh player record on open rather
-// than trusting the row passed in from the list, so balance/bank_accounts
-// are current even if the list was loaded a while ago.
-const props = defineProps({
-  playerId: { type: [Number, String], required: true },
-  playerName: { type: String, default: '' }, // shown immediately, before the fresh fetch resolves
-})
-const emit = defineEmits(['close', 'paid'])
+// Owner-only "Payout" action, reached from the Players page's ⋮ menu — a
+// full page (2026-09-25; started as DirectPayoutModal.vue, converted per
+// direct request) rather than a pop-up. POST /transactions/direct-payout/
+// (services.initiate_direct_payout), distinct from the Cashier's
+// game-day-scoped payout (ActiveGameDayView.vue): no game-day involved,
+// capped at the player's LIFETIME balance, and the Owner picks how much of
+// it to send (not forced to pay out everything — "this isn't a bank"). The
+// "add a bank account" step stays a stacked modal (PlayerBankAccountModal),
+// same as ActiveGameDayView's own payout button — only the ledger/payout
+// entry points themselves moved from pop-up to page.
+const route = useRoute()
+const router = useRouter()
 const toast = useToast()
+const payoutRequests = usePayoutRequestsStore()
 
 const player = ref(null)
 const loading = ref(true)
@@ -26,7 +28,7 @@ const loading = ref(true)
 async function loadPlayer() {
   loading.value = true
   try {
-    const { data } = await api.get(`/players/${props.playerId}/`)
+    const { data } = await api.get(`/players/${route.params.id}/`)
     player.value = data
   } catch {
     toast.error('Could not load this player.')
@@ -64,7 +66,8 @@ async function onSubmit() {
   try {
     const { data } = await api.post('/transactions/direct-payout/', { player: player.value.id, amount: amountInput.value })
     toast.success(`Payout of ${N(amount)} ${data.status === 'APPROVED' ? 'sent to' : 'requested for'} ${player.value.display_name}.`)
-    emit('paid', data)
+    payoutRequests.fetchPendingCount() // a non-auto-approved payout adds to the sidebar's pending badge
+    router.push(`/roster/${player.value.id}`)
   } catch (err) {
     error.value = err.response?.data?.detail || 'Could not initiate the payout.'
   } finally {
@@ -79,16 +82,18 @@ function onBankAdded() {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
-    <div class="dialog card">
-      <div class="head">
-        <div class="eyebrow">{{ player?.display_name || playerName }} &mdash; payout</div>
-        <button class="close-btn" type="button" @click="emit('close')">&times;</button>
-      </div>
+  <div class="page">
+    <button class="back-btn" type="button" @click="router.push(`/roster/${route.params.id}`)">&larr; {{ player?.display_name || 'Player' }}</button>
 
-      <p v-if="loading" class="muted">Loading…</p>
+    <div class="page-header">
+      <h1>Payout</h1>
+      <p v-if="player">{{ player.display_name }} &middot; {{ player.account_code }}</p>
+    </div>
 
-      <template v-else-if="player">
+    <p v-if="loading" class="muted">Loading…</p>
+
+    <template v-else-if="player">
+      <div class="card">
         <div class="available-row">
           <span class="available-label">Owed to {{ player.display_name }}</span>
           <span class="available-amount">{{ N(available) }}</span>
@@ -109,12 +114,11 @@ function onBankAdded() {
           </label>
           <p v-if="error" class="form-error">{{ error }}</p>
           <div class="actions">
-            <button class="btn btn--secondary" type="button" :disabled="submitting" @click="emit('close')">Cancel</button>
             <button class="btn btn--primary" type="submit" :disabled="submitting">{{ submitting ? 'Sending…' : 'Send payout' }}</button>
           </div>
         </form>
-      </template>
-    </div>
+      </div>
+    </template>
 
     <PlayerBankAccountModal
       v-if="bankModalOpen && player" :player="player"
@@ -124,21 +128,16 @@ function onBankAdded() {
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(20, 25, 32, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-.dialog { width: 440px; max-width: 92vw; box-shadow: var(--shadow-md); padding: 24px; }
-.head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
-.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
-.close-btn { border: none; background: none; font-size: 22px; line-height: 1; color: var(--text-tertiary); cursor: pointer; flex-shrink: 0; }
+.page { max-width: 520px; }
+.back-btn { border: none; background: none; font-size: 13.5px; font-weight: 600; color: var(--text-secondary); cursor: pointer; padding: 4px 0; margin-bottom: 16px; }
+.back-btn:hover { color: var(--text-primary); }
 .muted { color: var(--text-secondary); font-size: 13px; }
 
+.page-header { margin-bottom: 20px; }
+.page-header h1 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
+.page-header p { font-size: 13.5px; color: var(--text-secondary); margin: 0; }
+
+.card { padding: 22px; }
 .available-row {
   display: flex;
   align-items: center;
@@ -147,7 +146,7 @@ function onBankAdded() {
   background: var(--disabled-surface);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 .available-label { font-size: 12.5px; color: var(--text-secondary); }
 .available-amount { font-family: var(--font-mono); font-weight: 700; font-size: 16px; color: var(--success-text); }
@@ -177,5 +176,5 @@ function onBankAdded() {
   border-radius: var(--radius-sm);
   padding: 8px 12px;
 }
-.actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+.actions { display: flex; justify-content: flex-end; margin-top: 4px; }
 </style>

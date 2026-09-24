@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
 import { useClubSettingsStore } from '@/stores/clubSettings'
+import { usePayoutRequestsStore } from '@/stores/payoutRequests'
 import { useCloseGameDay } from '@/composables/useCloseGameDay'
 
 const route = useRoute()
@@ -11,11 +12,13 @@ const router = useRouter()
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
 const clubSettings = useClubSettingsStore()
+const payoutRequests = usePayoutRequestsStore()
 const { openConfirm: onCloseGameDay } = useCloseGameDay()
 
 onMounted(() => {
   gameDay.fetchCurrent()
   clubSettings.fetchCurrent()
+  if (auth.isOwner) payoutRequests.fetchPendingCount()
 })
 
 // "Close Game-Day" lives here, next to the status pill it acts on — was a
@@ -74,11 +77,17 @@ const tabs = computed(() => {
   ]
   if (role === 'OWNER') {
     base.push(
-      { name: 'payouts', label: 'Payouts', path: '/payouts' },
+      { name: 'payouts', label: 'Payout requests', path: '/payouts' },
       { name: 'main-account', label: 'Main Account', path: '/main-account' },
       { name: 'admin', label: 'Admin', path: '/admin' },
       { name: 'club-settings', label: 'Settings', path: '/settings' },
     )
+  } else if (role === 'ACCOUNTANT') {
+    // Admin route broadened 2026-09-25 (was Owner-only) so the Accountant
+    // can reach its new Account Codes section — every other section on
+    // that page still checks auth.isOwner itself, so this tab shows the
+    // Accountant a much shorter page than it shows the Owner.
+    base.push({ name: 'admin', label: 'Admin', path: '/admin' })
   }
   return base
 })
@@ -154,6 +163,7 @@ async function doLogout() {
               class="side-tab" :class="{ 'side-tab--active': isActive(tab) }"
             >
               {{ tab.label }}
+              <sup v-if="tab.name === 'payouts' && payoutRequests.pendingCount > 0" class="tab-badge">{{ payoutRequests.pendingCount }}</sup>
             </RouterLink>
             <div class="sidebar-spacer" />
             <RouterLink
@@ -357,6 +367,22 @@ async function doLogout() {
   position: relative;
 }
 .side-tab:hover { color: var(--text-primary); }
+.tab-badge {
+  display: inline-block;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  margin-left: 5px;
+  border-radius: 8px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  vertical-align: super;
+}
 .side-tab--active {
   font-weight: 700;
   color: var(--accent-text);
