@@ -233,12 +233,12 @@ async function onPayoutClick() {
   try {
     const { data } = await api.post('/transactions/payout/', { player: p.id, amount: p.balance })
     // data.amount is what actually resulted — may be less than p.balance if
-    // it got netted against an older, prior-game-day balance the Cashier
-    // never sees the reason for (see LedgerTable's :show-netted-note="false"
-    // just below — same rule, same reason: no lifetime-debt context here).
-    // data.status already reflects auto-approval (2026-09-23) too, not just
-    // netting — this replaces a message that was always unconditionally
-    // "pending Owner approval" regardless of what actually happened.
+    // it got netted against an older, prior-game-day balance (2026-09-27:
+    // now shown to the Cashier too — see displayedBalance below and
+    // LedgerTable's "Payout BBF" row). data.status already reflects
+    // auto-approval (2026-09-23) too, not just netting — this replaces a
+    // message that was always unconditionally "pending Owner approval"
+    // regardless of what actually happened.
     const verb = data.status === 'APPROVED' ? 'sent — no approval needed' : 'initiated — pending Owner approval'
     toast.success(`Payout of ${N(data.amount)} ${verb} for ${p.display_name}.`)
     refreshAll()
@@ -330,6 +330,35 @@ const ledgerRows = computed(() => ledger.value.map(row => ({ ...row, player_name
 const playerLedgerRows = computed(() => {
   if (!selectedPlayerId.value) return []
   return ledgerRows.value.filter(row => row.player === selectedPlayerId.value)
+})
+
+// The hero balance figure — normally just today's own game-day balance
+// (selectedPlayer.balance), UNLESS this player has a netted payout on
+// record today (requested_amount set — see gaming.services.initiate_payout
+// and LedgerTable's "Payout BBF" row). Uses the MOST RECENT such row
+// (ledgerRows is already most-recent-first — see loadLedger) so a later,
+// fresh payout attempt naturally supersedes an earlier rejected one.
+//
+// FIXED 2026-09-27 (live bug: approving Moses/WWI 12's payout left this
+// showing 600,000 instead of 0) — a netted payout's OWN debit already
+// fully accounts for the balance it consumed the moment it exists, for
+// every status EXCEPT rejected: PENDING_APPROVAL and TRANSFER_FAILED both
+// already reserve it (same "a pending payout already reduces this figure"
+// convention every other balance in this app follows), and APPROVED means
+// it's genuinely gone. is_voided (REJECTED) is the ONE state where the
+// debit gets cancelled, so the true balance really does go back to exactly
+// that payout's own `amount` (Balance Brought Forward) — not the raw
+// game-day balance, which would silently un-net the still-real prior debt.
+// Known limitation: this is a point-in-time snapshot tied to that one
+// payout — further activity after it (e.g. a rejoin-and-keep-playing) isn't
+// reflected. Accepted as an edge case, not built for.
+const nettedPayout = computed(() =>
+  playerLedgerRows.value.find(row => row.type === 'PAYOUT' && row.requested_amount),
+)
+const displayedBalance = computed(() => {
+  const netted = nettedPayout.value
+  if (netted) return netted.is_voided ? Number(netted.amount) : 0
+  return selectedPlayer.value?.balance ?? 0
 })
 
 // Same game-day-wide scope record_transaction's CHIPS_IN ceiling checks —
@@ -474,8 +503,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
           </div>
 
           <div class="hero-balance">
-            <div class="hero-value money" :class="{ 'money--positive': selectedPlayer?.balance > 0 }">
-              {{ selectedPlayer ? N(selectedPlayer.balance) : '--' }}
+            <div class="hero-value money" :class="{ 'money--positive': displayedBalance > 0 }">
+              {{ selectedPlayer ? N(displayedBalance) : '--' }}
             </div>
           </div>
 
@@ -548,7 +577,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <p v-else-if="!playerLedgerRows.length" class="muted">No activity yet tonight for {{ selectedPlayer.display_name }}.</p>
           <LedgerTable
             v-else :rows="playerLedgerRows" type-label="Action" voidable :can-void-fn="canVoid"
-            :show-netted-note="false"
             @void="voidTarget = $event"
           />
         </div>

@@ -1014,20 +1014,42 @@ def initiate_payout(player, amount, operator, game_day=None):
     # requested in the first place; only an actually-positive ask that nets
     # down to nothing is the special case this guard exists for.
     net_amount = min(amount, max(selectors.player_balance(player), Decimal('0')))
-    if amount > 0 and net_amount <= 0:
-        raise InvalidStateError(
-            f'Nothing is payable to {player.display_name} right now — today’s winnings are '
-            f'already accounted for by an outstanding balance from a previous game-day. '
-            f'Contact the Owner for details.'
-        )
 
     _ensure_seated(game_day, player, operator)  # a payout never brings back a departed player
+
+    # Revised 2026-09-27 — a prior debt LARGER than the request (net_amount
+    # would be 0) used to raise here with NOTHING recorded at all: no
+    # Transaction, no ledger line, nothing for the "Payout BBF" line (see
+    # LedgerTable.vue) to attach to. Now it's still recorded — a ₦0 payout,
+    # settled immediately (there is nothing to actually transfer, so this
+    # never reaches a real Paystack call), with requested_amount preserved
+    # exactly as normal. cleared (= amount - net_amount, used by the BBF
+    # line's own display) is CAPPED at the requested amount here by the
+    # exact same arithmetic as every other case — net_amount=0 makes
+    # cleared == amount — never the full prior debt if that debt happens to
+    # be larger than what was actually requested; only up to what was asked
+    # for is ever shown as "brought forward," per explicit follow-up.
+    if amount > 0 and net_amount <= 0:
+        notes = (
+            f'Cashier requested ₦{amount:,}. All of it applied to an outstanding balance '
+            f'from a previous game-day; net ₦0 payable.'
+        )
+        return Transaction.objects.create(
+            game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=Decimal('0'),
+            requested_amount=amount, channel=Transaction.Channel.CASHIER, recorded_by=operator,
+            notes=notes, status=Transaction.Status.APPROVED, approved_by=None, approved_at=timezone.now(),
+        )
+
     notes = ''
     if net_amount < amount:
         cleared = amount - net_amount
+        # "Net" spelled out explicitly (not just "payable") — a first live
+        # read of the old wording ("₦X applied...; ₦Y payable") was
+        # misread as Y being a sub-amount rather than the actual net figure
+        # the auto-approval threshold is compared against. Fixed 2026-09-27.
         notes = (
             f'Cashier requested ₦{amount:,}. ₦{cleared:,} applied to an outstanding balance '
-            f'from a previous game-day; ₦{net_amount:,} payable.'
+            f'from a previous game-day; net ₦{net_amount:,} payable.'
         )
     transaction_obj = Transaction.objects.create(
         game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=net_amount,

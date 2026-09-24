@@ -93,14 +93,16 @@ function onRejected() {
 // Netting against a prior outstanding balance (2026-09-27, see
 // gaming.services.initiate_payout) — requested_amount is only set when the
 // Cashier's request got automatically reduced to clear an older debt first.
-// Surfaced here specifically (not just on LedgerTable's rows) since this is
-// the one screen where the amount ACTUALLY REQUIRING approval matters most —
-// t.amount below is already the netted figure, this just explains why it's
-// smaller than what the Cashier asked for.
+// Surfaced here specifically (not just on LedgerTable's own "Payout BBF"
+// row) since this is the one screen where the amount ACTUALLY REQUIRING
+// approval matters most — t.amount below is already the netted figure.
+// "net" spelled out explicitly — a first live read of this without it
+// ("cleared X") was misread as X being the payable amount rather than what
+// got cleared; the real net figure is t.amount, shown separately below.
 function nettedNote(t) {
   if (!t.requested_amount) return null
   const cleared = Number(t.requested_amount) - Number(t.amount)
-  return `Cashier requested ${N(t.requested_amount)} — ${N(cleared)} cleared a prior balance`
+  return `Cashier requested ${N(t.requested_amount)} — ${N(cleared)} cleared a prior balance, net ${N(t.amount)}`
 }
 
 function formatTime(iso) {

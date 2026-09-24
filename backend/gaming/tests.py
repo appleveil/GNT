@@ -2621,9 +2621,15 @@ class PayoutNettingAgainstPriorDebtTests(APITestCase):
         self.assertEqual(payout.requested_amount, Decimal(1000000))
         self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
 
-    def test_debt_fully_absorbing_winnings_blocks_the_payout_entirely(self):
-        # A player whose prior debt is larger than what they won tonight has
-        # nothing payable — no Transaction should be created at all.
+    def test_debt_larger_than_winnings_records_a_zero_payout_capped_at_the_request(self):
+        # Revised 2026-09-27 — a player whose prior debt is larger than what
+        # they won tonight has nothing PAYABLE, but this is no longer a
+        # silent no-op: a ₦0 payout is still recorded (settled immediately,
+        # no real transfer attempted), with requested_amount preserved so
+        # the "Payout BBF" ledger line has something to attach to. Per
+        # explicit follow-up, the BBF/cleared figure is capped at what was
+        # actually REQUESTED (₦1,000,000), never the full prior debt
+        # (₦1,200,000) even though it's larger.
         player3 = Player.objects.create(account_code='WWI 254', display_name='Netting Player 3')
         PlayerBankAccount.objects.create(
             player=player3, bank_name='GTBank', bank_code='058', account_number='0123456781',
@@ -2642,9 +2648,15 @@ class PayoutNettingAgainstPriorDebtTests(APITestCase):
             channel=Transaction.Channel.TRANSFER_DVA,
         )
 
-        with self.assertRaises(InvalidStateError):
-            services.initiate_payout(player3, Decimal(1000000), self.cashier, game_day=self.game_day)
-        self.assertFalse(Transaction.objects.filter(player=player3, type=Transaction.Type.PAYOUT).exists())
+        payout = services.initiate_payout(player3, Decimal(1000000), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.amount, Decimal(0))
+        self.assertEqual(payout.requested_amount, Decimal(1000000))  # capped at the request, not the 1,200,000 debt
+        self.assertEqual(payout.status, Transaction.Status.APPROVED)
+        self.assertIsNone(payout.approved_by)
+        # The 1,200,000 debt isn't fully cleared by this — only 1,000,000 of
+        # it (what was actually available) is accounted for; 200,000 stays
+        # outstanding, same as it was before this payout was attempted.
+        self.assertEqual(selectors.player_balance(player3), Decimal(-200000))
 
     def test_no_prior_debt_leaves_amount_and_requested_amount_unaffected(self):
         # Baseline regression: with no prior debt, requested_amount stays

@@ -1,4 +1,5 @@
 <script setup>
+import { computed } from 'vue'
 import { TRANSACTION_TYPES, TRANSACTION_STATUS_BADGE } from '@/constants/transactionTypes'
 
 // Shared tabular ledger row renderer (2026-09-17) — replaces 7 near-identical
@@ -46,14 +47,6 @@ const props = defineProps({
   dateFormat: { type: String, default: 'time' }, // 'time' | 'datetime'
   voidable: { type: Boolean, default: false },
   canVoidFn: { type: Function, default: () => false },
-  // Off for the Cashier's own live game-day ledger (ActiveGameDayView.vue) —
-  // added 2026-09-27 alongside payout netting (see nettedNote below). The
-  // note names how much of a payout went to clearing an OLDER game-day's
-  // debt, which is exactly the lifetime-balance context CONCEPT.md's
-  // "Cashier player-history visibility" rule keeps a Cashier from seeing;
-  // on by default for every back-office ledger (Owner/Accountant), which
-  // already has that visibility elsewhere (e.g. Off-table, PayoutsView).
-  showNettedNote: { type: Boolean, default: true },
 })
 defineEmits(['void'])
 
@@ -90,17 +83,41 @@ function statusBadgeText(row) {
 
 // Netting against a prior outstanding balance (2026-09-27, see
 // gaming.services.initiate_payout) — requested_amount is only ever set when
-// the Cashier's request got automatically reduced to clear an older debt
-// first. The Amount column already shows the real, payable-after-netting
-// figure (row.amount, what row.signed_amount is built from) and the Status
-// column already shows what happened to it (Pending/Approved/Auto-X) — this
-// note just makes the "why isn't this what the Cashier asked for" visible,
-// rather than a silent substitution.
-function nettedNote(row) {
-  if (!props.showNettedNote || row.type !== 'PAYOUT' || !row.requested_amount) return null
-  const cleared = Number(row.requested_amount) - Number(row.amount)
-  return `Requested ${N(row.requested_amount)} — ${N(cleared)} cleared a prior balance`
-}
+// a payout got automatically reduced to clear an older debt first. Shown as
+// TWO rows per the user's own explicit spec (2026-09-27 follow-up): a
+// leading, non-voidable "Payout BBF" (Balance Brought Forward) informational
+// row — Amount = what was actually requested, Balance = what was actually
+// available once the older balance is accounted for — followed by the real
+// PAYOUT row, rendered completely normally (own amount/status/void). No new
+// Transaction/data is needed for this: whenever requested_amount is set,
+// the real row's own `amount` field IS mathematically the lifetime balance
+// immediately before it was applied (min(requested, lifetime) only ever
+// binds on the lifetime side when netting actually happens) — so the BBF
+// row's "Balance" is just that same number, read a second time. This is why
+// it stays correct even if the real row is later rejected/voided: rejecting
+// only cancels ITS OWN debit, so the BBF figure it displays doesn't move —
+// see PLAN.md's dated entry for the full reasoning and the live case that
+// prompted this (Moses/WWI 12, requested ₦1,000,000, BBF ₦400,000 → net
+// ₦600,000, over the ₦500,000 threshold, correctly PENDING_APPROVAL).
+// The BBF label spells out the actual amount carried forward/cleared, e.g.
+// "Payout BBF (-400,000)" — added 2026-09-27 per explicit follow-up, "this
+// way it's crystal clear." Always requested_amount - amount: mathematically
+// capped at requested_amount by construction (amount is never negative),
+// so this can never show more than what was actually requested even when
+// the real prior debt is larger (see gaming.services.initiate_payout's
+// net_amount<=0 branch, which now records a ₦0 payout precisely so this
+// row has real data to render instead of nothing being recorded at all).
+const expandedRows = computed(() => {
+  const out = []
+  for (const row of props.rows) {
+    if (row.type === 'PAYOUT' && row.requested_amount) {
+      const cleared = Number(row.requested_amount) - Number(row.amount)
+      out.push({ ...row, _bbf: true, _key: `${row.id}-bbf`, _cleared: cleared })
+    }
+    out.push({ ...row, _key: row.id })
+  }
+  return out
+})
 </script>
 
 <template>
@@ -122,28 +139,29 @@ function nettedNote(row) {
         <tr v-if="!rows.length">
           <td class="empty" :colspan="3 + (showPlayer ? 1 : 0) + 2 + (showStatus ? 1 : 0) + (voidable ? 1 : 0)">Nothing recorded yet.</td>
         </tr>
-        <tr v-for="row in rows" :key="row.id" :class="{ 'row--voided': row.is_voided }">
+        <tr v-for="row in expandedRows" :key="row._key" :class="{ 'row--voided': row.is_voided && !row._bbf, 'row--bbf': row._bbf }">
           <td class="col-lane"><span :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" /></td>
           <td class="mono">{{ dateFormat === 'datetime' ? formatDateTime(row.created_at) : formatTime(row.created_at) }}</td>
-          <td>
-            {{ row.type_label || TRANSACTION_TYPES[row.type]?.label || row.type }}
-            <div v-if="nettedNote(row)" class="netted-note">{{ nettedNote(row) }}</div>
-          </td>
+          <td>{{ row._bbf ? `Payout BBF (-${N(row._cleared)})` : (row.type_label || TRANSACTION_TYPES[row.type]?.label || row.type) }}</td>
           <td v-if="showPlayer">
             <RouterLink v-if="playerTo?.(row)" :to="playerTo(row)" class="player-link" @click.stop>{{ row.player_name }}</RouterLink>
             <span v-else>{{ row.player_name }}</span>
           </td>
-          <td class="num mono" :class="amountToneClass(row.type)">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</td>
+          <td v-if="row._bbf" class="num mono">{{ N(row.requested_amount) }}</td>
+          <td v-else class="num mono" :class="amountToneClass(row.type)">{{ row.signed_amount > 0 ? '+' : '' }}{{ N(row.signed_amount) }}</td>
           <td class="num mono">
-            <span v-if="row.is_voided" class="voided-label">VOIDED</span>
+            <span v-if="row._bbf">{{ N(row.amount) }}</span>
+            <span v-else-if="row.is_voided" class="voided-label">VOIDED</span>
             <span v-else>{{ N(row.running_balance) }}</span>
           </td>
           <td v-if="showStatus">
-            <span v-if="isAutoApprovedPayout(row)" class="badge badge--auto-approved">{{ statusBadgeText(row) }}</span>
-            <span v-else-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ statusBadgeText(row) }}</span>
+            <template v-if="!row._bbf">
+              <span v-if="isAutoApprovedPayout(row)" class="badge badge--auto-approved">{{ statusBadgeText(row) }}</span>
+              <span v-else-if="TRANSACTION_STATUS_BADGE[row.status]" class="badge" :class="`badge--${TRANSACTION_STATUS_BADGE[row.status]}`">{{ statusBadgeText(row) }}</span>
+            </template>
           </td>
           <td v-if="voidable" class="col-action">
-            <button v-if="canVoidFn(row)" class="void-trigger" type="button" title="Void this entry" @click="$emit('void', row)">&#8942;</button>
+            <button v-if="!row._bbf && canVoidFn(row)" class="void-trigger" type="button" title="Void this entry" @click="$emit('void', row)">&#8942;</button>
           </td>
         </tr>
       </tbody>
@@ -188,6 +206,13 @@ function nettedNote(row) {
 .ledger-table tbody tr.row--voided td { opacity: 0.55; text-decoration: line-through; }
 .ledger-table tbody tr.row--voided td.col-lane { text-decoration: none; }
 
+/* "Payout BBF" informational row (2026-09-27) — a real payout's Balance
+   Brought Forward, read a second time from the same row's own data (see
+   expandedRows above), not a real transaction — muted/italic so it reads
+   as context for the real row right below it, never mistaken for one. */
+.ledger-table tbody tr.row--bbf td { color: var(--text-tertiary); font-style: italic; }
+.ledger-table tbody tr.row--bbf td.col-lane span { opacity: 0.5; }
+
 .ledger-table td.mono, .ledger-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ledger-table td.empty { text-align: center; color: var(--text-secondary); padding: 20px 10px; font-family: var(--font-sans); }
 .ledger-table td.amount--debit { color: var(--danger-text); }
@@ -215,15 +240,6 @@ function nettedNote(row) {
 .player-link:hover { color: var(--accent-text); text-decoration: underline; }
 
 .voided-label { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); font-family: var(--font-sans); }
-
-.netted-note {
-  font-family: var(--font-sans);
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-  white-space: normal;
-  margin-top: 2px;
-}
 
 .void-trigger {
   border: none;

@@ -1738,6 +1738,131 @@ Two other comments referencing it as if still current (`PlayerBankAccountModal.v
 ×2) updated to past tense; `LedgerTable.vue`'s own mention is purely
 historical (a list of what it replaced back in 2026-09-17) and was left as-is.
 
+### A live migration gap, then two real follow-ups on payout netting (2026-09-27, same day)
+
+After the above was committed, a live 500 on `/game-days/14/players/` and
+`/activity/` turned out to be nothing about the netting logic itself — the
+real dev DB's `test1` tenant schema had never actually run
+`gaming.0024_transaction_requested_amount` (only the ephemeral test-suite
+database gets migrated by `manage.py test`; the real tenant needs its own
+`tenant_command migrate --schema=test1`, a step this session's verification
+habit had only ever exercised via curl/shell, not by actually reloading the
+live frontend). Fixed by running that migration for real against `test1`.
+
+Then, live-verifying the auto-approval-on-net behavior surfaced two more
+things, both traced to the SAME real transaction (Moses / WWI 12, game-day
+14) rather than guessed at:
+
+1. **Not a bug, but a genuinely confusing note.** A pending payout there
+   read "Cashier requested ₦1,000,000. ₦400,000 applied to an outstanding
+   balance...; ₦600,000 payable" — the user read "net 400,000" out of that,
+   flagged it as broken. Traced via direct ledger reconstruction (excluding
+   the payout's own contribution to isolate the state at request time):
+   today's own game-day balance was genuinely 1,000,000, a real −400,000
+   carried in from before today, netting to 600,000 — which correctly
+   stayed `PENDING_APPROVAL` (over the ₦500,000 threshold). The system was
+   right; the note's wording wasn't clear that the LAST figure is the net,
+   not the cleared amount. Fixed: `notes` now says "net ₦{net_amount:,}
+   payable" explicitly (services.py); the (now-superseded, see below)
+   LedgerTable/PayoutsView captions got the same "net" callout before the
+   caption approach itself was replaced.
+
+2. **A real design gap, fixed properly.** Asked directly (AskUserQuestion,
+   both answered): (a) should "Payout BBF" (Balance Brought Forward) be a
+   new, separate ledger transaction, or the SAME netted payout just
+   presented differently? → same one, no new Transaction type — confirmed
+   safe because whenever netting actually happens, `net_amount` (already
+   stored as the real row's own `amount`) IS mathematically the player's
+   lifetime balance immediately before that payout was applied (netting
+   only ever binds when `player_balance() < requested`, so
+   `min(requested, player_balance()) == player_balance()` in exactly that
+   case) — no new field, no double-entry risk, confirmed by the user's own
+   worked answer ("a positive prior balance is never added on top — for
+   now, no", which the existing `min(...)` formula already guaranteed).
+   (b) should the Cashier's own balance display show this net figure too
+   (a deliberate, narrow exception to "Cashier only sees today's own
+   figures")? → yes, but scoped tightly: ONLY when the selected player has
+   a netted payout on record today; every other player/moment is
+   completely unaffected.
+   Built as pure presentation, zero new backend data:
+   - `LedgerTable.vue` (used everywhere, not just the Cashier's page) now
+     renders any PAYOUT row with `requested_amount` set as TWO rows — a
+     non-voidable, italicized "Payout BBF" line (Amount = requested,
+     Balance = the real row's own `amount`, i.e. read a second time) right
+     before the real Payout row (rendered completely normally — own
+     amount/status/void). Replaces the earlier small under-the-Type-cell
+     caption entirely (removed, along with the `showNettedNote` prop that
+     gated it off for the Cashier — no longer needed, see (b) above).
+   - `ActiveGameDayView.vue`'s hero balance figure: new `displayedBalance`
+     computed — if the selected player has a PAYOUT row today with
+     `requested_amount` set (most recent one, since `ledgerRows` is
+     already most-recent-first), shows THAT row's `amount` instead of
+     `selectedPlayer.balance`. Deliberately stays on that figure even
+     after the payout is later rejected (voiding only cancels the payout's
+     OWN debit — the BBF figure it names doesn't move, doesn't need
+     recomputing, and per the user's third explicit requirement must NOT
+     silently revert to the raw today-only balance, which would look like
+     the older debt never existed).
+   Known limitation, not built: the BBF figure is a point-in-time snapshot
+   tied to that specific payout transaction — if a player somehow kept
+   playing after requesting a payout (via "Rejoin at Seat") and won
+   further, the displayed figure wouldn't reflect that later activity.
+   Accepted as an edge case given how rare "rejoin after requesting a
+   payout" is in practice.
+
+Verified: `PayoutNettingAgainstPriorDebtTests` (4) +
+`PayoutAutoApprovalThresholdTests` (3) green after the wording change,
+`npm run build` clean, and the real Moses/WWI 12 transaction traced end to
+end via direct shell reconstruction (not assumed) before any fix was
+written.
+
+### Fixed a real live bug in the "Payout BBF" balance display; BBF line now names its own figure, capped at what was requested (2026-09-27, same day)
+
+Live report right after approving Moses/WWI 12's payout above: the
+Cashier's own balance display still read 600,000 instead of 0. Traced
+before touching anything — `selectors.player_balance` confirmed the real
+backend money math was already correct (genuinely 0 the moment it was
+checked); the bug was entirely in `displayedBalance` (ActiveGameDayView.vue,
+built earlier the same day): it froze on the payout's own `amount` (Balance
+Brought Forward) for EVERY status, when it should only freeze there for a
+REJECTED (voided) payout — PENDING_APPROVAL, TRANSFER_FAILED, and APPROVED
+all already fully reserve/consume that balance the moment they exist (same
+"a pending payout already reduces this figure" convention every other
+balance in this app already follows), so the true remaining balance is 0
+in all three of those, and only voiding genuinely gives it back. Fixed by
+branching on `row.is_voided` instead of showing the frozen figure
+unconditionally.
+
+Two more explicit follow-ups landed in the same pass:
+
+1. **The BBF line now names its own amount** — "Payout BBF (-400,000)"
+   instead of a bare "Payout BBF" — computed the same way as everywhere
+   else (`requested_amount - amount`), added to `expandedRows` as `_cleared`.
+2. **When the prior debt is LARGER than what's requested, the BBF figure
+   is capped at the request, never the full debt.** This turned out to
+   require a real backend behavior change, not just a display fix: that
+   case (`net_amount <= 0`) previously raised with NOTHING recorded at
+   all — no Transaction, so no data for a BBF line to ever attach to.
+   `initiate_payout` now records a ₦0 payout instead, settled immediately
+   (APPROVED, approved_by=None) since there's nothing to actually transfer
+   — this never reaches a real Paystack call. `requested_amount` is set to
+   what was actually asked for, so `cleared` (= requested − 0 = requested)
+   is automatically capped at the request by the exact same arithmetic as
+   the normal case, with no special-casing needed on the display side.
+   Existing test `test_debt_fully_absorbing_winnings_blocks_the_payout_entirely`
+   renamed and rewritten (`test_debt_larger_than_winnings_records_a_zero_payout_capped_at_the_request`)
+   to match.
+
+Verified: both fixes live-traced against real/throwaway data via direct
+shell reconstruction before being called done (not just the unit tests) —
+Moses/WWI 12's real txn 106 confirmed `displayedBalance` now computes 0
+post-approval; a fresh throwaway player with a ₦1,200,000 prior debt
+against a ₦1,000,000 win confirmed the ₦0-payout path records
+`requested_amount=1,000,000`, `amount=0`, BBF label
+"Payout BBF (-1,000,000)" (capped, not -1,200,000), and the still-real
+₦200,000 remainder correctly left outstanding afterward — cleaned up
+after. Full backend suite green (275/275), `npm run build` clean.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.
