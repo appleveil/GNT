@@ -2,6 +2,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
+import { useAuthStore } from '@/stores/auth'
+import LedgerTable from '@/components/shared/LedgerTable.vue'
+import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
+import { canVoidTransaction } from '@/utils/canVoid'
 import { useToast } from '@/composables/useToast'
 
 // Deal-type picker (2026-09-23) — mirrors the mobile app's
@@ -10,13 +14,29 @@ import { useToast } from '@/composables/useToast'
 // available and shows an ACTIVE badge if one already exists. Eligibility
 // here is a UX nicety only — record_transaction/record_deal_transfer both
 // enforce the same caps server-side regardless.
+//
+// 2026-09-24: this player's own Deal history moved in here (below the type
+// picker) once the standalone Deals list/history pages were retired — every
+// player now reaches their deal page straight from the Players table's ⋮
+// menu, so a club-wide feed elsewhere is no longer this page's neighbor.
+// Same 4 types DealsHistoryView filtered to, just scoped to this player via
+// GET /transactions/?player=<id> (no dedicated backend filter for "deal
+// transactions", same accepted trade-off as PayoutsView.vue's own
+// client-side filter).
+const DEAL_TYPES = ['WRITE_OFF', 'DEAL_TRANSFER_OUT', 'DEAL_TRANSFER_IN', 'PROFIT_SPLIT_STAKE']
+
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const toast = useToast()
 
 const player = ref(null)
 const loading = ref(true)
 const activeArrangement = ref(null)
+
+const history = ref([])
+const historyLoading = ref(true)
+const voidTarget = ref(null)
 
 async function load() {
   loading.value = true
@@ -32,6 +52,22 @@ async function load() {
   } finally {
     loading.value = false
   }
+  loadHistory() // own try/catch, own toast — never blocks the picker above
+}
+
+async function loadHistory() {
+  historyLoading.value = true
+  try {
+    const { data } = await api.get('/transactions/', { params: { player: route.params.playerId } })
+    history.value = data
+      .filter(t => DEAL_TYPES.includes(t.type))
+      .slice()
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+  } catch {
+    toast.error('Could not load this player’s deal history.')
+  } finally {
+    historyLoading.value = false
+  }
 }
 
 onMounted(load)
@@ -39,12 +75,21 @@ onMounted(load)
 const hasDebt = computed(() => player.value && Number(player.value.balance) < 0)
 const hasFunds = computed(() => player.value && Number(player.value.balance) > 0)
 
+function canVoid(row) {
+  return canVoidTransaction(row, auth.user)
+}
+function onVoided() {
+  voidTarget.value = null
+  toast.success('Entry voided.')
+  loadHistory()
+}
+
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
 
 <template>
   <div class="page">
-    <button class="back-btn" type="button" @click="router.push('/deals')">&larr; Deals</button>
+    <button class="back-btn" type="button" @click="router.push('/roster')">&larr; Players</button>
 
     <p v-if="loading" class="muted">Loading…</p>
 
@@ -90,7 +135,21 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </div>
         <p class="deal-type-desc">A standing arrangement — house covers part of buy-in and/or takes a payout cut.</p>
       </button>
+
+      <div class="section-heading">
+        <h2>Deal history</h2>
+      </div>
+      <p v-if="historyLoading" class="muted">Loading…</p>
+      <p v-else-if="!history.length" class="muted">Nothing recorded for {{ player.display_name }} yet.</p>
+      <div v-else class="card history-card">
+        <LedgerTable :rows="history" date-format="datetime" voidable :can-void-fn="canVoid" @void="voidTarget = $event" />
+      </div>
     </template>
+
+    <VoidEntryModal
+      v-if="voidTarget" :transaction="voidTarget" :player-name="player?.display_name"
+      :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
+    />
   </div>
 </template>
 
@@ -128,4 +187,8 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .deal-type-title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
 .deal-type-title { font-size: 14.5px; font-weight: 700; color: var(--text-primary); }
 .deal-type-desc { font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; margin: 0; }
+
+.section-heading { margin: 24px 0 12px; }
+.section-heading h2 { font-size: 15px; font-weight: 700; color: var(--text-primary); margin: 0; }
+.history-card { padding: 8px 18px; }
 </style>

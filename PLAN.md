@@ -1327,6 +1327,78 @@ Today the Paystack integration (secret/public keys) is env-var-only (`settings.P
 
 ---
 
+### Owner Dashboard game-day widget made opt-in; Players table gets a ⋮ actions menu; Deals folds into it (2026-09-24)
+Two requests handled together since the second effectively replaces part of
+the first-built "Deals" feature (2026-09-23 entry above):
+
+**Dashboard's open/operate-game-day card is now Owner-configurable, off by
+default.** New `ClubSettings.owner_dashboard_game_day_enabled` (Boolean,
+default `False`) — a visibility toggle, not a sign-off one, so it's a new
+field alongside (not folded into) the `require_approval_*` toggles; the
+Settings screen gets its own small "Dashboard" section for it, with the
+same switch component as "Require approval". `DashboardView.vue`'s
+`game-day-card` block now checks `auth.isOwner &&
+clubSettings.current?.owner_dashboard_game_day_enabled` instead of just
+`auth.isOwner`.
+
+**Players table trimmed to Code/DVA, Name, Balance, Chips limit** ("Chips
+used today" and the old "View →" link column are gone; the row itself still
+navigates to the full profile on click) **plus a header-less ⋮ actions
+column** — new generic `RowActionsMenu.vue` (click-outside-to-close popover,
+`items`/`select` props, no API calls of its own — same "purely
+presentational" split as `LedgerTable.vue`). Actions, Owner-only except
+View ledger:
+- **Deal** → `router.push('/deals/:id')` straight to the existing
+  DealTypePickerView — no intermediate player-picker needed since the row
+  is already the player.
+- **Chips limit** → new `ChipsLimitModal.vue`, same `PATCH /players/{id}/
+  {chips_limit}` RosterDetailView's own inline edit already used, as a
+  modal.
+- **View ledger** → new `PlayerLedgerModal.vue`, a large modal with a
+  game-day picker + `LedgerTable`, mirroring RosterDetailView's "Any
+  game-day's activity" section — except the picker is scoped to games this
+  player actually played in, not every game-day club-wide. New
+  `GameDayViewSet.get_queryset` filter: `?player=<id>` →
+  `GameDay.objects.filter(seated_players__player_id=player_id)`. Unlike
+  Payout below, this menu item is never disabled — a player with no
+  game-days yet just sees the modal say so.
+- **Payout** → new `DirectPayoutModal.vue` + new backend path
+  `services.initiate_direct_payout` / `POST
+  /api/transactions/direct-payout/` (Owner-only, checked the same manual-role
+  way `TransactionViewSet.create()` already gates `OWNER_ONLY_TRANSACTION_TYPES`).
+  This is genuinely new, not a reuse of the existing Cashier payout: asked
+  directly, since `initiate_payout` requires an open game-day, caps the
+  amount at that game-day's own winnings, and requires the player to have
+  left the table — none of which make sense from the Players page. The new
+  path pays out (up to) the player's LIFETIME balance
+  (`selectors.player_balance`), no game-day involved at all
+  (`game_day=None` on the resulting Transaction — same convention as any
+  other Outstanding entry), and the Owner picks the amount ("either all or
+  some of the outstanding, but not more — this isn't a bank"), enforced
+  both client-side and server-side. Still funnels through
+  `_execute_payout_transfer`/the auto-approval threshold, still requires a
+  default bank account first — if there isn't one, the modal opens the
+  existing `PlayerBankAccountModal.vue` (same stacked-modal-then-retry
+  pattern `ActiveGameDayView.vue`'s own payout button already uses), not a
+  new bank-account form.
+
+**The standalone Deals section is retired**, per direct confirmation once
+the ⋮ menu's Deal action made it redundant: `DealsListView.vue` (player
+picker) and `DealsHistoryView.vue` (club-wide feed) are deleted, along with
+their routes and the "Deals" sidebar tab. Deal history didn't just
+disappear — it moved onto `DealTypePickerView.vue` itself (now fetches and
+renders this ONE player's own WRITE_OFF/DEAL_TRANSFER_OUT/
+DEAL_TRANSFER_IN/PROFIT_SPLIT_STAKE transactions, voidable, same as the
+retired page minus the filter chips and the other players). Its back-link
+now points at `/roster` instead of the retired `/deals`.
+
+Verified: `python manage.py test gaming accounts payments` (263/263,
+up from 254 — 9 new tests: direct-payout success/cap/no-bank/auto-approval/
+non-owner-403, the game-day player filter, and the dashboard toggle's
+default+write), `makemigrations --check --dry-run` clean before writing
+`0022_clubsettings_owner_dashboard_game_day_enabled.py` by hand, and
+`npm run build` clean.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

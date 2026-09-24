@@ -38,7 +38,7 @@ class ClubSettingsSerializer(serializers.ModelSerializer):
         fields = [
             'require_approval_open_game_day', 'require_approval_close_game_day', 'require_approval_issue_chips',
             'require_approval_return_chips', 'require_approval_add_tip', 'require_approval_add_rake',
-            'payout_auto_approve_threshold',
+            'payout_auto_approve_threshold', 'owner_dashboard_game_day_enabled',
         ]
 
 
@@ -246,6 +246,18 @@ class InitiatePayoutSerializer(serializers.Serializer):
     player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
     amount = serializers.DecimalField(max_digits=14, decimal_places=0)
     game_day = serializers.PrimaryKeyRelatedField(queryset=GameDay.objects.all(), required=False, allow_null=True)
+
+
+class InitiateDirectPayoutSerializer(serializers.Serializer):
+    """
+    Input for the Owner's direct-payout action (2026-09-24) — see
+    gaming.services.initiate_direct_payout. No game_day: this pays out a
+    player's lifetime outstanding balance, not a specific game-day's
+    winnings.
+    """
+
+    player = serializers.PrimaryKeyRelatedField(queryset=Player.objects.all())
+    amount = serializers.DecimalField(max_digits=14, decimal_places=0)
 
 
 class DealTransferSerializer(serializers.Serializer):

@@ -54,7 +54,10 @@ const gameDayDate = computed(() => {
 // Payouts/Main Account/Admin/Settings (Phase C, 2026-09-14) — "everything
 // Accountant has, plus." Outstanding was its own 4th base tab until
 // 2026-09-23, when its whole page was folded into Dashboard and this tab
-// (and the standalone route) were retired.
+// (and the standalone route) were retired. Deals was its own Owner tab the
+// same way from 2026-09-23 to 2026-09-24, when it was retired too — Deal is
+// now one of the Players table's own ⋮ actions instead of a separate
+// player-picker page.
 const tabs = computed(() => {
   const role = auth.user?.role
   if (role === 'CASHIER') return []
@@ -73,7 +76,6 @@ const tabs = computed(() => {
     base.push(
       { name: 'payouts', label: 'Payouts', path: '/payouts' },
       { name: 'main-account', label: 'Main Account', path: '/main-account' },
-      { name: 'deals', label: 'Deals', path: '/deals' },
       { name: 'admin', label: 'Admin', path: '/admin' },
       { name: 'club-settings', label: 'Settings', path: '/settings' },
     )

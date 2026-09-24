@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
+import { useClubSettingsStore } from '@/stores/clubSettings'
 import { useToast } from '@/composables/useToast'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
 import LedgerTable from '@/components/shared/LedgerTable.vue'
@@ -27,9 +28,15 @@ import { canVoidTransaction } from '@/utils/canVoid'
 // Accountant still gets outstanding_chips as before — the two fields are
 // mutually exclusive per role in the API response, so the template below
 // just checks which one showed up.
+//
+// 2026-09-24: the open/operate-game-day card is now Owner-configurable —
+// off by default (see ClubSettings.owner_dashboard_game_day_enabled) —
+// rather than always showing for every Owner. Settings screen has the
+// toggle; this view just reads it.
 const router = useRouter()
 const auth = useAuthStore()
 const gameDay = useGameDayStore()
+const clubSettings = useClubSettingsStore()
 const toast = useToast()
 
 const totals = ref(null)
@@ -74,6 +81,13 @@ async function load() {
       await gameDay.fetchCurrent()
     } catch {
       /* fetchCurrent already toasted */
+    }
+    if (!clubSettings.current) {
+      try {
+        await clubSettings.fetchCurrent()
+      } catch {
+        /* fetchCurrent already toasted */
+      }
     }
   }
 }
@@ -164,7 +178,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </div>
       </div>
 
-      <div v-if="auth.isOwner" class="card game-day-card">
+      <div v-if="auth.isOwner && clubSettings.current?.owner_dashboard_game_day_enabled" class="card game-day-card">
         <template v-if="gameDay.isOpen">
           <div>
             <div class="gd-title">Game-Day #{{ gameDay.current.number }} is open</div>
@@ -181,13 +195,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
             {{ opening ? 'Opening…' : 'Open Game-Day' }}
           </button>
         </template>
-      </div>
-
-      <div class="quick-links">
-        <button class="card link-card" type="button" @click="router.push('/game-days')">
-          <div class="link-title">Browse game-day history &rarr;</div>
-          <div class="link-sub">Every game-day, open and closed, with full ledgers.</div>
-        </button>
       </div>
 
       <div class="section-heading">

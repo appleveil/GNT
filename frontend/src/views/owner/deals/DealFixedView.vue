@@ -65,7 +65,7 @@ async function onSubmit() {
       ...(gameDay.isOpen ? { game_day: gameDay.current.id } : {}),
     })
     toast.success(`₦${amountNumber.value.toLocaleString()} cleared from ${player.value.display_name}'s outstanding balance.`)
-    router.push('/deals')
+    router.push(`/deals/${route.params.playerId}`)
   } catch (err) {
     error.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not save this write-off.'
   } finally {

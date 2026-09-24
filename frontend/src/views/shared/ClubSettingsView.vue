@@ -111,6 +111,27 @@ async function onToggleApproval(field) {
   }
 }
 
+// ── Dashboard (Owner-only) ──────────────────────────────────────────────
+// A single visibility toggle, added 2026-09-24 — distinct in kind from the
+// require_approval_* switches above (those gate sign-off; this gates
+// whether the open/operate-game-day widget shows on Dashboard at all), so
+// it gets its own switch + its own PATCH call rather than joining
+// APPROVAL_TOGGLES/onToggleApproval.
+const dashboardTogglingField = ref('')
+async function onToggleDashboardGameDay() {
+  dashboardTogglingField.value = 'owner_dashboard_game_day_enabled'
+  try {
+    const { data } = await api.patch('/club-settings/', {
+      owner_dashboard_game_day_enabled: !clubSettings.current.owner_dashboard_game_day_enabled,
+    })
+    clubSettings.current = data
+  } catch {
+    toast.error('Could not update that setting.')
+  } finally {
+    dashboardTogglingField.value = ''
+  }
+}
+
 // ── Payout auto-approval (Owner-only) ───────────────────────────────────
 const thresholdInput = ref('')
 const thresholdSaving = ref(false)
@@ -278,6 +299,28 @@ const N = n => `₦${Number(n).toLocaleString()}`
               class="switch" type="button" :class="{ 'switch--on': clubSettings.current[t.field] }"
               :disabled="togglingField === t.field" role="switch" :aria-checked="clubSettings.current[t.field]"
               @click="onToggleApproval(t.field)"
+            >
+              <span class="switch-knob" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card section-card">
+        <div class="section-title">Dashboard</div>
+        <p class="section-note">Off by default — most clubs open/close a game-day from the Cashier device, not from here.</p>
+        <p v-if="!clubSettings.current" class="muted">Loading…</p>
+        <div v-else class="toggle-list">
+          <div class="toggle-row">
+            <div class="row-info">
+              <div class="row-name">Open/operate a game-day from Dashboard</div>
+              <div class="row-sub">Opens immediately under your own login — no PIN needed, regardless of the approval toggles above.</div>
+            </div>
+            <button
+              class="switch" type="button" :class="{ 'switch--on': clubSettings.current.owner_dashboard_game_day_enabled }"
+              :disabled="dashboardTogglingField === 'owner_dashboard_game_day_enabled'" role="switch"
+              :aria-checked="clubSettings.current.owner_dashboard_game_day_enabled"
+              @click="onToggleDashboardGameDay"
             >
               <span class="switch-knob" />
             </button>

@@ -23,6 +23,7 @@ from .serializers import (
     GameDaySerializer,
     GameDaySummaryPreviewSerializer,
     GameSerializer,
+    InitiateDirectPayoutSerializer,
     InitiatePayoutSerializer,
     LedgerEntrySerializer,
     OpenGameDaySerializer,
@@ -44,6 +45,18 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = GameDay.objects.all().order_by('-number')
     serializer_class = GameDaySerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # Added 2026-09-24 for the Players page's "View ledger" modal — only
+        # game-days a given player actually played in (GameDayPlayer rows —
+        # see that model's own docstring on why this, not a Transaction
+        # scan, is the right source: a player can be seated with no
+        # Transaction yet). ?player=<id>, otherwise unfiltered as before.
+        qs = GameDay.objects.all().order_by('-number')
+        player_id = self.request.query_params.get('player')
+        if player_id:
+            qs = qs.filter(seated_players__player_id=player_id).distinct()
+        return qs
 
     @action(detail=False, methods=['get'])
     def current(self, request):
@@ -398,6 +411,23 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         txn = services.initiate_payout(
             data['player'], data['amount'], request.user, game_day=data.get('game_day'),
         )
+        return Response(TransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='direct-payout')
+    def direct_payout(self, request):
+        """
+        Owner-only: pay out (up to) a player's lifetime outstanding balance
+        from the Players page, with no game-day involved — see
+        services.initiate_direct_payout. Same manual-role-check style as
+        create()'s OWNER_ONLY_TRANSACTION_TYPES gate above, not a separate
+        permission class, since this ViewSet mixes per-action permissions.
+        """
+        if request.user.role != StaffUser.Role.OWNER:
+            return Response({'detail': 'Only the Owner can initiate a payout this way.'}, status=status.HTTP_403_FORBIDDEN)
+        serializer = InitiateDirectPayoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        txn = services.initiate_direct_payout(data['player'], data['amount'], request.user)
         return Response(TransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])

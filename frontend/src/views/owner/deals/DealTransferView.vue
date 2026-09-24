@@ -86,7 +86,7 @@ async function onSubmit() {
       reason: reason.value.trim(),
     })
     toast.success(`₦${amountNumber.value.toLocaleString()} moved from ${player.value.display_name} to ${target.value.display_name}.`)
-    router.push('/deals')
+    router.push(`/deals/${route.params.playerId}`)
   } catch (err) {
     error.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not save this transfer.'
   } finally {

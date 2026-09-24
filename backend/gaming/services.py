@@ -964,6 +964,43 @@ def initiate_payout(player, amount, operator, game_day=None):
     return transaction_obj
 
 
+def initiate_direct_payout(player, amount, operator):
+    """
+    Owner-initiated payout from the Players page (2026-09-24) — pays out up
+    to a player's LIFETIME outstanding balance (selectors.player_balance),
+    with no game-day involved at all: game_day=None on the resulting
+    Transaction, same "between-game-day" convention as any other Outstanding
+    entry (it shows up there, not on any game-day's ledger).
+
+    Distinct from initiate_payout, which is always Cashier-side, always
+    scoped to a currently-open game-day, and capped at that game-day's own
+    winnings — this is the back-office equivalent for a player who's owed
+    money independent of tonight's table (e.g. from a Deal, or a balance
+    carried over from a previous game-day). No "must have left the table"
+    gate either — there's no table this is scoped to.
+    """
+    available = max(selectors.player_balance(player), Decimal('0'))
+    if amount <= 0:
+        raise InvalidStateError('Enter an amount greater than zero.')
+    if amount > available:
+        raise InvalidStateError(
+            f'This exceeds what {player.display_name} is owed (available: ₦{available:,}).'
+        )
+    if not player.bank_accounts.filter(is_default=True).exists():
+        raise InvalidStateError(
+            f'{player.display_name} has no bank account on file — add one before requesting a payout.'
+        )
+
+    transaction_obj = Transaction.objects.create(
+        game_day=None, player=player, type=Transaction.Type.PAYOUT, amount=amount,
+        channel=Transaction.Channel.CASHIER, recorded_by=operator,
+        status=Transaction.Status.PENDING_APPROVAL,
+    )
+    if amount <= ClubSettings.load().payout_auto_approve_threshold:
+        return _execute_payout_transfer(transaction_obj, approved_by=None)
+    return transaction_obj
+
+
 def _execute_payout_transfer(transaction_obj, approved_by):
     """
     Shared by approve_payout (Owner manually approves) and

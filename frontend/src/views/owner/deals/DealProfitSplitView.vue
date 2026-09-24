@@ -127,7 +127,7 @@ async function onSubmit() {
     }
     await api.post('/deals/profit-split/', payload)
     toast.success(`Arrangement set up for ${player.value.display_name}.`)
-    router.push('/deals')
+    router.push(`/deals/${route.params.playerId}`)
   } catch (err) {
     error.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not save this arrangement.'
   } finally {

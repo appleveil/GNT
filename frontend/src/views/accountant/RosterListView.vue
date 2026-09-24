@@ -2,13 +2,29 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/axios'
+import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
+import RowActionsMenu from '@/components/shared/RowActionsMenu.vue'
+import ChipsLimitModal from '@/components/shared/ChipsLimitModal.vue'
+import PlayerLedgerModal from '@/components/shared/PlayerLedgerModal.vue'
+import DirectPayoutModal from '@/components/shared/DirectPayoutModal.vue'
 
 // Player roster (Phase B, 2026-09-14) — GET /api/players/, IsAuthenticated.
 // PlayerSerializer's `balance` is the unmasked lifetime figure (Cashier's own
 // player list had a negative-balance masking rule that doesn't apply to
 // Accountant/Owner — see accounts/serializers.py's get_balance).
+//
+// 2026-09-24: trimmed to Code/DVA, Name, Balance, Chips limit + a ⋮ actions
+// column (Deal / Chips limit / View ledger / Payout) — "Chips used today"
+// and the old "View →" link are gone from the table itself; the row itself
+// still navigates to the full profile on click, same as before. Deal jumps
+// straight to /deals/:id (the standalone Deals list page is retired — see
+// PLAN.md); Chips limit and View ledger open a modal in place; Payout opens
+// the new Owner-only direct-payout modal. Deal/Chips limit/Payout are
+// Owner-only, matching RosterDetailView's own gating for the same actions;
+// View ledger has no role restriction (read-only).
 const router = useRouter()
+const auth = useAuthStore()
 const toast = useToast()
 
 const players = ref([])
@@ -37,6 +53,36 @@ const filtered = computed(() => {
   )
 })
 
+function actionsFor(player) {
+  if (!auth.isOwner) return [{ key: 'ledger', label: 'View ledger' }]
+  return [
+    { key: 'deal', label: 'Deal' },
+    { key: 'chips-limit', label: 'Chips limit' },
+    { key: 'ledger', label: 'View ledger' },
+    { key: 'payout', label: 'Payout', disabled: !(Number(player.balance) > 0) },
+  ]
+}
+
+const chipsLimitTarget = ref(null)
+const ledgerTarget = ref(null)
+const payoutTarget = ref(null)
+
+function onSelectAction(player, key) {
+  if (key === 'deal') router.push(`/deals/${player.id}`)
+  else if (key === 'chips-limit') chipsLimitTarget.value = player
+  else if (key === 'ledger') ledgerTarget.value = player
+  else if (key === 'payout') payoutTarget.value = player
+}
+
+function onChipsLimitSaved() {
+  chipsLimitTarget.value = null
+  load()
+}
+function onPayoutSent() {
+  payoutTarget.value = null
+  load()
+}
+
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
 
@@ -54,7 +100,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
     <div v-else class="table">
       <div class="t-head">
-        <span>Code</span><span>Name</span><span>Balance</span><span>Chips limit</span><span>Chips used today</span><span></span>
+        <span>Code/DVA</span><span>Name</span><span>Balance</span><span>Chips limit</span><span></span>
       </div>
       <div
         v-for="p in filtered" :key="p.id" class="t-row"
@@ -64,10 +110,21 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <span>{{ p.display_name }}<span v-if="!p.is_active" class="badge badge--closed inactive-badge">inactive</span></span>
         <span class="money" :class="p.balance > 0 ? 'money--pos' : p.balance < 0 ? 'money--neg' : ''">{{ N(p.balance) }}</span>
         <span class="money">{{ N(p.chips_limit) }}</span>
-        <span class="money">{{ N(p.chips_used_today) }}</span>
-        <span class="view-link">View &rarr;</span>
+        <span class="actions-cell">
+          <RowActionsMenu :items="actionsFor(p)" @select="key => onSelectAction(p, key)" />
+        </span>
       </div>
     </div>
+
+    <ChipsLimitModal
+      v-if="chipsLimitTarget" :player="chipsLimitTarget"
+      @close="chipsLimitTarget = null" @saved="onChipsLimitSaved"
+    />
+    <PlayerLedgerModal v-if="ledgerTarget" :player="ledgerTarget" @close="ledgerTarget = null" />
+    <DirectPayoutModal
+      v-if="payoutTarget" :player-id="payoutTarget.id" :player-name="payoutTarget.display_name"
+      @close="payoutTarget = null" @paid="onPayoutSent"
+    />
   </div>
 </template>
 
@@ -93,27 +150,28 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .search-input:focus { outline: none; border-color: var(--accent); }
 
-.table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }
+.table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: visible; background: var(--surface); }
 .t-head, .t-row {
   display: grid;
-  grid-template-columns: 110px 1.4fr 1fr 1fr 1fr 70px;
+  grid-template-columns: 110px 1.4fr 1fr 1fr 44px;
   align-items: center;
   padding: 0 20px;
   gap: 8px;
 }
-.t-head { height: var(--control-row-min); background: var(--bg); border-bottom: 1px solid var(--border); }
+.t-head { height: var(--control-row-min); background: var(--bg); border-bottom: 1px solid var(--border); border-radius: var(--radius-md) var(--radius-md) 0 0; }
 .t-head span { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
 .t-row { height: var(--control-row-max); border-bottom: 1px solid var(--border); font-size: 13.5px; color: var(--text-primary); cursor: pointer; }
-.t-row:last-child { border-bottom: none; }
+.t-row:last-child { border-bottom: none; border-radius: 0 0 var(--radius-md) var(--radius-md); }
 .t-row:hover { background: var(--bg); }
 .mono { font-family: var(--font-mono); color: var(--text-secondary); }
-.view-link { font-size: 12.5px; font-weight: 600; color: var(--accent-text); text-align: right; }
 .money--pos { color: var(--success-text); }
 .money--neg { color: var(--danger-text); }
 .inactive-badge { margin-left: 8px; }
+.actions-cell { display: flex; justify-content: flex-end; }
 
 @media (max-width: 860px) {
   .t-head { display: none; }
-  .t-row { grid-template-columns: 1fr; height: auto; padding: 14px 20px; gap: 4px; }
+  .t-row { grid-template-columns: 1fr auto; height: auto; padding: 14px 20px; gap: 4px; }
+  .t-row .mono, .t-row .money { grid-column: 1; }
 }
 </style>

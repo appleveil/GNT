@@ -107,6 +107,14 @@ class ClubSettings(models.Model):
     reconciled) close — a chip-discrepancy close always requires sign-off
     regardless, since that's a genuine anomaly, not the routine case this
     toggle is meant to streamline.
+
+    `owner_dashboard_game_day_enabled`, added 2026-09-24, is a different kind
+    of toggle — not about sign-off, but whether the Owner's Dashboard shows
+    the open/operate/close-game-day widget at all. Off by default: most
+    clubs run game-day open/close from the Cashier device, and the Owner
+    doing it straight from Dashboard (no PIN, under their own login — see
+    DashboardView.vue's onOpenGameDay) is an opt-in convenience, not the
+    expected path.
     """
 
     require_approval_open_game_day = models.BooleanField(default=True)
@@ -118,6 +126,7 @@ class ClubSettings(models.Model):
     # A payout at or below this auto-approves (see services._execute_payout_transfer)
     # instead of sitting PENDING_APPROVAL for the Owner to act on.
     payout_auto_approve_threshold = models.DecimalField(max_digits=14, decimal_places=0, default=Decimal('500000'))
+    owner_dashboard_game_day_enabled = models.BooleanField(default=False)
 
     def save(self, *args, **kwargs):
         self.pk = 1

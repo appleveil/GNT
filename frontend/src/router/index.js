@@ -13,9 +13,13 @@
  * meta.roles is a defense-in-depth check mirroring what the API itself would
  * 403 for the wrong role. It's set on /dashboard, /game-days, /roster
  * (ACCOUNTANT + OWNER — the "back office" surface Cashier has no use for)
- * and, OWNER-only, on /admin, /payouts (Phase C, 2026-09-14), and /deals
+ * and, OWNER-only, on /admin, /payouts (Phase C, 2026-09-14), and /deals/:playerId
  * (2026-09-23). /outstanding was in this same group until 2026-09-23, when
- * it was folded into /dashboard and retired as its own route.
+ * it was folded into /dashboard and retired as its own route. The standalone
+ * /deals (player picker) and /deals/history pages were retired the same way
+ * on 2026-09-24 — Deal is now one of the Players table's own ⋮ actions
+ * (jumps straight to /deals/:playerId), and deal history moved onto each
+ * player's own deal page.
  *
  * The original Cashier routes (/game-day, /game-day/:id/ledger, /players/:id)
  * are deliberately left unrestricted: Owner still has no dedicated
@@ -91,8 +95,6 @@ const MainAccountLedgerView = () => import('@/views/owner/MainAccountLedgerView.
 // matching every "Deals" backend permission (IsOwner) exactly. Same
 // player-picker -> deal-type-picker -> form flow as the mobile app's own
 // navigation stack.
-const DealsListView = () => import('@/views/owner/deals/DealsListView.vue')
-const DealsHistoryView = () => import('@/views/owner/deals/DealsHistoryView.vue')
 const DealTypePickerView = () => import('@/views/owner/deals/DealTypePickerView.vue')
 const DealFixedView = () => import('@/views/owner/deals/DealFixedView.vue')
 const DealTransferView = () => import('@/views/owner/deals/DealTransferView.vue')
@@ -126,8 +128,6 @@ const routes = [
       { path: 'admin', name: 'admin', component: AdminView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'main-account', name: 'main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
-      { path: 'deals', name: 'deals', component: DealsListView, meta: { roles: OWNER_ONLY_ROLES } },
-      { path: 'deals/history', name: 'deals-history', component: DealsHistoryView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'deals/:playerId', name: 'deal-type-picker', component: DealTypePickerView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'deals/:playerId/fixed', name: 'deal-fixed', component: DealFixedView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'deals/:playerId/transfer', name: 'deal-transfer', component: DealTransferView, meta: { roles: OWNER_ONLY_ROLES } },

@@ -2517,6 +2517,100 @@ class PayoutAutoApprovalThresholdTests(APITestCase):
         self.assertEqual(other_payout.status, Transaction.Status.PENDING_APPROVAL)
 
 
+class DirectPayoutTests(APITestCase):
+    """
+    services.initiate_direct_payout + POST /api/transactions/direct-payout/
+    (added 2026-09-24) — the Owner-initiated payout of a player's LIFETIME
+    balance from the Players page, with no game-day involved at all. See
+    PayoutAutoApprovalThresholdTests above for the game-day-scoped
+    equivalent this deliberately does not touch.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='dp_owner', password='x', role=StaffUser.Role.OWNER)
+        self.accountant = StaffUser.objects.create_user(username='dp_acct', password='x', role=StaffUser.Role.ACCOUNTANT)
+        self.player = Player.objects.create(account_code='DP 1', display_name='Direct Payout Player')
+        PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Direct Payout Player', is_default=True,
+        )
+        # A credit with no game_day at all — an "owed outside any game-day"
+        # balance, same shape as a Deal or a carried-over Outstanding figure.
+        Transaction.objects.create(
+            game_day=None, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(200000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+
+    def test_requires_no_game_day_at_all(self):
+        # No game-day ever opened in this test — proves this path doesn't
+        # need one, unlike initiate_payout.
+        self.assertIsNone(GameDay.objects.filter(seated_players__player=self.player).first())
+        txn = services.initiate_direct_payout(self.player, Decimal(50000), self.owner)
+        self.assertIsNone(txn.game_day)
+        self.assertEqual(txn.player, self.player)
+
+    def test_capped_at_lifetime_balance_not_more(self):
+        with self.assertRaises(InvalidStateError):
+            services.initiate_direct_payout(self.player, Decimal(200001), self.owner)
+
+    def test_owner_can_pay_out_less_than_the_full_balance(self):
+        txn = services.initiate_direct_payout(self.player, Decimal(1000), self.owner)
+        self.assertEqual(txn.amount, Decimal(1000))
+
+    def test_blocked_without_a_bank_account(self):
+        no_bank_player = Player.objects.create(account_code='DP 2', display_name='No Bank Player')
+        Transaction.objects.create(
+            game_day=None, player=no_bank_player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(50000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        with self.assertRaises(InvalidStateError):
+            services.initiate_direct_payout(no_bank_player, Decimal(10000), self.owner)
+
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_direct'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_direct'})
+    def test_at_or_under_threshold_auto_approves_via_api(self, mock_recipient, mock_transfer):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            '/api/transactions/direct-payout/', {'player': self.player.id, 'amount': '50000'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['status'], 'APPROVED')
+
+    def test_non_owner_cannot_initiate_a_direct_payout(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(
+            '/api/transactions/direct-payout/', {'player': self.player.id, 'amount': '1000'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class GameDaysForPlayerFilterTests(APITestCase):
+    """GET /api/game-days/?player=<id> (added 2026-09-24) — only game-days that player was actually seated in."""
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='gdfp_owner', password='x', role=StaffUser.Role.OWNER)
+        self.player = Player.objects.create(account_code='GDFP 1', display_name='Seated Player')
+        self.other_player = Player.objects.create(account_code='GDFP 2', display_name='Other Player')
+        self.seated_gd = services.open_game_day(310, timezone.now(), self.owner)
+        services.seat_player(self.seated_gd, self.owner, player=self.player)
+        self.unrelated_gd = services.open_game_day(311, timezone.now(), self.owner)
+        services.seat_player(self.unrelated_gd, self.owner, player=self.other_player)
+
+    def test_filters_to_only_game_days_the_player_played_in(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/game-days/?player={self.player.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {gd['id'] for gd in response.data}
+        self.assertEqual(ids, {self.seated_gd.id})
+
+    def test_unfiltered_without_the_param_returns_everything(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/game-days/')
+        ids = {gd['id'] for gd in response.data}
+        self.assertIn(self.seated_gd.id, ids)
+        self.assertIn(self.unrelated_gd.id, ids)
+
+
 class ClubSettingsAndTablePermissionsAPITests(APITestCase):
     """
     ClubSettingsView (Owner writes, everyone reads) and TableViewSet's
@@ -2536,6 +2630,16 @@ class ClubSettingsAndTablePermissionsAPITests(APITestCase):
         response = self.client.get('/api/club-settings/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('payout_auto_approve_threshold', response.data)
+
+    def test_owner_dashboard_game_day_widget_defaults_off_and_owner_can_enable_it(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/club-settings/')
+        self.assertFalse(response.data['owner_dashboard_game_day_enabled'])
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch('/api/club-settings/', {'owner_dashboard_game_day_enabled': True})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(ClubSettings.load().owner_dashboard_game_day_enabled)
 
     def test_only_owner_can_write_club_settings(self):
         self.client.force_authenticate(self.fm_user)
