@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import VoidEntryModal from '@/components/shared/VoidEntryModal.vue'
@@ -13,6 +14,11 @@ import { useToast } from '@/composables/useToast'
 // its own queryset ordering. Closed rows show their frozen GameDaySummary
 // inline (now right on the list row — see the table below); OPEN rows have
 // no summary yet, cells fall back to '—'.
+//
+// Lives at /ledgers/game-days as of 2026-09-26 (was the flat /game-days) —
+// LedgersLayout.vue is its parent route now and owns the page-level header
+// + sub-nav (Game Days / Off-table), so this component's own former
+// page-header/<h1> was removed as duplicate chrome.
 //
 // Hi-fi pass, 2026-09-14 -> 2026-09-23: GameDayDetailView.vue (formerly its
 // own /game-days/:id route) is folded in here wholesale — clicking a row
@@ -32,6 +38,7 @@ import { useToast } from '@/composables/useToast'
 // money movements) — it just isn't duplicated here anymore. The topmost
 // (most recent) game-day's detail now opens automatically on page load,
 // instead of requiring a first click.
+const route = useRoute()
 const auth = useAuthStore()
 const toast = useToast()
 
@@ -43,7 +50,17 @@ async function load() {
   try {
     const { data } = await api.get('/game-days/')
     gameDays.value = data
-    if (data.length) await openGameDay(data[0])
+    // ?gameDay=<id> (added 2026-09-26, from the Dashboard's live-tables
+    // summary "View →" link) opens THAT game-day instead of the topmost
+    // one, and flips to whichever page it falls on — same PAGE_SIZE below.
+    const targetId = route.query.gameDay ? Number(route.query.gameDay) : null
+    const targetIndex = targetId != null ? data.findIndex(gd => gd.id === targetId) : -1
+    if (targetIndex >= 0) {
+      page.value = Math.floor(targetIndex / PAGE_SIZE) + 1
+      await openGameDay(data[targetIndex])
+    } else if (data.length) {
+      await openGameDay(data[0])
+    }
   } catch {
     toast.error('Could not load game-day history.')
   } finally {
@@ -200,10 +217,6 @@ async function onSelectPlayer(p) {
 
 <template>
   <div class="page">
-    <div class="page-header">
-      <h1>Game Days</h1>
-    </div>
-
     <p v-if="loading" class="muted">Loading…</p>
     <p v-else-if="!gameDays.length" class="muted">No game-days recorded yet.</p>
 
@@ -312,9 +325,6 @@ async function onSelectPlayer(p) {
 
 <style scoped>
 .page { max-width: 1100px; }
-.page-header { margin-bottom: 24px; }
-.page-header h1 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
-.page-header p { font-size: 13.5px; color: var(--text-secondary); margin: 0; }
 .muted { color: var(--text-secondary); font-size: 13px; }
 
 .table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }

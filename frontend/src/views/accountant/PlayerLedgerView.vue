@@ -75,7 +75,7 @@ function formatDate(iso) {
 
 <template>
   <div class="page">
-    <button class="back-btn" type="button" @click="router.push(`/roster/${route.params.id}`)">&larr; {{ player?.display_name || 'Player' }}</button>
+    <button class="back-btn" type="button" @click="router.push('/roster')">&larr; Players</button>
 
     <div class="page-header">
       <h1>Ledger</h1>

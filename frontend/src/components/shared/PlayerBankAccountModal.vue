@@ -4,11 +4,12 @@ import api from '@/api/axios'
 import BankAccountFields from '@/components/shared/BankAccountFields.vue'
 import { useToast } from '@/composables/useToast'
 
-// Replaces sending the Cashier to the (now-deprecated) Player Detail page
-// just to add a bank account before a payout — same add-bank-account
-// capability PlayerDetailView.vue has, as a modal instead of a full page
-// nav. Opened from ActiveGameDayView's onPayoutClick when the selected
-// player has no default bank account on file. Added 2026-09-22.
+// Replaces sending the Cashier to the old Player Detail page just to add a
+// bank account before a payout — same add-bank-account capability that page
+// had, as a modal instead of a full page nav (that page, PlayerDetailView.vue,
+// was fully removed 2026-09-27 — this modal had already made it redundant).
+// Opened from ActiveGameDayView's onPayoutClick when the selected player has
+// no default bank account on file. Added 2026-09-22.
 const props = defineProps({
   player: { type: Object, required: true }, // { id, display_name, bank_accounts }
 })
@@ -28,8 +29,7 @@ async function onAddBank() {
       bank_code: newBank.value.bank_code,
       account_number: newBank.value.account_number,
       // Prefer the Paystack-resolved name; fall back to the player's own
-      // name if resolution didn't complete (e.g. Paystack unreachable) —
-      // same fallback PlayerDetailView.vue uses.
+      // name if resolution didn't complete (e.g. Paystack unreachable).
       account_name: newBank.value.account_name || props.player.display_name,
       is_default: (props.player.bank_accounts || []).length === 0,
     })

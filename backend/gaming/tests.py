@@ -1073,7 +1073,7 @@ class GameDaySeatingTests(APITestCase):
         services.leave_table(gd, player, operator=self.cashier)
 
     def test_seating_new_player_creates_and_seats(self):
-        AccountCode.objects.create(code='WWI 30')
+        AccountCode.objects.create(code='WWI 30', account_number='9000000030', account_name='WWI 30 DVA')
         player = services.seat_player(
             self.game_day, self.owner, player_fields={'display_name': 'New Guy'},
         )
@@ -1149,7 +1149,7 @@ class GameDaySeatingTests(APITestCase):
         self.assertEqual(response.data['account_code'], 'WWI 37')
 
     def test_cashier_can_seat_new_player_via_api(self):
-        AccountCode.objects.create(code='WWI 38')
+        AccountCode.objects.create(code='WWI 38', account_number='9000000038', account_name='WWI 38 DVA')
         self.client.force_authenticate(self.cashier)
         response = self.client.post(
             f'/api/game-days/{self.game_day.id}/players/',
@@ -1262,7 +1262,7 @@ class GameDaySeatingTests(APITestCase):
         )
 
     def test_new_player_registration_succeeds_even_when_table_is_full(self):
-        AccountCode.objects.create(code='WWI NEWFULL')
+        AccountCode.objects.create(code='WWI NEWFULL', account_number='9000000039', account_name='WWI NEWFULL DVA')
         self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
         with self.assertRaises(TableFullError):
             services.seat_player(
@@ -1274,7 +1274,7 @@ class GameDaySeatingTests(APITestCase):
         )
 
     def test_table_full_api_response_carries_registered_not_seated(self):
-        AccountCode.objects.create(code='WWI APIFULL')
+        AccountCode.objects.create(code='WWI APIFULL', account_number='9000000040', account_name='WWI APIFULL DVA')
         self._fill_table(services.MAX_ACTIVE_PLAYERS_PER_GAME_DAY)
         self.client.force_authenticate(self.cashier)
         response = self.client.post(
@@ -2536,6 +2536,142 @@ class PayoutAutoApprovalThresholdTests(APITestCase):
         self.assertEqual(other_payout.status, Transaction.Status.PENDING_APPROVAL)
 
 
+class PayoutNettingAgainstPriorDebtTests(APITestCase):
+    """
+    services.initiate_payout automatically netting against a player's prior
+    outstanding (lifetime) balance — added 2026-09-27. See initiate_payout's
+    own docstring for the full reasoning; this is the exact scenario that
+    motivated it: a player owes the house from an earlier game-day, the
+    Cashier only ever sees tonight's own winnings, and the actual bank
+    transfer must not exceed what's left once the old debt is accounted for.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='pnd_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='pnd_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI 250', display_name='Netting Player')
+        PlayerBankAccount.objects.create(
+            player=self.player, bank_name='GTBank', bank_code='058', account_number='0123456789',
+            account_name='Netting Player', is_default=True,
+        )
+        # A prior, already-closed game-day the player owes ₦600,000 from —
+        # chips issued, never returned. Not closed via services.close_game_day
+        # (irrelevant to this feature — player_balance doesn't care about
+        # GameDay.status, only Transaction rows), so no FM sign-off needed here.
+        old_gd = services.open_game_day(250, timezone.now() - timedelta(days=7), self.owner)
+        services.seat_player(old_gd, self.owner, player=self.player)
+        Transaction.objects.create(
+            game_day=old_gd, player=self.player, type=Transaction.Type.CHIPS_OUT, amount=Decimal(600000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.assertEqual(selectors.player_balance(self.player), Decimal(-600000))
+
+        # Tonight's game-day — the player wins ₦1,000,000, funding both their
+        # own game-day balance AND the Main Account (TRANSFER_DVA) so the
+        # payout's own funds guard never blocks these tests.
+        self.game_day = services.open_game_day(251, timezone.now(), self.owner)
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        services.leave_table(self.game_day, self.player, operator=self.cashier)
+        Transaction.objects.create(
+            game_day=self.game_day, player=self.player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(1000000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_net'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_net'})
+    def test_payout_nets_against_prior_debt_and_auto_approves_under_threshold(self, mock_recipient, mock_transfer):
+        # Lifetime balance going in: -600,000 + 1,000,000 = 400,000 — under
+        # the default ₦500,000 threshold, so despite the Cashier asking for
+        # the full 1,000,000, this should auto-approve at the netted figure.
+        payout = services.initiate_payout(self.player, Decimal(1000000), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.amount, Decimal(400000))
+        self.assertEqual(payout.requested_amount, Decimal(1000000))
+        self.assertEqual(payout.status, Transaction.Status.APPROVED)
+        self.assertIsNone(payout.approved_by)  # auto-approved, not manually signed off
+        self.assertIn('600,000', payout.notes)
+        self.assertIn('400,000', payout.notes)
+        # The old debt is now fully cleared — lifetime balance nets to zero
+        # once the actual (netted) payout amount is debited.
+        self.assertEqual(selectors.player_balance(self.player), Decimal(0))
+
+    def test_net_amount_over_threshold_requires_approval_for_the_net_only(self):
+        # A smaller prior debt (₦200,000) leaves a ₦800,000 net — over the
+        # default threshold, so this should land PENDING_APPROVAL, and
+        # specifically at the netted 800,000, not the requested 1,000,000.
+        player2 = Player.objects.create(account_code='WWI 252', display_name='Netting Player 2')
+        PlayerBankAccount.objects.create(
+            player=player2, bank_name='GTBank', bank_code='058', account_number='0123456780',
+            account_name='Netting Player 2', is_default=True,
+        )
+        old_gd = services.open_game_day(253, timezone.now() - timedelta(days=7), self.owner)
+        services.seat_player(old_gd, self.owner, player=player2)
+        Transaction.objects.create(
+            game_day=old_gd, player=player2, type=Transaction.Type.CHIPS_OUT, amount=Decimal(200000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        services.seat_player(self.game_day, self.owner, player=player2)
+        services.leave_table(self.game_day, player2, operator=self.cashier)
+        Transaction.objects.create(
+            game_day=self.game_day, player=player2, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(1000000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+
+        payout = services.initiate_payout(player2, Decimal(1000000), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.amount, Decimal(800000))
+        self.assertEqual(payout.requested_amount, Decimal(1000000))
+        self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
+
+    def test_debt_fully_absorbing_winnings_blocks_the_payout_entirely(self):
+        # A player whose prior debt is larger than what they won tonight has
+        # nothing payable — no Transaction should be created at all.
+        player3 = Player.objects.create(account_code='WWI 254', display_name='Netting Player 3')
+        PlayerBankAccount.objects.create(
+            player=player3, bank_name='GTBank', bank_code='058', account_number='0123456781',
+            account_name='Netting Player 3', is_default=True,
+        )
+        old_gd = services.open_game_day(255, timezone.now() - timedelta(days=7), self.owner)
+        services.seat_player(old_gd, self.owner, player=player3)
+        Transaction.objects.create(
+            game_day=old_gd, player=player3, type=Transaction.Type.CHIPS_OUT, amount=Decimal(1200000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        services.seat_player(self.game_day, self.owner, player=player3)
+        services.leave_table(self.game_day, player3, operator=self.cashier)
+        Transaction.objects.create(
+            game_day=self.game_day, player=player3, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(1000000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+
+        with self.assertRaises(InvalidStateError):
+            services.initiate_payout(player3, Decimal(1000000), self.cashier, game_day=self.game_day)
+        self.assertFalse(Transaction.objects.filter(player=player3, type=Transaction.Type.PAYOUT).exists())
+
+    def test_no_prior_debt_leaves_amount_and_requested_amount_unaffected(self):
+        # Baseline regression: with no prior debt, requested_amount stays
+        # unset and amount equals exactly what was requested — same as
+        # before this feature existed.
+        player4 = Player.objects.create(account_code='WWI 256', display_name='Netting Player 4')
+        PlayerBankAccount.objects.create(
+            player=player4, bank_name='GTBank', bank_code='058', account_number='0123456782',
+            account_name='Netting Player 4', is_default=True,
+        )
+        # Kept above the auto-approval threshold so this stays PENDING_APPROVAL
+        # without attempting (and failing) a real Paystack transfer — this
+        # test only cares about the amount/requested_amount/notes fields, not
+        # the transfer outcome, which is exercised elsewhere.
+        services.seat_player(self.game_day, self.owner, player=player4)
+        services.leave_table(self.game_day, player4, operator=self.cashier)
+        Transaction.objects.create(
+            game_day=self.game_day, player=player4, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(600000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        payout = services.initiate_payout(player4, Decimal(600000), self.cashier, game_day=self.game_day)
+        self.assertEqual(payout.amount, Decimal(600000))
+        self.assertIsNone(payout.requested_amount)
+        self.assertEqual(payout.notes, '')
+        self.assertEqual(payout.status, Transaction.Status.PENDING_APPROVAL)
+
+
 class DirectPayoutTests(APITestCase):
     """
     services.initiate_direct_payout + POST /api/transactions/direct-payout/
@@ -2628,6 +2764,22 @@ class GameDaysForPlayerFilterTests(APITestCase):
         ids = {gd['id'] for gd in response.data}
         self.assertIn(self.seated_gd.id, ids)
         self.assertIn(self.unrelated_gd.id, ids)
+
+    def test_status_filter_finds_multiple_concurrently_open_game_days(self):
+        """?status=OPEN (added 2026-09-26) for the Owner Dashboard's live-tables summary."""
+        settings_obj = ClubSettings.load()
+        settings_obj.require_approval_close_game_day = False
+        settings_obj.save()
+        closed_gd = services.open_game_day(312, timezone.now(), self.owner)
+        services.close_game_day(closed_gd, self.owner)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/game-days/?status=OPEN')
+        ids = {gd['id'] for gd in response.data}
+        # seated_gd and unrelated_gd are BOTH still open by construction —
+        # nothing stops two tables running concurrently — closed_gd is not.
+        self.assertEqual(ids, {self.seated_gd.id, self.unrelated_gd.id})
+        self.assertNotIn(closed_gd.id, ids)
 
 
 class ClubSettingsAndTablePermissionsAPITests(APITestCase):

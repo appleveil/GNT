@@ -58,7 +58,10 @@ onMounted(load)
 function playerName(playerId) {
   return players.value.find(p => p.id === playerId)?.display_name || ''
 }
-const playerTo = row => (row.player ? `/roster/${row.player}` : null)
+// Points at this player's ledger page, not a (removed 2026-09-26) player
+// profile page — the most useful destination when clicking a name in a
+// ledger row is their own activity, not a redundant summary of it.
+const playerTo = row => (row.player ? `/roster/${row.player}/ledger` : null)
 
 // A deposit is "successful" at POSTED; a payout is "successful" at
 // APPROVED — it has no POSTED status of its own (see the comment above).

@@ -1519,6 +1519,225 @@ dropped → confirmed `recorded_by_name` resolves correctly on a real
 transaction) with all throwaway data (player, transaction, seat, both
 codes) cleaned up afterward.
 
+### A round of 7 more follow-up requests: DVA fields + upload, live tables, Ledgers/Off-table, RosterDetailView removed, indicator icons, "Left" selection bug, a payout-approval question (2026-09-26)
+
+1. **Account Code fields + CSV/XLS/XLSX upload.** `AccountCode` extended
+   with `account_number` (unique) and `account_name`, both required — this
+   pool is really a stand-in for Paystack's own pending DVA provisioning
+   (real bank-issued dedicated accounts), not just a bare short code.
+   Migration needed a one-off default (`''`) since Django can't add a
+   NOT NULL field without one — confirmed the `test1` tenant had zero rows
+   before writing it, so no real data was ever backfilled with the
+   placeholder. `AccountCodeViewSet.create`'s bulk path now takes
+   `{"codes": [{"code", "account_number", "account_name"}, ...]}` (was
+   bare strings), validates each row, and reports duplicates (against the
+   DB or within the same batch) without failing the whole batch. Frontend:
+   installed `xlsx` (SheetJS) — NOT from the npm registry (stuck at 0.18.5
+   with two unpatched CVEs, prototype pollution + ReDoS, "no fix
+   available") but from SheetJS's own CDN tarball
+   (`cdn.sheetjs.com/xlsx-0.20.3/...`), their documented safe distribution
+   channel; `npm audit` clean. AdminView.vue's Account Codes section is now
+   a staging pattern: a manual "+ Add row" 3-field form and a CSV/XLS/XLSX
+   file upload (parsed client-side via `XLSX.read`/`sheet_to_json`, header
+   names matched case/space/underscore-insensitively against a few likely
+   spellings) both feed one `stagedRows` review list, submitted together
+   as one batch. `xlsx` is dynamically `import()`-ed only when a file is
+   actually picked, so its ~490KB stays its own lazy chunk, never loaded
+   just for opening Admin.
+
+2. **Owner Dashboard: live tables summary.** Turned out nothing in this
+   schema ever stopped more than one game-day being OPEN at once — one per
+   Table, no uniqueness constraint on `GameDay.status` — only the
+   dashboard's old single "current game-day" card (and the Cashier's own
+   single-table screen) ever assumed there'd be just one. New
+   `GameDayViewSet` `?status=` filter; the dashboard's card became a list
+   of every open game-day (table name via a `/tables/` fetch, game-day #,
+   started time), each "View →" deep-linking to
+   `/ledgers/game-days?gameDay=<id>` — a small addition to
+   `GameDaysListView.vue` (open that specific game-day and flip to
+   whichever page it falls on, instead of always the topmost). Explicitly
+   NOT solved here: true concurrent OPERATION — the Cashier's `/game-day`
+   screen still only ever works whichever one `gameDay.current` (singular)
+   resolves to, regardless of which table the Owner clicked into. This is
+   read-only visibility only; flagged, not fixed.
+
+3. **"Game Days" → "Ledgers"**, two sub-pages: Game Days (unchanged
+   content) and Off-table (was "Outstanding," moved off Dashboard where it
+   landed 2026-09-23). New nested route `/ledgers` (`LedgersLayout.vue` —
+   just a small pill sub-nav + `<router-view/>`) with children
+   `ledgers/game-days` and `ledgers/off-table`; the flat `/game-days` route
+   is gone. `GameDaysListView.vue`'s own now-duplicate `<h1>Game Days</h1>`
+   was removed (the parent layout owns the page-level header now).
+   `OffTableView.vue` is `DashboardView.vue`'s old Outstanding
+   feed-plus-by-player-summary block, carried over as-is except its player
+   links now point at `/roster/:id/ledger` (see #4).
+
+4. **RosterDetailView.vue removed — confirmed, not assumed, redundant.**
+   Checked what it actually showed against what the Players table's ⋮ menu
+   + its two new pages now cover: lifetime balance, credit limit, and the
+   old "any game-day's activity" picker are all genuinely redundant now
+   (View ledger/Credit limit do exactly this). Two things had no other
+   home: the "Receiving bank accounts" list (moved into
+   PlayerPayoutView.vue — the one place it actually matters, with a new
+   "Manage" link that opens `PlayerBankAccountModal.vue` directly, not
+   only as a submit-failure fallback) and the "Gaming account (deposit
+   DVA)"/"Chips used today" bits (accepted as a deliberate, minor loss —
+   DVA provisioning isn't even live yet, and "chips used today" is
+   normally 0 outside a live game-day; a page dedicated to two dead
+   numbers isn't worth keeping). Every other `/roster/:id` link in the app
+   (MainAccountLedgerView, PayoutsView, DashboardView's old Outstanding)
+   now points at `/roster/:id/ledger` instead — clicking a player's name
+   in a ledger row goes straight to their actual activity, not a page that
+   no longer exists. The Players table's row click is gone entirely (the
+   ⋮ menu is the only way in now).
+
+5. **Deal/Bank indicators: icons next to the name, not columns** — direct
+   preference against the two-icon-column layout from the previous round.
+   🤝 (active Stake/Profit Split arrangement) / 🏦 (bank account on file),
+   shown only when true, same positive-condition-only convention as the
+   "inactive" badge right next to them. Plain emoji, not hand-drawn inline
+   SVG — the app has no real icon system to match (one decorative SVG mark
+   on the login page, nothing else), and emoji guarantees correct shape
+   rendering everywhere without needing to eyeball custom path geometry
+   for something as detailed as a handshake.
+
+6. **"Left" table selection indicator — a real CSS bug, not a missing
+   feature.** The selected-state class (`pill--active`) was already being
+   applied correctly to a selected departed pill; it just never SHOWED,
+   because `.pill--departed` (equal specificity, defined later in the
+   stylesheet) was winning the cascade over `.pill--active` on the same
+   element. Fixed with an explicit `.pill--departed.pill--active` rule
+   (two-class selector always outranks either single-class one, so it
+   wins regardless of source order) rather than reordering the existing
+   rules, which would've been one edit away from silently breaking again
+   the next time someone touched this file.
+
+7. **The ₦600,000-prior-debt / ₦1,000,000-payout scenario — a question,
+   answered, nothing built.** See the reply text for the full reasoning;
+   short version — the Cashier deliberately never sees a player's lifetime
+   debt (CONCEPT.md's "Cashier player-history visibility" rule, unrelated
+   to this round), so routing anything over the auto-approval threshold to
+   the Owner is the system's ONE intended safety net for exactly this
+   case, and it fired correctly here. The real gap: `PayoutsView.vue`'s
+   pending-approval row shows only the requested amount, not the player's
+   lifetime balance — the Owner reviewing has no way to notice the old
+   debt without a separate lookup. Also flagged as a genuine open policy
+   question, not a bug: should a payout net against outstanding lifetime
+   debt automatically, or stay two separate things (pay the game-day
+   winnings in full; the old debt stays a tracked, collectible Outstanding
+   item)? Today's system implicitly does the latter. Neither the
+   visibility fix nor a policy change was requested or built.
+   **Superseded 2026-09-27** — the user came back with a concrete answer to
+   the open policy question above (net automatically) and asked for it to
+   actually be built; see the dated entry below for what shipped.
+
+Verified: full backend suite green (`python manage.py test gaming
+accounts payments`), `makemigrations --check --dry-run` clean before
+writing `accounts.0009_accountcode_account_name_accountcode_account_number.py`
+by hand, `npm run build` clean (`xlsx` confirmed as its own lazy chunk,
+not bundled into AdminView's own), `npm audit` clean on the SheetJS CDN
+install, and a live curl pass against the `test1` dev tenant (bulk-add
+with the new required fields, in-batch duplicate correctly reported not
+fatal, `?status=OPEN` correctly returning the club's one real open
+game-day) with all throwaway data cleaned up afterward.
+
+### Payout auto-nets against a prior outstanding balance; Account Codes gets a sample CSV + upload validation; Ledgers sub-menu in the sidebar (2026-09-27)
+
+Follow-up to the ₦600,000-prior-debt/₦1,000,000-payout question above — the
+user came back with a concrete policy: net the payout against the player's
+lifetime outstanding balance automatically, route only the NET amount
+through the ₦500,000 auto-approval threshold, and make the clearing visible
+on the ledger rather than silent. Three changes, all backend-verified
+(271 pre-existing + 4 new gaming tests, full suite green) and frontend
+build-clean:
+
+1. **`Transaction.requested_amount`** (new nullable field, migration
+   `gaming.0024_transaction_requested_amount`) — set ONLY when
+   `services.initiate_payout` nets a Cashier's request against a prior
+   debt; null on every ordinary payout and on `initiate_direct_payout`
+   (already lifetime-scoped, nothing to net). `Transaction.amount` is
+   always the real, payable-after-netting figure — what actually
+   transfers or goes to approval — never silently swapped for the
+   requested one without a trace.
+
+2. **`initiate_payout`'s new second cap.** The existing
+   `player_game_day_balance` check stays exactly as-is — that's still what
+   the Cashier's own request is validated and error-messaged against; the
+   Cashier still never sees a lifetime figure, preserving CONCEPT.md's
+   "Cashier player-history visibility" rule untouched. AFTER that passes,
+   `net_amount = min(requested_amount, max(player_balance(player), 0))` —
+   player_balance already nets tonight's win against every prior game-day,
+   so this is genuinely just "cap what leaves the bank at what's actually
+   left once the old debt is accounted for," not a second independent
+   debt-tracking mechanism. Three outcomes: net_amount == requested_amount
+   (no prior debt — behavior completely unchanged, requested_amount stays
+   null); 0 < net_amount < requested_amount (the special case — a
+   Transaction is created for net_amount, requested_amount records the
+   original ask, notes spells out what got cleared, and the auto-approval
+   threshold is compared against net_amount, not the original request — so
+   a ₦1,000,000 ask that nets to ₦400,000 auto-approves even though the
+   raw ask was well over threshold); net_amount <= 0 (the old debt alone
+   meets or exceeds tonight's win) — no Transaction is created at all, and
+   `initiate_payout` raises before ever touching the ledger. The Cashier is
+   told nothing is payable right now, deliberately NOT told why (that
+   would leak the lifetime figure this whole rule exists to keep hidden
+   from them) — pointed at the Owner instead, who already has that
+   visibility.
+
+3. **The netting is now visible where it used to be invisible.**
+   `TransactionSerializer` gained `requested_amount`; `LedgerTable.vue`
+   (used by every ledger view in the app) shows a small note under the
+   Type cell — "Requested ₦1,000,000 — ₦600,000 cleared a prior balance" —
+   whenever a PAYOUT row carries one; `PayoutsView.vue`'s pending queue
+   shows the same note more prominently (a tinted chip, not just a caption)
+   since that's the one screen where the Owner is about to act on the net
+   figure and most needs to know it isn't the full request. This also
+   closes the actual gap identified in the unanswered version of this
+   question above — the Owner's approval queue previously showed only the
+   raw amount with no lifetime context at all.
+
+Also two smaller, unrelated follow-ups from the same message:
+
+- **Account Codes gets a sample CSV + upload validation.** A real
+  `frontend/public/samples/account-codes-sample.csv` (3 example rows,
+  correct headers) is now linked next to the upload button — a Vite
+  `public/` asset, a plain `<a download>` (not an Artifact — no CSP
+  restriction here). File uploads are now scanned row-by-row rather than
+  accepted wholesale: a shared `validateRow` helper (used by both the file
+  path and the manual "+ Add row" form) rejects any row missing a field,
+  or duplicating a code/account-number already in the pool OR already
+  staged (including another row earlier in the SAME file, since valid
+  rows are staged immediately in file order before the next row is
+  checked) — invalid rows are skipped with a per-row reason shown in an
+  amber warning list (spreadsheet row number, not array index), while
+  every valid row still gets staged rather than the whole upload being
+  thrown out over one bad line.
+- **The sidebar's "Ledgers" entry now shows its two sub-pages directly**
+  (Game Days, Off-table) as an indented, always-visible sub-list under the
+  parent tab — `AppShell.vue`'s `tabs` config gained a `children` array
+  (currently only on the Ledgers entry), rendered with its own active-
+  state styling (a vertical accent rule, not the parent's left-bar+bg
+  treatment). `LedgersLayout.vue`'s own in-page pill-tab strip is
+  unchanged/left in place — this is additive sidebar chrome, not a
+  replacement for it.
+
+**`PlayerDetailView.vue` removed** (`/players/:id`, route name
+`player-detail`) — genuinely dead code, confirmed rather than assumed:
+`git log` traces it to Phase A's very first Cashier build (`c6103c3`,
+before Game Day even had its own working screen), superseded by
+`ActiveGameDayView.vue`'s own inline selected-player panel
+(`9d2e40e`, "Build the real Active Game-Day working screen") and by
+`PlayerBankAccountModal.vue` for the one piece (add-bank-account) that
+screen didn't inline itself. Nothing in the app navigated to it — the
+router comment claiming "the Payout action-grid button still navigates to
+it" was stale; that button calls `ActiveGameDayView.vue`'s own
+`onPayoutClick` directly. Same shape of issue as this round's item 4
+(`RosterDetailView.vue`), just on the Cashier side rather than
+Owner/Accountant, which is why that request didn't happen to catch it.
+Two other comments referencing it as if still current (`PlayerBankAccountModal.vue`,
+×2) updated to past tense; `LedgerTable.vue`'s own mention is purely
+historical (a list of what it replaced back in 2026-09-17) and was left as-is.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

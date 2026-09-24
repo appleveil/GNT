@@ -90,6 +90,19 @@ function onRejected() {
   load()
 }
 
+// Netting against a prior outstanding balance (2026-09-27, see
+// gaming.services.initiate_payout) — requested_amount is only set when the
+// Cashier's request got automatically reduced to clear an older debt first.
+// Surfaced here specifically (not just on LedgerTable's rows) since this is
+// the one screen where the amount ACTUALLY REQUIRING approval matters most —
+// t.amount below is already the netted figure, this just explains why it's
+// smaller than what the Cashier asked for.
+function nettedNote(t) {
+  if (!t.requested_amount) return null
+  const cleared = Number(t.requested_amount) - Number(t.amount)
+  return `Cashier requested ${N(t.requested_amount)} — ${N(cleared)} cleared a prior balance`
+}
+
 function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
@@ -116,10 +129,11 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div v-for="t in pending" :key="t.id" class="row">
           <div class="row-info">
             <div class="row-name">
-              <RouterLink :to="`/roster/${t.player}`" class="player-link">{{ playerName(t.player) }}</RouterLink>
+              <RouterLink :to="`/roster/${t.player}/ledger`" class="player-link">{{ playerName(t.player) }}</RouterLink>
               <span class="badge" :class="t.status === 'TRANSFER_FAILED' ? 'badge--rejected' : 'badge--pending'">{{ t.status.replace('_', ' ') }}</span>
             </div>
             <div class="row-sub">{{ formatDate(t.created_at) }} &middot; {{ formatTime(t.created_at) }}</div>
+            <div v-if="nettedNote(t)" class="row-netted-note">{{ nettedNote(t) }}</div>
           </div>
           <div class="money">{{ N(t.amount) }}</div>
           <div class="row-actions">
@@ -140,7 +154,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div v-for="t in history" :key="t.id" class="row">
           <div class="row-info">
             <div class="row-name">
-              <RouterLink :to="`/roster/${t.player}`" class="player-link">{{ playerName(t.player) }}</RouterLink>
+              <RouterLink :to="`/roster/${t.player}/ledger`" class="player-link">{{ playerName(t.player) }}</RouterLink>
               <span v-if="t.status === 'REJECTED'" class="badge badge--rejected">Declined</span>
               <span v-else-if="t.is_voided" class="badge badge--voided">VOIDED</span>
               <span v-else-if="t.status === 'APPROVED' && !t.approved_by" class="badge badge--auto-approved">Auto-{{ t.recorded_by_name || 'Cashier' }}</span>
@@ -150,6 +164,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
               {{ formatDate(t.created_at) }} &middot; {{ formatTime(t.created_at) }}
               <template v-if="t.status === 'REJECTED' && t.void_reason"> &middot; "{{ t.void_reason }}"</template>
             </div>
+            <div v-if="nettedNote(t)" class="row-netted-note">{{ nettedNote(t) }}</div>
           </div>
           <div class="money">{{ N(t.amount) }}</div>
         </div>
@@ -180,6 +195,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .player-link { color: var(--text-primary); text-decoration: none; }
 .player-link:hover { color: var(--accent-text); text-decoration: underline; }
 .row-sub { font-size: 11.5px; color: var(--text-tertiary); margin-top: 2px; }
+.row-netted-note { font-size: 11.5px; color: var(--warning-text); background: var(--warning-bg); border-radius: var(--radius-sm); padding: 3px 8px; margin-top: 6px; display: inline-block; }
 .money { font-family: var(--font-mono); font-weight: 700; font-size: 14px; color: var(--text-primary); flex-shrink: 0; }
 .row-actions { display: flex; gap: 8px; flex-shrink: 0; }
 </style>

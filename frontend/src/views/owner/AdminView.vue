@@ -8,7 +8,7 @@ import { useToast } from '@/composables/useToast'
 // than separate nav tabs, since each is small: Staff accounts, Other Staff
 // (added 2026-09-23), Floor Managers. See PLAN.md's Phase C for why each
 // backend piece here is either already-built (Floor Manager PIN reset,
-// chips_limit... not here, that's RosterDetailView) or the one genuinely
+// chips_limit... not here, that's the Players table's own ⋮ menu) or the one genuinely
 // new backend addition (staff password reset — StaffUserSerializer used
 // for update has no password field at all; POST
 // /staff-users/{id}/reset-password/ is new).
@@ -212,16 +212,26 @@ async function onSubmitFmReset(fm) {
 }
 
 // ── Account Codes (DVAs) — Owner or Accountant ──────────────────────────
-// Added 2026-09-25: the pool AddPlayerModal.vue's new-player flow now
+// Added 2026-09-25: the pool AddPlayerModal.vue's new-player flow
 // auto-consumes from (see gaming.services._assign_next_account_code)
-// instead of a Cashier typing a code in by hand. One codes-per-line
-// textarea rather than an add-one-at-a-time form — a club stages a batch
-// of DVAs from its bank at once, not one at a time.
+// instead of a Cashier typing a code in by hand. Extended 2026-09-26 with
+// the real bank details each code stands for (account_number,
+// account_name) — a "staging area" pattern: rows collect in `stagedRows`
+// from either the manual "+ Add row" form or a parsed file upload, shown
+// in one review table, and submitted together as one batch. Matches how a
+// club actually gets these — a bank hands over a spreadsheet of dedicated
+// accounts, not one at a time.
 const accountCodes = ref([])
 const accountCodesLoading = ref(true)
-const newCodesInput = ref('')
 const accountCodesCreating = ref(false)
 const accountCodesError = ref('')
+
+const stagedRows = ref([]) // [{ code, account_number, account_name }]
+const manualRow = ref({ code: '', account_number: '', account_name: '' })
+const fileError = ref('') // fatal — nothing in the file could be read at all
+const fileWarnings = ref([]) // per-row issues from a file that otherwise parsed fine — added rows still got staged
+const stageError = ref('') // manual "+ Add row" rejection (missing field / duplicate)
+const fileInputEl = ref(null)
 
 const availableCodesCount = computed(() => accountCodes.value.filter(c => !c.is_linked).length)
 
@@ -237,14 +247,121 @@ async function loadAccountCodes() {
   }
 }
 
-async function onAddAccountCodes() {
+// Shared by the manual "+ Add row" form and a parsed file upload — both
+// funnel through here so a duplicate or missing field is caught the same
+// way either source. Checks against the already-loaded pool (accountCodes)
+// AND whatever's already staged (stagedRows, plus any file rows already
+// accepted earlier in the same pass), since two staged rows would otherwise
+// collide silently until the backend's own batch check rejected them.
+function validateRow(row, label) {
+  if (!(row.code && row.account_number && row.account_name)) {
+    return `${label}: code, account number, and account name are all required.`
+  }
+  const dupeInPool = accountCodes.value.some(c => c.code === row.code || c.account_number === row.account_number)
+  if (dupeInPool) {
+    return `${label}: already exists in the pool.`
+  }
+  const dupeStaged = stagedRows.value.some(r => r.code === row.code || r.account_number === row.account_number)
+  if (dupeStaged) {
+    return `${label}: already staged below.`
+  }
+  return null
+}
+
+function onAddManualRow() {
+  const row = {
+    code: manualRow.value.code.trim(),
+    account_number: manualRow.value.account_number.trim(),
+    account_name: manualRow.value.account_name.trim(),
+  }
+  const error = validateRow(row, row.code || row.account_number || 'New row')
+  if (error) {
+    stageError.value = error
+    return
+  }
+  stageError.value = ''
+  stagedRows.value.push(row)
+  manualRow.value = { code: '', account_number: '', account_name: '' }
+}
+
+function onRemoveStagedRow(index) {
+  stagedRows.value.splice(index, 1)
+}
+
+// Column headers vary by whoever built the spreadsheet ("Account No" vs
+// "account_number" vs "Number") — matched case/space/underscore-insensitive
+// against a few likely spellings rather than requiring one exact header.
+function normalizeUploadedRow(raw) {
+  const find = (...keys) => {
+    for (const rawKey of Object.keys(raw)) {
+      const norm = rawKey.toLowerCase().replace(/[\s_-]/g, '')
+      if (keys.includes(norm)) return String(raw[rawKey] ?? '').trim()
+    }
+    return ''
+  }
+  return {
+    code: find('code', 'accountcode'),
+    account_number: find('accountnumber', 'number', 'acctnumber', 'accountno'),
+    account_name: find('accountname', 'name', 'acctname'),
+  }
+}
+
+// Scans every parsed row rather than stopping at the first problem — a
+// spreadsheet with one bad row shouldn't cost the other 49 good ones. Valid
+// rows get staged immediately (in file order), so a later row's duplicate
+// check against stagedRows also catches two rows within the SAME file
+// colliding with each other, not just against the already-loaded pool.
+// Blank rows (no fields at all — common as spreadsheet padding) are skipped
+// silently; anything with at least one field but not all three, or a real
+// collision, is reported by its actual spreadsheet row number.
+async function onFileSelected(e) {
+  const file = e.target.files[0]
+  if (fileInputEl.value) fileInputEl.value.value = '' // allow re-selecting the same file later
+  if (!file) return
+  fileError.value = ''
+  fileWarnings.value = []
+  try {
+    const XLSX = await import('xlsx')
+    const buffer = await file.arrayBuffer()
+    const workbook = XLSX.read(buffer, { type: 'array' })
+    const sheet = workbook.Sheets[workbook.SheetNames[0]]
+    const raw = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+    if (!raw.length) {
+      fileError.value = 'No rows found — the first row should be a header: Code, Account Number, Account Name.'
+      return
+    }
+    const warnings = []
+    let addedCount = 0
+    raw.forEach((rawRow, i) => {
+      const row = normalizeUploadedRow(rawRow)
+      if (!(row.code || row.account_number || row.account_name)) return // blank padding row — not an error
+      const rowNumber = i + 2 // +1 for the header row, +1 to go from 0- to 1-indexed
+      const error = validateRow(row, `Row ${rowNumber}`)
+      if (error) {
+        warnings.push(error)
+        return
+      }
+      stagedRows.value.push(row)
+      addedCount += 1
+    })
+    if (!addedCount && !warnings.length) {
+      fileError.value = 'No rows found — the first row should be a header: Code, Account Number, Account Name.'
+      return
+    }
+    fileWarnings.value = warnings
+  } catch {
+    fileError.value = 'Could not read this file — check it’s a valid CSV, XLS, or XLSX.'
+  }
+}
+
+async function onSubmitStagedRows() {
   accountCodesError.value = ''
-  const codes = newCodesInput.value.split(/[\n,]/).map(c => c.trim()).filter(Boolean)
-  if (!codes.length) return
+  if (!stagedRows.value.length) return
   accountCodesCreating.value = true
   try {
-    const { data } = await api.post('/account-codes/', { codes })
-    newCodesInput.value = ''
+    const { data } = await api.post('/account-codes/', { codes: stagedRows.value })
+    stagedRows.value = []
+    fileWarnings.value = []
     await loadAccountCodes()
     toast.success(`${data.created.length} code${data.created.length === 1 ? '' : 's'} added.`)
     if (data.errors?.length) accountCodesError.value = data.errors.join(' ')
@@ -275,8 +392,8 @@ onMounted(() => {
     <div class="card section-card">
       <div class="section-title">Account Codes</div>
       <p class="section-note">
-        DVAs staged ahead of time — the next available one here is auto-assigned to every new player
-        registered, so a Cashier never types one in by hand.
+        Real DVAs staged ahead of time — the next available one here is auto-assigned to every new
+        player registered, so a Cashier never types one in by hand.
         <template v-if="!accountCodesLoading"> {{ availableCodesCount }} available of {{ accountCodes.length }}.</template>
       </p>
       <p v-if="accountCodesLoading" class="muted">Loading…</p>
@@ -284,21 +401,54 @@ onMounted(() => {
         <p v-if="!accountCodes.length" class="muted">No codes added yet.</p>
         <div v-for="c in accountCodes" :key="c.id" class="row">
           <div class="row-info">
-            <div class="row-name">{{ c.code }}</div>
+            <div class="row-name">{{ c.code }} <span class="row-sub">— {{ c.account_number }} &middot; {{ c.account_name }}</span></div>
             <div v-if="c.linked_player_name" class="row-sub">linked to {{ c.linked_player_name }}</div>
           </div>
           <span class="badge" :class="c.is_linked ? 'badge--closed' : 'badge--approved'">{{ c.is_linked ? 'linked' : 'available' }}</span>
         </div>
 
-        <form class="create-form create-form--stacked" @submit.prevent="onAddAccountCodes">
-          <textarea
-            v-model="newCodesInput" class="ff codes-textarea" rows="3"
-            placeholder="One code per line (or comma-separated) — e.g.&#10;WWI 20&#10;WWI 21"
-          />
-          <button class="btn btn--primary" type="submit" :disabled="accountCodesCreating || !newCodesInput.trim()">
-            {{ accountCodesCreating ? 'Adding…' : '+ Add codes' }}
-          </button>
-        </form>
+        <div class="stage-block">
+          <div class="stage-block-title">Add codes</div>
+
+          <div class="upload-row">
+            <label class="btn btn--secondary upload-btn">
+              Upload CSV / XLS / XLSX
+              <input ref="fileInputEl" type="file" accept=".csv,.xls,.xlsx" class="file-input" @change="onFileSelected" />
+            </label>
+            <a href="/samples/account-codes-sample.csv" download class="sample-link">Download sample CSV</a>
+            <span class="upload-hint">Header row: Code, Account Number, Account Name (any order)</span>
+          </div>
+          <p v-if="fileError" class="form-error">{{ fileError }}</p>
+          <div v-if="fileWarnings.length" class="form-warning">
+            <div class="form-warning-title">
+              {{ fileWarnings.length }} row{{ fileWarnings.length === 1 ? '' : 's' }} skipped from that file:
+            </div>
+            <ul class="form-warning-list">
+              <li v-for="(w, i) in fileWarnings" :key="i">{{ w }}</li>
+            </ul>
+          </div>
+
+          <form class="manual-row-form" @submit.prevent="onAddManualRow">
+            <input v-model="manualRow.code" type="text" placeholder="Code (e.g. WWI 20)" class="ff" />
+            <input v-model="manualRow.account_number" type="text" placeholder="Account number" class="ff" />
+            <input v-model="manualRow.account_name" type="text" placeholder="Account name" class="ff" />
+            <button class="btn btn--secondary" type="submit">+ Add row</button>
+          </form>
+          <p v-if="stageError" class="form-error">{{ stageError }}</p>
+
+          <template v-if="stagedRows.length">
+            <div class="staged-list">
+              <div v-for="(r, i) in stagedRows" :key="i" class="staged-row">
+                <span class="staged-code">{{ r.code }}</span>
+                <span class="row-sub">{{ r.account_number }} &middot; {{ r.account_name }}</span>
+                <button class="remove-btn" type="button" title="Remove" @click="onRemoveStagedRow(i)">&times;</button>
+              </div>
+            </div>
+            <button class="btn btn--primary" type="button" :disabled="accountCodesCreating" @click="onSubmitStagedRows">
+              {{ accountCodesCreating ? 'Adding…' : `+ Add ${stagedRows.length} code${stagedRows.length === 1 ? '' : 's'}` }}
+            </button>
+          </template>
+        </div>
         <p v-if="accountCodesError" class="form-error">{{ accountCodesError }}</p>
       </template>
     </div>
@@ -443,8 +593,25 @@ onMounted(() => {
 .inline-input:focus { outline: none; border-color: var(--accent); }
 
 .create-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
-.create-form--stacked { flex-direction: column; align-items: stretch; }
-.codes-textarea { height: auto; padding: 8px 10px; resize: vertical; font-family: var(--font-mono); }
+.stage-block { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 14px; }
+.stage-block-title { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 10px; }
+
+.upload-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.upload-btn { position: relative; cursor: pointer; }
+.file-input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+.sample-link { font-size: 12.5px; font-weight: 600; color: var(--accent-text); text-decoration: none; }
+.sample-link:hover { text-decoration: underline; }
+.upload-hint { font-size: 11.5px; color: var(--text-tertiary); width: 100%; }
+
+.manual-row-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.manual-row-form .ff { flex: 1 1 160px; }
+
+.staged-list { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 10px; overflow: hidden; }
+.staged-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.staged-row:last-child { border-bottom: none; }
+.staged-code { font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); flex-shrink: 0; }
+.remove-btn { margin-left: auto; border: none; background: none; font-size: 16px; line-height: 1; color: var(--text-tertiary); cursor: pointer; flex-shrink: 0; }
+.remove-btn:hover { color: var(--danger); }
 .ff {
   height: 36px;
   border: 1px solid var(--border-strong);
@@ -464,4 +631,15 @@ onMounted(() => {
   padding: 8px 12px;
   margin-top: 8px;
 }
+.form-warning {
+  font-size: 12.5px;
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+.form-warning-title { font-weight: 600; }
+.form-warning-list { margin: 4px 0 0; padding-left: 18px; }
+.form-warning-list li { margin-top: 2px; }
 </style>

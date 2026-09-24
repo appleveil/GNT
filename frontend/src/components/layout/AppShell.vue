@@ -57,8 +57,11 @@ const gameDayDate = computed(() => {
 // Payouts/Main Account/Admin/Settings (Phase C, 2026-09-14) — "everything
 // Accountant has, plus." Outstanding was its own 4th base tab until
 // 2026-09-23, when its whole page was folded into Dashboard and this tab
-// (and the standalone route) were retired. Deals was its own Owner tab the
-// same way from 2026-09-23 to 2026-09-24, when it was retired too — Deal is
+// (and the standalone route) were retired — then un-retired 2026-09-26 as
+// /ledgers/off-table (renamed "Off-table"), a child of the renamed
+// "Ledgers" tab rather than its own base tab again. Deals was its own
+// Owner tab the same way from 2026-09-23 to 2026-09-24, when it was
+// retired too — Deal is
 // now one of the Players table's own ⋮ actions instead of a separate
 // player-picker page.
 const tabs = computed(() => {
@@ -72,7 +75,20 @@ const tabs = computed(() => {
   }
   const base = [
     { name: 'dashboard', label: 'Dashboard', path: '/dashboard' },
-    { name: 'game-days', label: 'Game Days', path: '/game-days' },
+    // "Game Days" renamed "Ledgers" 2026-09-26 — path points at the parent
+    // /ledgers (redirects to its Game Days child); isActive's own
+    // startsWith(tab.path + '/') check below already covers both
+    // /ledgers/game-days and /ledgers/off-table since both sit under it.
+    // `children` added 2026-09-27 so the sidebar itself shows both
+    // sub-pages, not just LedgersLayout.vue's own in-page pill strip —
+    // rendered indented directly under the parent row, see mainTabs below.
+    {
+      name: 'ledgers', label: 'Ledgers', path: '/ledgers',
+      children: [
+        { name: 'ledgers-game-days', label: 'Game Days', path: '/ledgers/game-days' },
+        { name: 'ledgers-off-table', label: 'Off-table', path: '/ledgers/off-table' },
+      ],
+    },
     { name: 'roster', label: 'Players', path: '/roster' },
   ]
   if (role === 'OWNER') {
@@ -111,6 +127,9 @@ const brand = computed(() => auth.user?.fullName || 'LPC')
 
 function isActive(tab) {
   return route.path === tab.path || route.path.startsWith(tab.path + '/')
+}
+function isChildActive(child) {
+  return route.name === child.name
 }
 
 // Logging out never closes a game-day (it just ends this browser session —
@@ -158,13 +177,20 @@ async function doLogout() {
 
         <div class="below-topbar">
           <nav v-if="tabs.length" class="sidebar">
-            <RouterLink
-              v-for="tab in mainTabs" :key="tab.name" :to="tab.path"
-              class="side-tab" :class="{ 'side-tab--active': isActive(tab) }"
-            >
-              {{ tab.label }}
-              <sup v-if="tab.name === 'payouts' && payoutRequests.pendingCount > 0" class="tab-badge">{{ payoutRequests.pendingCount }}</sup>
-            </RouterLink>
+            <template v-for="tab in mainTabs" :key="tab.name">
+              <RouterLink
+                :to="tab.path" class="side-tab" :class="{ 'side-tab--active': isActive(tab) }"
+              >
+                {{ tab.label }}
+                <sup v-if="tab.name === 'payouts' && payoutRequests.pendingCount > 0" class="tab-badge">{{ payoutRequests.pendingCount }}</sup>
+              </RouterLink>
+              <div v-if="tab.children" class="side-subtabs">
+                <RouterLink
+                  v-for="child in tab.children" :key="child.name" :to="child.path"
+                  class="side-subtab" :class="{ 'side-subtab--active': isChildActive(child) }"
+                >{{ child.label }}</RouterLink>
+              </div>
+            </template>
             <div class="sidebar-spacer" />
             <RouterLink
               v-if="settingsTab" :to="settingsTab.path"
@@ -397,6 +423,27 @@ async function doLogout() {
   width: 3px;
   background: var(--accent);
 }
+.side-subtabs { display: flex; flex-direction: column; padding-bottom: 6px; }
+.side-subtab {
+  padding: 8px 24px 8px 40px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-decoration: none;
+  position: relative;
+}
+.side-subtab::before {
+  content: '';
+  position: absolute;
+  left: 26px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+.side-subtab:hover { color: var(--text-primary); }
+.side-subtab--active { color: var(--accent-text); font-weight: 700; }
+.side-subtab--active::before { background: var(--accent); }
 .sidebar-spacer { flex-grow: 1; }
 .side-tab--settings {
   border-top: 1px solid var(--border);

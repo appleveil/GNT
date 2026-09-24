@@ -439,6 +439,21 @@ class Transaction(models.Model):
     type = models.CharField(max_length=25, choices=Type.choices)
     amount = models.DecimalField(max_digits=14, decimal_places=0)  # always positive, Naira-equivalent value — whole Naira only, no kobo
 
+    # Set only when a Cashier-initiated PAYOUT (services.initiate_payout) got
+    # automatically netted against a player's prior outstanding lifetime
+    # balance — added 2026-09-27. The Cashier only ever sees/requests against
+    # today's game-day winnings (see CONCEPT.md's "Cashier player-history
+    # visibility"), so a player who also owes the house from an earlier
+    # game-day can be asked for more than is actually payable once that debt
+    # is accounted for. `amount` above is always the real, payable-after-
+    # netting figure (what actually transfers or goes to approval);
+    # requested_amount preserves what the Cashier originally asked for, so
+    # the ledger can show both rather than silently substituting one number
+    # for the other. Null on every ordinary payout (and on
+    # initiate_direct_payout, which is already lifetime-scoped so there's
+    # nothing to net) — never equal to amount when set.
+    requested_amount = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
+
     # Relevant to PAYMENT_CASH only
     currency = models.CharField(max_length=10, default='NGN')
     conversion_rate = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)  # snapshot value

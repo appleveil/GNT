@@ -13,16 +13,13 @@ import CreditLimitModal from '@/components/shared/CreditLimitModal.vue'
 // Accountant/Owner — see accounts/serializers.py's get_balance).
 //
 // 2026-09-24: trimmed to Code/DVA, Name, Balance, Credit limit + a ⋮ actions
-// column (Deal / Credit limit / View ledger / Payout) — "Chips used today"
-// and the old "View →" link are gone from the table itself; the row itself
-// still navigates to the full profile on click, same as before. Deal jumps
-// straight to /deals/:id (the standalone Deals list page is retired — see
-// PLAN.md); Credit limit stays a modal (a single field, no reason to leave
-// the list); View ledger and Payout are now their own pages (2026-09-25,
-// changed from pop-ups per direct request — see PlayerLedgerView.vue/
-// PlayerPayoutView.vue). Deal/Credit limit/Payout are Owner-only, matching
-// RosterDetailView's own gating for the same actions; View ledger has no
-// role restriction (read-only).
+// column (Deal / Credit limit / View ledger / Payout). Deal jumps straight
+// to /deals/:id (the standalone Deals list page is retired — see PLAN.md);
+// Credit limit stays a modal (a single field, no reason to leave the list);
+// View ledger and Payout are now their own pages (2026-09-25, changed from
+// pop-ups per direct request — see PlayerLedgerView.vue/PlayerPayoutView.vue).
+// Deal/Credit limit/Payout are Owner-only; View ledger has no role
+// restriction (read-only).
 //
 // "Chips limit" was relabeled "Credit limit" 2026-09-25 — the API field
 // (chips_limit) is unchanged, this is a display-only rename: it was being
@@ -31,13 +28,14 @@ import CreditLimitModal from '@/components/shared/CreditLimitModal.vue'
 // player can owe in unpaid chips before settling up (see
 // services.record_transaction's CHIPS_OUT branch).
 //
-// Two icon columns (Deal/Bank) added 2026-09-25, chosen over inline badges
-// or text-pill chips per the user's own preview pick — explicit ✓/· at a
-// glance, no new modal or page nav. "Deal" means an ACTIVE Stake/Profit
-// Split arrangement specifically (GET /deals/profit-split/active/,
-// Owner-or-Accountant-readable) — Fixed write-offs and Transfers are
-// one-off, not ongoing, so they don't count here. "Bank" is just
-// `bank_accounts.length > 0`, already in the /players/ payload.
+// 2026-09-26: row click (→ the now-removed RosterDetailView.vue) is gone —
+// the ⋮ menu covers everything that page did; see PLAN.md for what that
+// removal actually confirmed redundant vs. where the couple of genuinely
+// non-redundant bits (bank accounts list) moved. Deal/Bank indicators
+// switched from two icon columns to small emoji next to the name — 🤝
+// (active deal) / 🏦 (bank on file) — per direct preference over the
+// column layout; shown only when true, same "positive-condition-only"
+// convention as the "inactive" badge right next to them.
 const router = useRouter()
 const auth = useAuthStore()
 const toast = useToast()
@@ -114,19 +112,15 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
     <div v-else class="table">
       <div class="t-head">
-        <span>Code/DVA</span><span>Name</span><span class="t-head-icon">Deal</span><span class="t-head-icon">Bank</span><span>Balance</span><span>Credit limit</span><span></span>
+        <span>Code/DVA</span><span>Name</span><span>Balance</span><span>Credit limit</span><span></span>
       </div>
-      <div
-        v-for="p in filtered" :key="p.id" class="t-row"
-        @click="router.push(`/roster/${p.id}`)"
-      >
+      <div v-for="p in filtered" :key="p.id" class="t-row">
         <span class="mono">{{ p.account_code }}</span>
-        <span>{{ p.display_name }}<span v-if="!p.is_active" class="badge badge--closed inactive-badge">inactive</span></span>
-        <span class="icon-cell" :class="{ 'icon-cell--on': activeDealPlayerIds.has(p.id) }" :title="activeDealPlayerIds.has(p.id) ? 'Active Stake/Profit Split arrangement' : 'No active deal'">
-          {{ activeDealPlayerIds.has(p.id) ? '✓' : '·' }}
-        </span>
-        <span class="icon-cell" :class="{ 'icon-cell--on': p.bank_accounts?.length }" :title="p.bank_accounts?.length ? 'Has a bank account on file' : 'No bank account on file'">
-          {{ p.bank_accounts?.length ? '✓' : '·' }}
+        <span>
+          {{ p.display_name }}
+          <span v-if="!p.is_active" class="badge badge--closed inactive-badge">inactive</span>
+          <span v-if="activeDealPlayerIds.has(p.id)" class="indicator-icon" title="Active Stake/Profit Split arrangement">🤝</span>
+          <span v-if="p.bank_accounts?.length" class="indicator-icon" title="Has a bank account on file">🏦</span>
         </span>
         <span class="money" :class="p.balance > 0 ? 'money--pos' : p.balance < 0 ? 'money--neg' : ''">{{ N(p.balance) }}</span>
         <span class="money">{{ N(p.chips_limit) }}</span>
@@ -168,30 +162,25 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: visible; background: var(--surface); }
 .t-head, .t-row {
   display: grid;
-  grid-template-columns: 110px 1.2fr 52px 52px 1fr 1fr 44px;
+  grid-template-columns: 110px 1.4fr 1fr 1fr 44px;
   align-items: center;
   padding: 0 20px;
   gap: 8px;
 }
 .t-head { height: var(--control-row-min); background: var(--bg); border-bottom: 1px solid var(--border); border-radius: var(--radius-md) var(--radius-md) 0 0; }
 .t-head span { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
-.t-head-icon { text-align: center; }
-.t-row { height: var(--control-row-max); border-bottom: 1px solid var(--border); font-size: 13.5px; color: var(--text-primary); cursor: pointer; }
+.t-row { height: var(--control-row-max); border-bottom: 1px solid var(--border); font-size: 13.5px; color: var(--text-primary); }
 .t-row:last-child { border-bottom: none; border-radius: 0 0 var(--radius-md) var(--radius-md); }
-.t-row:hover { background: var(--bg); }
 .mono { font-family: var(--font-mono); color: var(--text-secondary); }
 .money--pos { color: var(--success-text); }
 .money--neg { color: var(--danger-text); }
 .inactive-badge { margin-left: 8px; }
+.indicator-icon { margin-left: 6px; font-size: 12px; }
 .actions-cell { display: flex; justify-content: flex-end; }
-
-.icon-cell { text-align: center; font-weight: 700; color: var(--text-tertiary); }
-.icon-cell--on { color: var(--success-text); }
 
 @media (max-width: 860px) {
   .t-head { display: none; }
   .t-row { grid-template-columns: 1fr auto; height: auto; padding: 14px 20px; gap: 4px; }
   .t-row .mono, .t-row .money { grid-column: 1; }
-  .icon-cell { display: none; }
 }
 </style>

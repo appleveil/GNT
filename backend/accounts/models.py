@@ -133,12 +133,20 @@ class Player(models.Model):
 
 class AccountCode(models.Model):
     """
-    A pre-provisioned club-assigned short code/DVA ("WWI 15"), staged ahead
-    of time by the Owner or Accountant from the Admin page (added
-    2026-09-25). Replaces a Cashier typing one in free-hand at registration
-    (AddPlayerModal.vue's old "Account code" field) — the next available row
-    here is auto-assigned to a new Player instead, see
+    A pre-provisioned real bank-issued dedicated account ("DVA"), staged
+    ahead of time by the Owner or Accountant from the Admin page (added
+    2026-09-25, extended 2026-09-26 with real bank details). Stands in for
+    Paystack's own Dedicated NUBAN provisioning while that's still pending
+    approval — the next available row here is auto-assigned to a new
+    Player instead of a Cashier typing a bare code in free-hand at
+    registration (AddPlayerModal.vue's old "Account code" field); see
     gaming.services.seat_player.
+
+    `code` is the club's own short reference (e.g. "WWI 15", becomes the
+    Player's account_code); `account_number`/`account_name` are the real
+    bank account details that code refers to — one-at-a-time via the Admin
+    form, or bulk via a CSV/XLS/XLSX upload (parsed client-side, posted as
+    plain rows — see AdminView.vue).
 
     `linked_player` is null while available; set exactly once, the moment
     it's consumed by a new player, and never freed again — same
@@ -148,6 +156,8 @@ class AccountCode(models.Model):
     """
 
     code = models.CharField(max_length=20, unique=True)
+    account_number = models.CharField(max_length=20, unique=True)
+    account_name = models.CharField(max_length=150)
     linked_player = models.OneToOneField(
         Player, on_delete=models.PROTECT, null=True, blank=True, related_name='account_code_entry',
     )

@@ -112,7 +112,10 @@ class AccountCodeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AccountCode
-        fields = ['id', 'code', 'is_linked', 'linked_player', 'linked_player_name', 'created_by', 'created_at']
+        fields = [
+            'id', 'code', 'account_number', 'account_name', 'is_linked', 'linked_player',
+            'linked_player_name', 'created_by', 'created_at',
+        ]
         read_only_fields = ['id', 'linked_player', 'created_by', 'created_at']
 
     def get_is_linked(self, obj):

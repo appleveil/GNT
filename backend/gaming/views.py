@@ -56,6 +56,14 @@ class GameDayViewSet(viewsets.ReadOnlyModelViewSet):
         player_id = self.request.query_params.get('player')
         if player_id:
             qs = qs.filter(seated_players__player_id=player_id).distinct()
+        # ?status=OPEN added 2026-09-26 for the Owner Dashboard's "live
+        # tables" summary — nothing stops more than one game-day being OPEN
+        # at once (one per Table; see Table/open_game_day's own docstrings,
+        # no uniqueness constraint), only the single-active-table Cashier
+        # screen and GameDay.current ever assumed there'd be just one.
+        gd_status = self.request.query_params.get('status')
+        if gd_status:
+            qs = qs.filter(status=gd_status)
         return qs
 
     @action(detail=False, methods=['get'])
@@ -404,7 +412,14 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
 
     @action(detail=False, methods=['post'])
     def payout(self, request):
-        """Cashier initiates — always lands PENDING_APPROVAL until the Owner approves it."""
+        """
+        Cashier initiates. Lands PENDING_APPROVAL until the Owner approves it,
+        UNLESS the amount actually payable — after both the game-day-winnings
+        cap and netting against any prior outstanding balance — clears
+        ClubSettings.payout_auto_approve_threshold, in which case it's
+        already APPROVED (or TRANSFER_FAILED) by the time this returns. See
+        services.initiate_payout.
+        """
         serializer = InitiatePayoutSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data

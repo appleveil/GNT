@@ -230,24 +230,58 @@ class AccountCodeViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewset
     permission_classes = [IsOwnerOrAccountant]
 
     def create(self, request, *args, **kwargs):
-        # A single {"code": "..."} still works via the default ModelSerializer
-        # path below; {"codes": [...]} is the bulk-paste path the Admin page
-        # actually uses — a club stages a batch of DVAs at once, not one at a
-        # time. Duplicates (already in the pool) are reported, not fatal —
-        # every other code in the batch still gets added.
-        codes = request.data.get('codes')
-        if codes is None:
+        # A single {"code": ..., "account_number": ..., "account_name": ...}
+        # still works via the default ModelSerializer path below;
+        # {"codes": [{...}, ...]} is the bulk path the Admin page actually
+        # uses — one row per staged DVA, built there from a manual "+ Add"
+        # row or a parsed CSV/XLS/XLSX upload (parsing happens client-side;
+        # this endpoint only ever sees plain rows). Duplicates (already in
+        # the pool, or repeated within the same batch) are reported, not
+        # fatal — every other row in the batch still gets added.
+        rows = request.data.get('codes')
+        if rows is None:
             return super().create(request, *args, **kwargs)
-        codes = [c.strip() for c in codes if isinstance(c, str) and c.strip()]
-        if not codes:
-            return Response({'detail': 'Provide at least one code.'}, status=status.HTTP_400_BAD_REQUEST)
-        existing = set(AccountCode.objects.filter(code__in=codes).values_list('code', flat=True))
-        errors = [f'{code} already exists.' for code in codes if code in existing]
-        to_create = [
-            AccountCode(code=code, created_by=request.user)
-            for code in dict.fromkeys(codes)  # de-dupe within the batch itself, preserve order
-            if code not in existing
-        ]
+
+        errors = []
+        seen_codes, seen_numbers = set(), set()
+        cleaned = []
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                errors.append(f'Row {i + 1}: malformed.')
+                continue
+            code = str(row.get('code', '')).strip()
+            account_number = str(row.get('account_number', '')).strip()
+            account_name = str(row.get('account_name', '')).strip()
+            label = code or account_number or f'Row {i + 1}'
+            if not (code and account_number and account_name):
+                errors.append(f'{label}: code, account number, and account name are all required.')
+            elif code in seen_codes or account_number in seen_numbers:
+                errors.append(f'{label}: duplicated within this batch.')
+            else:
+                seen_codes.add(code)
+                seen_numbers.add(account_number)
+                cleaned.append({'code': code, 'account_number': account_number, 'account_name': account_name})
+
+        if cleaned:
+            existing_codes = set(
+                AccountCode.objects.filter(code__in=[r['code'] for r in cleaned]).values_list('code', flat=True),
+            )
+            existing_numbers = set(
+                AccountCode.objects.filter(
+                    account_number__in=[r['account_number'] for r in cleaned],
+                ).values_list('account_number', flat=True),
+            )
+            to_create = []
+            for r in cleaned:
+                if r['code'] in existing_codes:
+                    errors.append(f"{r['code']}: this code already exists.")
+                elif r['account_number'] in existing_numbers:
+                    errors.append(f"{r['account_number']}: this account number already exists.")
+                else:
+                    to_create.append(AccountCode(**r, created_by=request.user))
+        else:
+            to_create = []
+
         created = AccountCode.objects.bulk_create(to_create)
         return Response(
             {'created': AccountCodeSerializer(created, many=True).data, 'errors': errors},

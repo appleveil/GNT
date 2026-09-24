@@ -204,7 +204,7 @@ class TransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transaction
         fields = [
-            'id', 'game_day', 'player', 'type', 'amount', 'currency', 'conversion_rate',
+            'id', 'game_day', 'player', 'type', 'amount', 'requested_amount', 'currency', 'conversion_rate',
             'channel', 'notes', 'recorded_by', 'recorded_by_name', 'floor_manager', 'confirmed_at', 'status',
             'approved_by', 'approved_at', 'is_voided', 'voided_by', 'voided_at', 'void_reason',
             'external_reference', 'created_at', 'tip_category', 'masseuse',

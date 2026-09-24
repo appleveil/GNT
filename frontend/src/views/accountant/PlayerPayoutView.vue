@@ -15,8 +15,15 @@ import { useToast } from '@/composables/useToast'
 // capped at the player's LIFETIME balance, and the Owner picks how much of
 // it to send (not forced to pay out everything — "this isn't a bank"). The
 // "add a bank account" step stays a stacked modal (PlayerBankAccountModal),
-// same as ActiveGameDayView's own payout button — only the ledger/payout
-// entry points themselves moved from pop-up to page.
+// same as ActiveGameDayView's own payout button.
+//
+// 2026-09-26: RosterDetailView.vue (the old "player profile" page) was
+// removed — mostly genuinely redundant against the Players table's own ⋮
+// menu, but its "Receiving bank accounts" list had no other home, so it
+// moved in here (the one place on this page's whole flow where seeing —
+// and being able to add/change — a bank account actually matters). Back
+// links and the post-submit redirect now go to /roster (the list) instead
+// of the removed /roster/:id.
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
@@ -46,6 +53,11 @@ const displayAmountInput = computed(() => formatAmountForDisplay(amountInput.val
 const submitting = ref(false)
 const error = ref('')
 const bankModalOpen = ref(false)
+// Distinguishes "opened because a submit needed a bank account" (auto-retry
+// the payout once one's added) from "opened via the plain 'Manage' link"
+// (just viewing/adding — never auto-submits a payout the Owner didn't ask
+// for). See onBankAdded below.
+const bankModalFromSubmit = ref(false)
 
 function onPayAll() {
   amountInput.value = String(available.value)
@@ -59,6 +71,7 @@ async function onSubmit() {
   if (!amount) { error.value = 'Enter an amount.'; return }
   if (amount > available.value) { error.value = `Can't exceed what's owed (${N(available.value)}).`; return }
   if (!hasDefaultBank.value) {
+    bankModalFromSubmit.value = true
     bankModalOpen.value = true
     return
   }
@@ -67,7 +80,7 @@ async function onSubmit() {
     const { data } = await api.post('/transactions/direct-payout/', { player: player.value.id, amount: amountInput.value })
     toast.success(`Payout of ${N(amount)} ${data.status === 'APPROVED' ? 'sent to' : 'requested for'} ${player.value.display_name}.`)
     payoutRequests.fetchPendingCount() // a non-auto-approved payout adds to the sidebar's pending badge
-    router.push(`/roster/${player.value.id}`)
+    router.push('/roster')
   } catch (err) {
     error.value = err.response?.data?.detail || 'Could not initiate the payout.'
   } finally {
@@ -75,15 +88,21 @@ async function onSubmit() {
   }
 }
 
+function onManageBankAccounts() {
+  bankModalFromSubmit.value = false
+  bankModalOpen.value = true
+}
+
 function onBankAdded() {
   bankModalOpen.value = false
-  loadPlayer().then(onSubmit)
+  if (bankModalFromSubmit.value) loadPlayer().then(onSubmit)
+  else loadPlayer()
 }
 </script>
 
 <template>
   <div class="page">
-    <button class="back-btn" type="button" @click="router.push(`/roster/${route.params.id}`)">&larr; {{ player?.display_name || 'Player' }}</button>
+    <button class="back-btn" type="button" @click="router.push('/roster')">&larr; Players</button>
 
     <div class="page-header">
       <h1>Payout</h1>
@@ -117,6 +136,21 @@ function onBankAdded() {
             <button class="btn btn--primary" type="submit" :disabled="submitting">{{ submitting ? 'Sending…' : 'Send payout' }}</button>
           </div>
         </form>
+      </div>
+
+      <div class="card bank-card">
+        <div class="bank-card-head">
+          <div class="section-title">Receiving bank accounts</div>
+          <button class="link-btn" type="button" @click="onManageBankAccounts">{{ player.bank_accounts.length ? 'Manage' : '+ Add' }}</button>
+        </div>
+        <div v-for="bank in player.bank_accounts" :key="bank.id" class="bank-row">
+          <div>
+            <div class="bank-name">{{ bank.bank_name }} &middot; {{ bank.account_number }}</div>
+            <div class="bank-account-name">{{ bank.account_name }}</div>
+          </div>
+          <span v-if="bank.is_default" class="badge badge--open">default</span>
+        </div>
+        <p v-if="!player.bank_accounts.length" class="muted">No bank accounts on file.</p>
       </div>
     </template>
 
@@ -177,4 +211,12 @@ function onBankAdded() {
   padding: 8px 12px;
 }
 .actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+
+.bank-card { padding: 18px 20px; margin-top: 16px; }
+.bank-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.bank-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.bank-row:last-child { border-bottom: none; }
+.bank-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.bank-account-name { font-size: 11.5px; color: var(--text-tertiary); }
 </style>

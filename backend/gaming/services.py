@@ -957,6 +957,30 @@ def initiate_payout(player, amount, operator, game_day=None):
     shared by both. `approved_by=None` on the resulting transaction is the
     marker for "auto-approved, nobody manually signed off" (vs a real
     Owner's id for a manual approval).
+
+    Revised 2026-09-27 — automatic netting against a prior outstanding
+    balance. The Cashier's own request is still validated against ONLY
+    today's game-day winnings (`available` below) — they never see, and
+    never get shown, a player's lifetime figure (CONCEPT.md's "Cashier
+    player-history visibility"). But a player who ALSO owes the house from
+    an earlier game-day (a debt the Cashier has no way to know about) could
+    otherwise have their full requested amount transferred out in cash while
+    that older debt just sits there uncollected — the ledger nets it
+    mathematically (player_balance is one cumulative sum), but the real bank
+    transfer wouldn't. So the amount that actually leaves the bank — what
+    gets created here, what the auto-approval threshold is measured
+    against — is capped a second time, at the player's LIFETIME balance
+    (selectors.player_balance, which already reflects tonight's win netted
+    against every prior game-day). If that's less than what was requested,
+    the difference already went to closing out the old debt the instant
+    tonight's win was recorded — nothing further needs to happen for that
+    half; only the remainder becomes this Transaction, with the original
+    ask preserved on requested_amount and spelled out in notes so it's
+    visible on the ledger rather than silently substituted. If the netted
+    amount is zero (this game-day's win doesn't even cover the old debt),
+    no payout is created at all — the Cashier is told there's nothing
+    payable, without being told why, and the Owner (who already has
+    lifetime-balance visibility) is left to explain it if asked.
     """
     game_day = game_day or selectors.current_open_game_day()
     if game_day is None:
@@ -980,13 +1004,38 @@ def initiate_payout(player, amount, operator, game_day=None):
             f'(available: ₦{available:,}).'
         )
 
+    # Second, independent cap — see the netting note above. Computed AFTER
+    # the game-day-scoped check above (never instead of it): that check is
+    # what the Cashier's own request is validated and error-messaged
+    # against; this one only ever silently reduces what actually pays out.
+    # Guarded on `amount > 0` — a genuinely ₦0 request (a couple of existing
+    # tests use one just to get a Transaction to act on) nets to 0 too, but
+    # that's not "the old debt ate this payout," there was never anything
+    # requested in the first place; only an actually-positive ask that nets
+    # down to nothing is the special case this guard exists for.
+    net_amount = min(amount, max(selectors.player_balance(player), Decimal('0')))
+    if amount > 0 and net_amount <= 0:
+        raise InvalidStateError(
+            f'Nothing is payable to {player.display_name} right now — today’s winnings are '
+            f'already accounted for by an outstanding balance from a previous game-day. '
+            f'Contact the Owner for details.'
+        )
+
     _ensure_seated(game_day, player, operator)  # a payout never brings back a departed player
+    notes = ''
+    if net_amount < amount:
+        cleared = amount - net_amount
+        notes = (
+            f'Cashier requested ₦{amount:,}. ₦{cleared:,} applied to an outstanding balance '
+            f'from a previous game-day; ₦{net_amount:,} payable.'
+        )
     transaction_obj = Transaction.objects.create(
-        game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=amount,
-        channel=Transaction.Channel.CASHIER, recorded_by=operator,
+        game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=net_amount,
+        requested_amount=amount if net_amount < amount else None,
+        channel=Transaction.Channel.CASHIER, recorded_by=operator, notes=notes,
         status=Transaction.Status.PENDING_APPROVAL,
     )
-    if amount <= ClubSettings.load().payout_auto_approve_threshold:
+    if net_amount <= ClubSettings.load().payout_auto_approve_threshold:
         return _execute_payout_transfer(transaction_obj, approved_by=None)
     return transaction_obj
 

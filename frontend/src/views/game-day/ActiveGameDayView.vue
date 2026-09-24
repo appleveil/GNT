@@ -231,8 +231,16 @@ async function onPayoutClick() {
   }
   payoutSubmitting.value = true
   try {
-    await api.post('/transactions/payout/', { player: p.id, amount: p.balance })
-    toast.success(`Payout of ${N(p.balance)} initiated for ${p.display_name} — pending Owner approval.`)
+    const { data } = await api.post('/transactions/payout/', { player: p.id, amount: p.balance })
+    // data.amount is what actually resulted — may be less than p.balance if
+    // it got netted against an older, prior-game-day balance the Cashier
+    // never sees the reason for (see LedgerTable's :show-netted-note="false"
+    // just below — same rule, same reason: no lifetime-debt context here).
+    // data.status already reflects auto-approval (2026-09-23) too, not just
+    // netting — this replaces a message that was always unconditionally
+    // "pending Owner approval" regardless of what actually happened.
+    const verb = data.status === 'APPROVED' ? 'sent — no approval needed' : 'initiated — pending Owner approval'
+    toast.success(`Payout of ${N(data.amount)} ${verb} for ${p.display_name}.`)
     refreshAll()
   } catch (err) {
     toast.error(err.response?.data?.detail || 'Could not initiate the payout.')
@@ -540,6 +548,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <p v-else-if="!playerLedgerRows.length" class="muted">No activity yet tonight for {{ selectedPlayer.display_name }}.</p>
           <LedgerTable
             v-else :rows="playerLedgerRows" type-label="Action" voidable :can-void-fn="canVoid"
+            :show-netted-note="false"
             @void="voidTarget = $event"
           />
         </div>
@@ -742,6 +751,13 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .pill--active { border-color: var(--accent); background: var(--accent); color: #fff; }
 .pill--departed { background: var(--status-voided-bg); color: var(--status-voided-text); border-color: transparent; }
+/* .pill--departed comes AFTER .pill--active below it in source order, so at
+   equal specificity it was winning outright on a selected departed pill —
+   selecting someone in "Left" looked identical to not selecting them, with
+   several departed players easy to mix up. Found 2026-09-26. This
+   two-class selector outranks the single-class rule above regardless of
+   source order, so the accent highlight actually shows. */
+.pill--departed.pill--active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .pill--empty { border-style: dashed; color: var(--text-tertiary); background: var(--bg); }
 .pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; text-align: left; }
 .pill-seat {

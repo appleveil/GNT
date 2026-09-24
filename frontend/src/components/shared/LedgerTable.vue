@@ -46,6 +46,14 @@ const props = defineProps({
   dateFormat: { type: String, default: 'time' }, // 'time' | 'datetime'
   voidable: { type: Boolean, default: false },
   canVoidFn: { type: Function, default: () => false },
+  // Off for the Cashier's own live game-day ledger (ActiveGameDayView.vue) —
+  // added 2026-09-27 alongside payout netting (see nettedNote below). The
+  // note names how much of a payout went to clearing an OLDER game-day's
+  // debt, which is exactly the lifetime-balance context CONCEPT.md's
+  // "Cashier player-history visibility" rule keeps a Cashier from seeing;
+  // on by default for every back-office ledger (Owner/Accountant), which
+  // already has that visibility elsewhere (e.g. Off-table, PayoutsView).
+  showNettedNote: { type: Boolean, default: true },
 })
 defineEmits(['void'])
 
@@ -79,6 +87,20 @@ function isAutoApprovedPayout(row) {
 function statusBadgeText(row) {
   return isAutoApprovedPayout(row) ? `Auto-${row.recorded_by_name || 'Cashier'}` : row.status.replace('_', ' ')
 }
+
+// Netting against a prior outstanding balance (2026-09-27, see
+// gaming.services.initiate_payout) — requested_amount is only ever set when
+// the Cashier's request got automatically reduced to clear an older debt
+// first. The Amount column already shows the real, payable-after-netting
+// figure (row.amount, what row.signed_amount is built from) and the Status
+// column already shows what happened to it (Pending/Approved/Auto-X) — this
+// note just makes the "why isn't this what the Cashier asked for" visible,
+// rather than a silent substitution.
+function nettedNote(row) {
+  if (!props.showNettedNote || row.type !== 'PAYOUT' || !row.requested_amount) return null
+  const cleared = Number(row.requested_amount) - Number(row.amount)
+  return `Requested ${N(row.requested_amount)} — ${N(cleared)} cleared a prior balance`
+}
 </script>
 
 <template>
@@ -103,7 +125,10 @@ function statusBadgeText(row) {
         <tr v-for="row in rows" :key="row.id" :class="{ 'row--voided': row.is_voided }">
           <td class="col-lane"><span :class="`lane-${TRANSACTION_TYPES[row.type]?.lane || 'other'}`" /></td>
           <td class="mono">{{ dateFormat === 'datetime' ? formatDateTime(row.created_at) : formatTime(row.created_at) }}</td>
-          <td>{{ row.type_label || TRANSACTION_TYPES[row.type]?.label || row.type }}</td>
+          <td>
+            {{ row.type_label || TRANSACTION_TYPES[row.type]?.label || row.type }}
+            <div v-if="nettedNote(row)" class="netted-note">{{ nettedNote(row) }}</div>
+          </td>
           <td v-if="showPlayer">
             <RouterLink v-if="playerTo?.(row)" :to="playerTo(row)" class="player-link" @click.stop>{{ row.player_name }}</RouterLink>
             <span v-else>{{ row.player_name }}</span>
@@ -190,6 +215,15 @@ function statusBadgeText(row) {
 .player-link:hover { color: var(--accent-text); text-decoration: underline; }
 
 .voided-label { font-weight: 700; letter-spacing: 0.04em; color: var(--status-voided-text); font-family: var(--font-sans); }
+
+.netted-note {
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: normal;
+  margin-top: 2px;
+}
 
 .void-trigger {
   border: none;

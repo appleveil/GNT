@@ -294,24 +294,45 @@ class AccountCodeAPITests(APITestCase):
         )
         self.cashier = StaffUser.objects.create_user(username='ac_cashier', password='x', role=StaffUser.Role.CASHIER)
 
+    def _row(self, code, number, name=None):
+        return {'code': code, 'account_number': number, 'account_name': name or f'{code} DVA'}
+
     def test_owner_can_bulk_add_codes(self):
         self.client.force_authenticate(self.owner)
-        response = self.client.post('/api/account-codes/', {'codes': ['WWI 100', 'WWI 101', 'WWI 100']}, format='json')
+        response = self.client.post('/api/account-codes/', {
+            'codes': [self._row('WWI 100', '9000000100'), self._row('WWI 101', '9000000101'), self._row('WWI 100', '9000000100')],
+        }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(len(response.data['created']), 2)  # in-batch duplicate collapsed, not double-created
+        self.assertEqual(len(response.data['errors']), 1)
         self.assertEqual(AccountCode.objects.filter(code__in=['WWI 100', 'WWI 101']).count(), 2)
 
-    def test_adding_an_already_existing_code_is_reported_not_fatal(self):
-        AccountCode.objects.create(code='WWI 102')
+    def test_incomplete_row_is_reported_not_fatal(self):
         self.client.force_authenticate(self.owner)
-        response = self.client.post('/api/account-codes/', {'codes': ['WWI 102', 'WWI 103']}, format='json')
+        response = self.client.post('/api/account-codes/', {
+            'codes': [{'code': 'WWI 99', 'account_number': '', 'account_name': 'Missing number'}, self._row('WWI 98', '9000000098')],
+        }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(len(response.data['created']), 1)
         self.assertEqual(len(response.data['errors']), 1)
 
+    def test_adding_an_already_existing_code_or_number_is_reported_not_fatal(self):
+        AccountCode.objects.create(code='WWI 102', account_number='9000000102', account_name='WWI 102 DVA')
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/account-codes/', {
+            'codes': [
+                self._row('WWI 102', '9000000200'),  # code collides
+                self._row('WWI 200', '9000000102'),  # account_number collides
+                self._row('WWI 103', '9000000103'),  # clean
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data['created']), 1)
+        self.assertEqual(len(response.data['errors']), 2)
+
     def test_accountant_can_manage_the_pool_cashier_cannot(self):
         self.client.force_authenticate(self.accountant)
-        response = self.client.post('/api/account-codes/', {'codes': ['WWI 104']}, format='json')
+        response = self.client.post('/api/account-codes/', {'codes': [self._row('WWI 104', '9000000104')]}, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
         self.client.force_authenticate(self.cashier)
@@ -319,9 +340,11 @@ class AccountCodeAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_available_count_is_open_to_every_role_but_excludes_linked(self):
-        AccountCode.objects.create(code='WWI 105')
+        AccountCode.objects.create(code='WWI 105', account_number='9000000105', account_name='WWI 105 DVA')
         linked_player = Player.objects.create(account_code='WWI 106', display_name='Linked')
-        AccountCode.objects.create(code='WWI 106', linked_player=linked_player)
+        AccountCode.objects.create(
+            code='WWI 106', account_number='9000000106', account_name='WWI 106 DVA', linked_player=linked_player,
+        )
 
         self.client.force_authenticate(self.cashier)
         response = self.client.get('/api/account-codes/available-count/')

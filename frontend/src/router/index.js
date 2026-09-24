@@ -11,12 +11,14 @@
  * comment; they're accounts.StaffMember records now, not StaffUser.
  *
  * meta.roles is a defense-in-depth check mirroring what the API itself would
- * 403 for the wrong role. It's set on /dashboard, /game-days, /roster
- * (ACCOUNTANT + OWNER — the "back office" surface Cashier has no use for)
- * and, OWNER-only, on /admin, /payouts (Phase C, 2026-09-14), and /deals/:playerId
- * (2026-09-23). /outstanding was in this same group until 2026-09-23, when
- * it was folded into /dashboard and retired as its own route. The standalone
- * /deals (player picker) and /deals/history pages were retired the same way
+ * 403 for the wrong role. It's set on /dashboard, /ledgers (+ both its
+ * children), /roster (ACCOUNTANT + OWNER — the "back office" surface
+ * Cashier has no use for) and, OWNER-only, on /admin, /payouts (Phase C,
+ * 2026-09-14), and /deals/:playerId (2026-09-23). /outstanding was its own
+ * route until 2026-09-23, when it was folded into /dashboard; 2026-09-26
+ * gave it a real home again as /ledgers/off-table (renamed "Off-table"),
+ * once "Game Days" itself became "Ledgers" with two sub-pages. The
+ * standalone /deals (player picker) and /deals/history pages were retired
  * on 2026-09-24 — Deal is now one of the Players table's own ⋮ actions
  * (jumps straight to /deals/:playerId), and deal history moved onto each
  * player's own deal page.
@@ -44,9 +46,12 @@ const ActiveGameDayView = () => import('@/views/game-day/ActiveGameDayView.vue')
 
 // The Players list + "add player" page are gone (2026-09-14) — a Cashier's
 // only screen is Game Day now; players are picked as pills there and added
-// via AddPlayerModal (a bottom sheet, not a route). PlayerDetailView stays
-// routed since the Payout action-grid button still navigates to it.
-const PlayerDetailView = () => import('@/views/players/PlayerDetailView.vue')
+// via AddPlayerModal (a bottom sheet, not a route). PlayerDetailView.vue and
+// its /players/:id route were removed 2026-09-27 — leftover Phase A
+// prototype code (see PLAN.md's dated entry): the Payout button this
+// comment used to say routed here was rewired to ActiveGameDayView.vue's
+// own inline onPayoutClick handler well before this session, and nothing
+// else in the app ever linked to this route since.
 
 // Accountant/Owner back-office surface (Phase B, 2026-09-14) — a distinct,
 // read-only reporting nav namespaced under its own paths so it never
@@ -56,12 +61,16 @@ const DashboardView = () => import('@/views/accountant/DashboardView.vue')
 // the paginated list on click, 2026-09-23) — GameDayDetailView.vue and its
 // standalone /game-days/:id route are gone; nothing else in the app linked
 // to that route (confirmed by search before removing it).
+//
+// "Game Days" renamed "Ledgers" 2026-09-26, now a parent route with two
+// children: Game Days (unchanged, this same component) and Off-table (was
+// Outstanding — lived inline on DashboardView from 2026-09-23 until this
+// move gave it a real home of its own under the new Ledgers umbrella).
+// LedgersLayout.vue is just the sub-nav chrome + <router-view/>.
+const LedgersLayout = () => import('@/views/accountant/LedgersLayout.vue')
 const GameDaysListView = () => import('@/views/accountant/GameDaysListView.vue')
-// OutstandingView is gone (2026-09-23) — its whole content (feed + by-player
-// summary) now lives inline on DashboardView, and the standalone /outstanding
-// route below went with it.
+const OffTableView = () => import('@/views/accountant/OffTableView.vue')
 const RosterListView = () => import('@/views/accountant/RosterListView.vue')
-const RosterDetailView = () => import('@/views/accountant/RosterDetailView.vue')
 const PlayerLedgerView = () => import('@/views/accountant/PlayerLedgerView.vue')
 const PlayerPayoutView = () => import('@/views/accountant/PlayerPayoutView.vue')
 
@@ -120,12 +129,19 @@ const routes = [
     },
     children: [
       { path: 'game-day', name: 'game-day', component: ActiveGameDayView },
-      { path: 'players/:id', name: 'player-detail', component: PlayerDetailView },
 
       { path: 'dashboard', name: 'dashboard', component: DashboardView, meta: { roles: BACK_OFFICE_ROLES } },
-      { path: 'game-days', name: 'game-days', component: GameDaysListView, meta: { roles: BACK_OFFICE_ROLES } },
+      {
+        path: 'ledgers',
+        component: LedgersLayout,
+        meta: { roles: BACK_OFFICE_ROLES },
+        children: [
+          { path: '', redirect: 'game-days' },
+          { path: 'game-days', name: 'ledgers-game-days', component: GameDaysListView, meta: { roles: BACK_OFFICE_ROLES } },
+          { path: 'off-table', name: 'ledgers-off-table', component: OffTableView, meta: { roles: BACK_OFFICE_ROLES } },
+        ],
+      },
       { path: 'roster', name: 'roster', component: RosterListView, meta: { roles: BACK_OFFICE_ROLES } },
-      { path: 'roster/:id', name: 'roster-detail', component: RosterDetailView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'roster/:id/ledger', name: 'roster-ledger', component: PlayerLedgerView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'roster/:id/payout', name: 'roster-payout', component: PlayerPayoutView, meta: { roles: OWNER_ONLY_ROLES } },
 
