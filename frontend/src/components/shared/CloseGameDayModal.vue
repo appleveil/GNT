@@ -26,6 +26,16 @@ const {
 
 const tonightsVariance = computed(() => preview.value ? describeChipsVariance(preview.value.chips_variance) : null)
 const outstandingAfterClose = computed(() => preview.value ? describeChipsVariance(preview.value.outstanding_chips_after_close) : null)
+// Rake and tips are chips too — skimmed from play or handed to staff, but
+// still chips that came back off the table, just not to a player's stack
+// (see gaming.selectors.game_day_summary_data's own chips_variance comment).
+// "Chips returned" here means the full reconciliation figure, not just
+// CHIPS_IN — added 2026-09-28 after chips_in_total alone under-reported it.
+const chipsReturnedTotal = computed(() =>
+  preview.value
+    ? Number(preview.value.chips_in_total) + Number(preview.value.rake_total) + Number(preview.value.tips_total)
+    : 0,
+)
 
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
@@ -38,11 +48,11 @@ const N = n => `₦${Number(n).toLocaleString()}`
       <div class="stats">
         <div class="stat-row"><span>Total players</span><span class="money">{{ preview.num_players_seated }}</span></div>
         <div class="stat-row"><span>Chips out</span><span class="money">{{ N(preview.chips_out_total) }}</span></div>
-        <div class="stat-row"><span>Chips returned</span><span class="money">{{ N(preview.chips_in_total) }}</span></div>
+        <div class="stat-row"><span>Chips returned</span><span class="money">{{ N(chipsReturnedTotal) }}</span></div>
         <div class="stat-row"><span>Payments received</span><span class="money">{{ N(preview.total_payments) }}</span></div>
-        <div class="stat-row"><span>Rake / Tips</span><span class="money">{{ N(preview.rake_total) }} / {{ N(preview.tips_total) }}</span></div>
+        <div class="stat-row"><span>— of which Rake / Tips</span><span class="money">{{ N(preview.rake_total) }} / {{ N(preview.tips_total) }}</span></div>
         <div class="stat-row">
-          <span>{{ tonightsVariance.label }} tonight <small>(out − in − rake − tips)</small></span>
+          <span>{{ tonightsVariance.label }} tonight <small>(chips out − chips returned)</small></span>
           <span class="money" :class="tonightsVariance.className">{{ N(tonightsVariance.amount) }}</span>
         </div>
         <div class="stat-row">

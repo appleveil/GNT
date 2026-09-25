@@ -770,6 +770,27 @@ def record_transaction(
                 f'on the table (₦{max_returnable:,} — chips issued minus rake/tips already taken out) '
                 f'by ₦{over_by:,} — recount before returning.'
             )
+
+    # Same invariant, the other direction (added 2026-09-28): chips already
+    # returned tonight can just as easily push RAKE/TIP over the line — if
+    # chips_in was recorded first and rake/tip comes in after, the CHIPS_IN
+    # check above never saw this rake/tip coming and couldn't have caught
+    # it. Whichever entry is recorded second is the one that's actually
+    # inconsistent with the physical count, so it's this one that gets
+    # blocked, not a retroactive flag on the earlier CHIPS_IN.
+    if type in (Transaction.Type.RAKE, Transaction.Type.TIP) and game_day is not None:
+        totals = selectors.game_day_chips_totals(game_day)
+        rake_after = totals['rake_total'] + (amount if type == Transaction.Type.RAKE else Decimal('0'))
+        tips_after = totals['tips_total'] + (amount if type == Transaction.Type.TIP else Decimal('0'))
+        max_returnable_after = totals['chips_out_total'] - rake_after - tips_after
+        if totals['chips_in_total'] > max_returnable_after:
+            over_by = totals['chips_in_total'] - max_returnable_after
+            label = 'rake' if type == Transaction.Type.RAKE else 'tip'
+            raise InvalidStateError(
+                f'This {label} would leave less on the table (₦{max_returnable_after:,} — chips issued minus '
+                f'rake/tips) than has already been returned tonight (₦{totals["chips_in_total"]:,}) '
+                f'by ₦{over_by:,} — recount before adding this.'
+            )
     fm = None
     if not _skip_pin_check and type in PHYSICAL_COUNT_TYPES:
         # CHIPS_OUT/CHIPS_IN/TIP/RAKE's sign-off is Owner-configurable
@@ -1121,6 +1142,16 @@ def initiate_direct_payout(player, amount, operator):
     money independent of tonight's table (e.g. from a Deal, or a balance
     carried over from a previous game-day). No "must have left the table"
     gate either — there's no table this is scoped to.
+
+    Revised 2026-09-28: always executes immediately, regardless of amount —
+    ClubSettings.payout_auto_approve_threshold never applies here.
+    "Approval" exists to let the Owner sign off on a CASHIER's request; when
+    the Owner initiates the payout themselves there's no one else to seek
+    approval from, so gating this on a threshold (as it used to) meant an
+    Owner's own large payout could sit PENDING_APPROVAL waiting on... the
+    Owner, to approve their own action. approved_by=operator, not None —
+    this is a real approval by a real person, not the threshold's "nobody
+    signed off, it just cleared" marker (see _execute_payout_transfer).
     """
     available = max(selectors.player_balance(player), Decimal('0'))
     if amount <= 0:
@@ -1139,9 +1170,7 @@ def initiate_direct_payout(player, amount, operator):
         channel=Transaction.Channel.CASHIER, recorded_by=operator,
         status=Transaction.Status.PENDING_APPROVAL,
     )
-    if amount <= ClubSettings.load().payout_auto_approve_threshold:
-        return _execute_payout_transfer(transaction_obj, approved_by=None)
-    return transaction_obj
+    return _execute_payout_transfer(transaction_obj, approved_by=operator)
 
 
 def _execute_payout_transfer(transaction_obj, approved_by):

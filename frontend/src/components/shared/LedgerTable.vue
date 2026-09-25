@@ -48,6 +48,16 @@ const props = defineProps({
   dateFormat: { type: String, default: 'time' }, // 'time' | 'datetime'
   voidable: { type: Boolean, default: false },
   canVoidFn: { type: Function, default: () => false },
+  // The "Payout BBF" split (see expandedRows below) is a fact about a
+  // PLAYER's balance — it has no meaning on a ledger that isn't scoped to
+  // player balances. Added 2026-09-28 for MainAccountLedgerView, which
+  // tracks real bank movement only: the BBF row isn't a bank transaction
+  // (no money moved for it), so showing it there implied the club's bank
+  // balance itself had a "brought forward" figure, which is nonsense —
+  // only the real Payout row (the actual transfer) belongs on that table.
+  // Every player-scoped ledger (ActiveGameDayView, GameDaysListView,
+  // PlayerLedgerView, DealTypePickerView's history) keeps the default.
+  showBbfRows: { type: Boolean, default: true },
 })
 defineEmits(['void'])
 
@@ -121,7 +131,7 @@ const expandedRows = computed(() => {
   const out = []
   for (const row of props.rows) {
     out.push({ ...row, _key: row.id })
-    if (row.type === 'PAYOUT' && row.requested_amount) {
+    if (props.showBbfRows && row.type === 'PAYOUT' && row.requested_amount) {
       const cleared = Number(row.requested_amount) - Number(row.amount)
       out.push({ ...row, _bbf: true, _key: `${row.id}-bbf`, _cleared: cleared })
     }
@@ -166,8 +176,12 @@ const expandedRows = computed(() => {
                  running_balance looks like more is still owed than is true
                  (see the BBF comment above) — nettedPayoutBalance is the
                  single shared source for what to show instead, also used by
-                 ActiveGameDayView and GameDaysListView. -->
-            <span v-else-if="row.requested_amount">{{ N(nettedPayoutBalance(row)) }}</span>
+                 ActiveGameDayView and GameDaysListView. Gated on showBbfRows
+                 too: on a non-player-balance ledger (Main Account) this
+                 column means the BANK's running balance, which is exactly
+                 what running_balance already gives — forcing it to 0 there
+                 would be wrong in a different way. -->
+            <span v-else-if="row.requested_amount && showBbfRows">{{ N(nettedPayoutBalance(row)) }}</span>
             <span v-else>{{ N(row.running_balance) }}</span>
           </td>
           <td v-if="showStatus">

@@ -19,11 +19,16 @@ import { useToast } from '@/composables/useToast'
 // picker) once the standalone Deals list/history pages were retired — every
 // player now reaches their deal page straight from the Players table's ⋮
 // menu, so a club-wide feed elsewhere is no longer this page's neighbor.
-// Same 4 types DealsHistoryView filtered to, just scoped to this player via
-// GET /transactions/?player=<id> (no dedicated backend filter for "deal
-// transactions", same accepted trade-off as PayoutsView.vue's own
-// client-side filter).
-const DEAL_TYPES = ['WRITE_OFF', 'DEAL_TRANSFER_OUT', 'DEAL_TRANSFER_IN', 'PROFIT_SPLIT_STAKE']
+//
+// Revised 2026-09-28: was GET /transactions/?player=<id> filtered by TYPE
+// client-side — the generic TransactionViewSet never actually filters by
+// `player` at all (silently ignored), so this was fetching every deal
+// transaction for every player club-wide on every load (the real cause of
+// this page loading slowly once there was real data), and TransactionSerializer
+// has no signed_amount/running_balance for LedgerTable's Amount/Balance
+// columns to read (both showed NaN). Now GET /transactions/deal-history/
+// (selectors.player_deal_history) does the player + type filtering
+// server-side and returns properly annotated rows.
 
 const route = useRoute()
 const router = useRouter()
@@ -58,11 +63,8 @@ async function load() {
 async function loadHistory() {
   historyLoading.value = true
   try {
-    const { data } = await api.get('/transactions/', { params: { player: route.params.playerId } })
-    history.value = data
-      .filter(t => DEAL_TYPES.includes(t.type))
-      .slice()
-      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    const { data } = await api.get('/transactions/deal-history/', { params: { player: route.params.playerId } })
+    history.value = data.slice().reverse() // most recent first — backend returns ascending
   } catch {
     toast.error('Could not load this player’s deal history.')
   } finally {

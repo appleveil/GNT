@@ -160,7 +160,7 @@ class StaffMemberViewSet(viewsets.ModelViewSet):
 class PlayerViewSet(viewsets.ModelViewSet):
     """Read: any authenticated staff. Write: Cashier or Owner only."""
 
-    queryset = Player.objects.all().prefetch_related('bank_accounts')
+    queryset = Player.objects.all().prefetch_related('bank_accounts').select_related('gaming_account')
     serializer_class = PlayerSerializer
     permission_classes = [IsAuthenticated]
 
@@ -168,6 +168,28 @@ class PlayerViewSet(viewsets.ModelViewSet):
         if self.action in ('create', 'update', 'partial_update', 'destroy', 'provision_gaming_account'):
             return [IsCashierOrOwner()]
         return super().get_permissions()
+
+    def list(self, request, *args, **kwargs):
+        """
+        Bulk-computes balances for every player on the page in 1-2 aggregate
+        queries total, instead of PlayerSerializer.get_balance/
+        get_chips_used_today each running their own per-player query —
+        found 2026-09-28 causing the Players page to load noticeably slowly
+        even with only a handful of players (each row was 2-4 extra
+        round-trips). See gaming.selectors.bulk_player_balances/
+        bulk_player_game_day_balances.
+        """
+        from gaming.selectors import bulk_player_balances, bulk_player_game_day_balances, current_open_game_day
+
+        players = list(self.filter_queryset(self.get_queryset()))
+        player_ids = [p.id for p in players]
+        game_day = current_open_game_day()
+        context = self.get_serializer_context()
+        context['lifetime_balances'] = bulk_player_balances(player_ids)
+        context['game_day'] = game_day
+        context['game_day_balances'] = bulk_player_game_day_balances(player_ids, game_day) if game_day else {}
+        serializer = self.get_serializer(players, many=True, context=context)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='provision-gaming-account')
     def provision_gaming_account(self, request, pk=None):

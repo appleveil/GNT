@@ -1938,6 +1938,115 @@ build` clean, migration applied live to the `test1` tenant proactively
 this time (via `tenant_command migrate`, not just the test DB) — direct
 lesson from this same day's earlier missed-migration live 500.
 
+### Four follow-up requests: BBF off the Main Account ledger, auto-approval scoped to Cashier payouts, Players page N+1 fixed, rake/tip excess check (2026-09-28)
+
+1. **"Payout BBF" no longer renders on the Main Account ledger.** The BBF
+   split (see the two entries above) is a fact about a PLAYER's balance —
+   it has no meaning on `MainAccountLedgerView`, which tracks real bank
+   movement only (no money moves for the BBF line itself). New
+   `LedgerTable.vue` prop `showBbfRows` (default `true`, every existing
+   player-scoped view unaffected), set `false` on `MainAccountLedgerView`
+   — the real Payout row there now shows its own `running_balance` (the
+   bank's running balance) like every other row, instead of being forced
+   to 0 by the netted-payout override, which only makes sense where
+   "Balance" means a player's balance.
+
+2. **Payout auto-approval is now scoped to Cashier-initiated payouts only**,
+   per explicit follow-up: "it is only applicable if cashier is allowed to
+   initiate a payout in the first place." `initiate_direct_payout`
+   (Owner's own payout from the Players page) now always executes
+   immediately (`approved_by=operator`, never `PENDING_APPROVAL`,
+   `ClubSettings.payout_auto_approve_threshold` never consulted) — approval
+   exists to let the Owner sign off on someone ELSE's request; there's no
+   one to seek approval from when the Owner initiates it themselves, so
+   gating it on a threshold (as it used to) meant an Owner's own large
+   payout could sit waiting on the Owner to approve their own action.
+   `ClubSettingsView.vue`'s "Payout auto-approval" card is now visually
+   nested under "Cashier can initiate a payout" — greyed out with an
+   explanatory note when that toggle is off.
+
+3. **Players page was slow — root cause was a genuine N+1**, real even with
+   "hardly any data": `PlayerSerializer.get_balance`/`get_chips_used_today`
+   each ran their own aggregate DB query per player row (up to ~4 extra
+   round-trips per player), and `gaming_account` had no `select_related`.
+   New `gaming.selectors.bulk_player_balances`/`bulk_player_game_day_balances`
+   (one grouped query for every player on the page); `PlayerViewSet.list`
+   now precomputes both once and passes them through serializer context,
+   with `PlayerSerializer` falling back to the original per-object selector
+   calls only for single-object serialization (retrieve/create/provision),
+   where N+1 doesn't apply. Verified live: 11 players costs 14 queries
+   total now, flat regardless of player count (was scaling linearly).
+
+4. **Rake/tip excess check** — the mirror image of the existing "chips
+   returned can't exceed chips issued" check (2026-09-22/23): adding a RAKE
+   or TIP that would push already-returned chips (`chips_in_total`) above
+   what's left on the table (`chips_out_total - rake_total - tips_total`,
+   recomputed with the new entry included) is now blocked the same way,
+   for the same reason — you can't skim more than has actually been
+   issued, regardless of which side (CHIPS_IN vs RAKE/TIP) is recorded
+   second. Surfaced 6 pre-existing tests (`TipCategoryTests`,
+   `RequireApprovalTogglesTests`) that recorded a tip/rake against a
+   game-day with zero prior `CHIPS_OUT` — physically nonsensical once this
+   constraint exists (nothing to skim from an empty table) — fixed by
+   giving those tests a plausible `CHIPS_OUT` first, same pattern
+   `ChipsReturnedCannotExceedChipsOutTests` already used.
+
+Verified: 7 new tests (`RakeOrTipCannotPushChipsInOverTheCeilingTests`), 2
+new tests on `DirectPayoutTests`, full suite green (299 tests), `npm run
+build` clean, live query-count check against the `test1` tenant confirming
+the Players page fix.
+
+### Close Game-Day summary's "Chips returned" didn't include rake/tips; Deal history was fetching the whole club's transactions unfiltered (2026-09-28)
+
+1. **"Chips returned" in `CloseGameDayModal.vue`'s close-time summary now
+   includes rake and tips**, not just `chips_in_total` — per explicit
+   follow-up, rake and tips are chips too (skimmed from play or handed to
+   staff), just not returned to a player's own stack.
+   `chips_in_total + rake_total + tips_total` replaces the old figure; the
+   "Rake / Tips" line right below it is relabeled "— of which" since it's
+   now a breakdown of part of that total, not a separate additional one;
+   the variance caption simplified from `(out − in − rake − tips)` to
+   `(chips out − chips returned)`, same math, now that "chips returned"
+   already nets rake/tips in. Left the OTHER two "Chips returned" figures
+   alone (`ActiveGameDayView`'s and `GameDaysListView`'s per-player stat
+   tiles) — rake/tip are day-level entries with no player attribution, so
+   they can't be folded into a single player's own figure; and the live
+   chips-caption above the entry form is a different concept (the CHIPS_IN
+   ceiling helper), correctly literal already.
+
+2. **Deal history was fetching every deal transaction club-wide on every
+   load, unfiltered.** Root cause: `DealTypePickerView.vue` called
+   `GET /transactions/?player=<id>`, but `TransactionViewSet` never
+   actually filtered by the `player` query param at all — it was silently
+   ignored, so the "filter" did nothing and the frontend only filtered by
+   TYPE client-side afterward, over the WHOLE club's transaction table.
+   This explained all three reported symptoms at once: "Account
+   (Amount)/Balance show NaN" (the generic `TransactionSerializer` has no
+   `signed_amount`/`running_balance` fields — only `LedgerEntrySerializer`,
+   used by the dedicated ledger endpoints, does); "each entry seems to be
+   made twice" (a Transfer deal legitimately creates a linked OUT/IN pair
+   on two DIFFERENT players — with no player filter, both players' halves
+   of every transfer club-wide showed up together); and "slow when there
+   is a deal" (pulling the entire club's transaction history over the wire
+   on every page load, not just this player's). Fixed with a real
+   dedicated endpoint: `GET /transactions/deal-history/?player=<id>`
+   (new `selectors.player_deal_history` — `DEAL_HISTORY_TYPES = {WRITE_OFF,
+   DEAL_TRANSFER_OUT, DEAL_TRANSFER_IN, PROFIT_SPLIT_STAKE}`, distinct from
+   `services.DEAL_TYPES` which governs something unrelated — which
+   closed-game-day a Deal may target), filtered server-side by player AND
+   type, backed by `LedgerEntrySerializer` for the annotated fields
+   LedgerTable needs, running_balance scoped to just these 4 types (same
+   pattern as `player_game_day_ledger` scoping to one game-day).
+   `DealTypePickerView.vue`'s client-side `DEAL_TYPES` filter is gone
+   entirely — the backend is now the single source of truth for what
+   counts as a deal.
+
+Verified: 5 new tests (`PlayerDealHistoryTests`), full suite green (304
+tests), `npm run build` clean, live-verified against the `test1` tenant
+with a throwaway transfer between two players — each player's own history
+now shows exactly their own leg (no duplication), real numbers (no NaN),
+~0.1s; throwaway data cleaned up afterward.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

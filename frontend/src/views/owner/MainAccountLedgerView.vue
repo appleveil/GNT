@@ -107,7 +107,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <p v-if="!feed.length" class="muted">
           {{ showAllStatuses ? 'Nothing recorded yet.' : 'No successful deposits or payouts yet — try "Show all statuses".' }}
         </p>
-        <LedgerTable v-else :rows="feed" show-player :player-to="playerTo" date-format="datetime" />
+        <LedgerTable v-else :rows="feed" show-player :player-to="playerTo" date-format="datetime" :show-bbf-rows="false" />
       </div>
     </template>
   </div>

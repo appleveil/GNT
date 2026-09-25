@@ -498,6 +498,22 @@ class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         ).count()
         return Response({'count': count})
 
+    @action(detail=False, methods=['get'], url_path='deal-history')
+    def deal_history(self, request):
+        """
+        DealTypePickerView.vue's per-player "Deal history" section — see
+        selectors.player_deal_history. Owner-only, same as every other Deal
+        action (DealFixedView/DealTransferView/DealProfitSplitView).
+        """
+        if request.user.role != StaffUser.Role.OWNER:
+            return Response({'detail': 'Owner only.'}, status=status.HTTP_403_FORBIDDEN)
+        player_id = request.query_params.get('player')
+        if not player_id:
+            return Response({'detail': 'player is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        player = get_object_or_404(Player, pk=player_id)
+        rows = selectors.player_deal_history(player)
+        return Response(LedgerEntrySerializer(rows, many=True).data)
+
 
 class OutstandingLedgerView(APIView):
     """

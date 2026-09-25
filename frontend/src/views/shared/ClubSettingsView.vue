@@ -488,15 +488,30 @@ const N = n => `₦${Number(n).toLocaleString()}`
             </button>
           </div>
         </div>
-      </div>
 
-      <div class="card section-card">
+
+
         <div class="section-title">Payout auto-approval</div>
-        <p class="section-note">A payout at or below this amount moves automatically — nothing to approve.</p>
-        <form class="create-form" @submit.prevent="onSaveThreshold">
+        <p class="section-note">
+          A Cashier-requested payout at or below this amount moves automatically — nothing to approve.
+          <template v-if="clubSettings.current && !clubSettings.current.cashier_can_initiate_payout">
+            Not applicable right now — the Cashier can't initiate a payout at all (see above). The Owner's own
+            payouts from the Players page always move immediately, regardless of this threshold.
+          </template>
+        </p>
+        <form
+          class="create-form" :class="{ 'create-form--disabled': clubSettings.current && !clubSettings.current.cashier_can_initiate_payout }"
+          @submit.prevent="onSaveThreshold"
+        >
           <span class="amount-prefix">₦</span>
-          <input v-model="thresholdInput" type="number" min="0" step="1000" class="ff" required />
-          <button class="btn btn--primary" type="submit" :disabled="thresholdSaving">{{ thresholdSaving ? 'Saving…' : 'Save' }}</button>
+          <input
+            v-model="thresholdInput" type="number" min="0" step="1000" class="ff" required
+            :disabled="clubSettings.current && !clubSettings.current.cashier_can_initiate_payout"
+          />
+          <button
+            class="btn btn--primary" type="submit"
+            :disabled="thresholdSaving || (clubSettings.current && !clubSettings.current.cashier_can_initiate_payout)"
+          >{{ thresholdSaving ? 'Saving…' : 'Save' }}</button>
         </form>
         <p v-if="thresholdError" class="form-error">{{ thresholdError }}</p>
       </div>
@@ -626,6 +641,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .switch--on .switch-knob { transform: translateX(16px); }
 
 .create-form { display: flex; align-items: center; gap: 8px; }
+.create-form--disabled { opacity: 0.5; }
 .amount-prefix { font-family: var(--font-mono); font-size: 13px; color: var(--text-secondary); }
 
 /* FX Rates — carried over from the retired FX Rates section of

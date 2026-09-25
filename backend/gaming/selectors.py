@@ -134,6 +134,39 @@ def player_game_day_ledger(game_day, player):
     return _with_running_balance(qs)
 
 
+
+# Distinct from services.DEAL_TYPES ({PAYMENT_DEAL, WRITE_OFF} — which
+# game-days a Deal/write-off may target), and from
+# DealTypePickerView.vue's own former client-side DEAL_TYPES constant this
+# replaces — this is specifically "what DealTypePickerView.vue's Deal
+# history section shows."
+DEAL_HISTORY_TYPES = {
+    Transaction.Type.WRITE_OFF, Transaction.Type.DEAL_TRANSFER_OUT,
+    Transaction.Type.DEAL_TRANSFER_IN, Transaction.Type.PROFIT_SPLIT_STAKE,
+}
+
+
+def player_deal_history(player):
+    """
+    One player's Deal-related activity only (Fixed write-off, Transfer in/
+    out, Profit-split stake) — DealTypePickerView.vue's "Deal history"
+    section. Added 2026-09-28 replacing that view's own GET /transactions/
+    ?player=<id> call, which the generic TransactionViewSet never actually
+    filtered by player at all (the param was silently ignored) — every
+    player's full deal history club-wide was being fetched and only
+    filtered by TYPE client-side, the real cause of that page loading
+    slowly once there was real data, and of TransactionSerializer's plain
+    (non-annotated) rows showing NaN for Amount/Balance in a component
+    that expects LedgerEntrySerializer's signed_amount/running_balance.
+    running_balance is scoped to just these 4 types, not the player's full
+    account activity — matching what this section actually shows, same as
+    player_game_day_ledger scoping to one game-day. Voided rows stay in —
+    see _with_running_balance.
+    """
+    qs = Transaction.objects.filter(player=player, type__in=DEAL_HISTORY_TYPES)
+    return _with_running_balance(qs)
+
+
 def outstanding_ledger(player=None):
     """Between-game-day activity (payments/deals) — running balance kept per player.
     Voided rows stay in — see _with_running_balance."""
@@ -165,6 +198,30 @@ def player_game_day_balance(player, game_day):
     """
     qs = _with_signed_amount(Transaction.objects.filter(game_day=game_day, player=player, is_voided=False))
     return qs.aggregate(total=Coalesce(Sum('signed_amount'), ZERO))['total']
+
+
+def bulk_player_balances(player_ids):
+    """
+    Every listed player's lifetime balance, in ONE query — added 2026-09-28
+    after the Players list page (accounts.PlayerSerializer.get_balance)
+    turned out to call player_balance(player) once per row, an N+1 that was
+    genuinely slow even with a handful of players (each call is its own
+    aggregate query/round-trip). Same math as player_balance, just grouped
+    by player instead of filtered to one. A player with no transactions at
+    all has no row in the result — callers should default missing ids to 0.
+    """
+    qs = _with_signed_amount(Transaction.objects.filter(player_id__in=player_ids, is_voided=False))
+    rows = qs.values('player').annotate(total=Sum('signed_amount'))
+    return {row['player']: row['total'] for row in rows}
+
+
+def bulk_player_game_day_balances(player_ids, game_day):
+    """Same as bulk_player_balances, scoped to one game-day — see player_game_day_balance."""
+    qs = _with_signed_amount(
+        Transaction.objects.filter(player_id__in=player_ids, game_day=game_day, is_voided=False)
+    )
+    rows = qs.values('player').annotate(total=Sum('signed_amount'))
+    return {row['player']: row['total'] for row in rows}
 
 
 def player_has_failed_payout(player, game_day):

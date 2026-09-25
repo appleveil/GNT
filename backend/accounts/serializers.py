@@ -157,11 +157,35 @@ class PlayerSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Only the Owner can set a player's chips limit.")
         return value
 
-    def get_balance(self, obj):
-        # Deferred imports: avoids a module-level accounts<->gaming cycle.
-        from gaming.selectors import current_open_game_day, player_balance, player_game_day_balance
+    def _lifetime_balance(self, obj):
+        # `lifetime_balances`/`game_day`/`game_day_balances`, when present in
+        # context, come from PlayerViewSet.list's bulk selectors (added
+        # 2026-09-28) — one query for every player on the page instead of
+        # player_balance(player)/player_game_day_balance(player, game_day)
+        # each running their own aggregate query per row, which was the
+        # actual cause of the Players page being slow even with a handful of
+        # players. A single-object serialization (retrieve, create, the
+        # provision-gaming-account action) has no such context and falls
+        # back to the original per-object selector calls, where the N+1
+        # concern doesn't apply.
+        if 'lifetime_balances' in self.context:
+            return self.context['lifetime_balances'].get(obj.id, Decimal('0'))
+        from gaming.selectors import player_balance
+        return player_balance(obj)
 
-        lifetime = player_balance(obj)
+    def _game_day_balance(self, obj):
+        if 'game_day_balances' in self.context:
+            if self.context.get('game_day') is None:
+                return Decimal('0')
+            return self.context['game_day_balances'].get(obj.id, Decimal('0'))
+        from gaming.selectors import current_open_game_day, player_game_day_balance
+        game_day = current_open_game_day()
+        if game_day is None:
+            return Decimal('0')
+        return player_game_day_balance(obj, game_day)
+
+    def get_balance(self, obj):
+        lifetime = self._lifetime_balance(obj)
         request = self.context.get('request')
         if not (request and getattr(request.user, 'role', None) == StaffUser.Role.CASHIER):
             return lifetime
@@ -173,22 +197,14 @@ class PlayerSerializer(serializers.ModelSerializer):
         # even a hint of how much is carried over from a previous day.
         if lifetime >= 0:
             return lifetime
-        game_day = current_open_game_day()
-        if game_day is None:
-            return Decimal('0')
-        today = player_game_day_balance(obj, game_day)
+        today = self._game_day_balance(obj)
         return today if today < 0 else Decimal('0')
 
     def get_chips_used_today(self, obj):
         """How much of chips_limit is already used tonight, for the inline Cashier UI."""
-        from gaming.selectors import current_open_game_day, player_game_day_balance
-
         if obj.chips_limit is None:
             return None
-        game_day = current_open_game_day()
-        if game_day is None:
-            return Decimal('0')
-        balance = player_game_day_balance(obj, game_day)
+        balance = self._game_day_balance(obj)
         return -balance if balance < 0 else Decimal('0')
 
     def get_gaming_account(self, obj):

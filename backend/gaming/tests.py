@@ -1650,6 +1650,102 @@ class ChipsReturnedCannotExceedChipsOutTests(APITestCase):
         self.assertEqual(Decimal(str(response.data['tips_total'])), Decimal(20000))
 
 
+class RakeOrTipCannotPushChipsInOverTheCeilingTests(APITestCase):
+    """
+    record_transaction's RAKE/TIP branch — added 2026-09-28, the mirror image
+    of ChipsReturnedCannotExceedChipsOutTests above. That check only catches
+    an excess if CHIPS_IN is recorded AFTER the rake/tip that would conflict
+    with it; if the chips are already back on the books first, a rake/tip
+    added afterward needs its own check, since nothing before this saw it
+    coming. Same underlying invariant either way: chips_in + rake + tips
+    can never exceed chips_out.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner_rt', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier_rt', password='x', role=StaffUser.Role.CASHIER)
+        self.game_day = services.open_game_day(70, timezone.now(), self.owner)
+        self.fm = FloorManager(name='Floor Boss RT', created_by=self.owner)
+        self.fm.set_pin('9999')
+        self.fm.save()
+        self.p1 = Player.objects.create(account_code='WWI 70', display_name='RT Player One')
+        services.seat_player(self.game_day, self.owner, player=self.p1)
+
+    def _chips_out(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.p1, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def _chips_in(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.p1, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def _rake(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.RAKE, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def _tip(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.TIP, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, tip_category=Transaction.TipCategory.SERVICE_STAFF,
+            floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    def test_rake_that_would_exceed_already_returned_chips_raises(self):
+        self._chips_out(500000)
+        self._chips_in(500000)  # everything already back
+        with self.assertRaises(InvalidStateError):
+            self._rake(1)  # nothing left on the table to rake
+
+    def test_rake_up_to_the_exact_remaining_amount_is_allowed(self):
+        self._chips_out(500000)
+        self._chips_in(450000)  # 50,000 still legitimately on the table
+        self._rake(50000)  # exact boundary — allowed
+
+    def test_tip_that_would_exceed_already_returned_chips_raises(self):
+        self._chips_out(500000)
+        self._chips_in(500000)
+        with self.assertRaises(InvalidStateError):
+            self._tip(1)
+
+    def test_rake_and_tip_stack_against_the_same_ceiling(self):
+        self._chips_out(500000)
+        self._chips_in(470000)  # 30,000 still on the table
+        self._rake(20000)  # fine — 10,000 left
+        with self.assertRaises(InvalidStateError):
+            self._tip(10001)  # one more than what's left
+        self._tip(10000)  # exact remaining boundary — allowed
+
+    def test_a_voided_chips_in_no_longer_counts_against_the_ceiling(self):
+        self._chips_out(500000)
+        txn = self._chips_in(500000)
+        services.void_transaction(txn, self.owner, 'test voided')
+        self._rake(500000)  # the voided return no longer reserves any of it
+
+    def test_error_message_reports_the_amounts(self):
+        self._chips_out(500000)
+        self._chips_in(500000)
+        with self.assertRaises(InvalidStateError) as ctx:
+            self._rake(1)
+        message = str(ctx.exception)
+        self.assertIn('500,000', message)
+
+    def test_api_surfaces_the_discrepancy_as_a_400(self):
+        self._chips_out(500000)
+        self._chips_in(500000)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/transactions/', {
+            'type': 'RAKE', 'amount': '1', 'game_day': self.game_day.id,
+            'floor_manager_id': self.fm.pk, 'floor_manager_pin': '9999',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
 class DealOnClosedGameDayTests(APITestCase):
     """
     Corrected 2026-09-15: a Deal/write-off is not manually pointed at any
@@ -1755,6 +1851,17 @@ class TipCategoryTests(APITestCase):
         self.fm.save()
         self.person = StaffMember.objects.create(
             name='Blessing', role=StaffMember.Role.MASSEUSE, created_by=self.owner,
+        )
+        # Generous chips_out headroom (added 2026-09-28 alongside the new
+        # rake/tip-can't-exceed-chips-issued check — see
+        # RakeOrTipCannotPushChipsInOverTheCeilingTests) so these tips, which
+        # are about category/recipient validation, not chip-count integrity,
+        # don't trip over it.
+        self.player = Player.objects.create(account_code='WWI 40', display_name='Tip Test Player')
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(1000000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='4321',
         )
 
     def _tip(self, **kwargs):
@@ -1927,6 +2034,68 @@ class DealTransferTests(APITestCase):
         self.assertEqual(response.data['out']['type'], Transaction.Type.DEAL_TRANSFER_OUT)
         self.assertEqual(response.data['in']['type'], Transaction.Type.DEAL_TRANSFER_IN)
         self.assertEqual(selectors.player_balance(self.dest), Decimal(4000))
+
+
+class PlayerDealHistoryTests(APITestCase):
+    """
+    GET /api/transactions/deal-history/?player=<id> (added 2026-09-28,
+    selectors.player_deal_history) — replaces DealTypePickerView.vue's
+    former GET /transactions/?player=<id> call, which the generic
+    TransactionViewSet never actually filtered by player at all (silently
+    ignored), fetching every deal transaction club-wide on every load and
+    returning rows with no signed_amount/running_balance for LedgerTable to
+    read (NaN Amount/Balance). This endpoint fixes both: real player + type
+    filtering server-side, and LedgerEntrySerializer's annotated fields.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='pdh_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='pdh_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.source = Player.objects.create(account_code='PDH 1', display_name='PDH Source')
+        self.dest = Player.objects.create(account_code='PDH 2', display_name='PDH Dest')
+        Transaction.objects.create(
+            player=self.source, type=Transaction.Type.CHIPS_IN, amount=Decimal(50000),
+            channel=Transaction.Channel.CHIPS, recorded_by=self.cashier,
+        )
+
+    def test_only_this_players_deal_rows_come_back(self):
+        services.record_deal_transfer(self.source, self.dest, Decimal(20000), 'settling up', self.owner)
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/transactions/deal-history/?player={self.source.id}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['type'], 'DEAL_TRANSFER_OUT')
+
+        response = self.client.get(f'/api/transactions/deal-history/?player={self.dest.id}')
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['type'], 'DEAL_TRANSFER_IN')
+
+    def test_non_deal_transactions_are_excluded(self):
+        # The CHIPS_IN from setUp funding the transfer must not itself appear.
+        services.record_deal_transfer(self.source, self.dest, Decimal(20000), 'settling up', self.owner)
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/transactions/deal-history/?player={self.source.id}')
+        types = {row['type'] for row in response.data}
+        self.assertNotIn('CHIPS_IN', types)
+
+    def test_rows_carry_signed_amount_and_running_balance(self):
+        """The exact fields LedgerTable.vue needs — their absence is what showed as NaN."""
+        services.record_deal_transfer(self.source, self.dest, Decimal(20000), 'settling up', self.owner)
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/transactions/deal-history/?player={self.source.id}')
+        row = response.data[0]
+        self.assertEqual(Decimal(str(row['signed_amount'])), Decimal(-20000))
+        self.assertEqual(Decimal(str(row['running_balance'])), Decimal(-20000))
+
+    def test_requires_a_player_param(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/transactions/deal-history/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_non_owner_cannot_view_deal_history(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/transactions/deal-history/?player={self.source.id}')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class ProfitSplitArrangementTests(APITestCase):
@@ -2369,6 +2538,13 @@ class RequireApprovalTogglesTests(APITestCase):
         settings_obj.require_approval_add_tip = False
         settings_obj.save()
         gd, player = self._open_and_seat(212)
+        # Headroom for the tip below (added 2026-09-28 alongside the new
+        # rake/tip-can't-exceed-chips-issued check) — this test is about the
+        # PIN toggle, not chip-count integrity.
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
         txn = services.record_transaction(
             type=Transaction.Type.TIP, amount=Decimal(5000), recorded_by=self.cashier,
             game_day=gd, tip_category=Transaction.TipCategory.SERVICE_STAFF,
@@ -2380,6 +2556,11 @@ class RequireApprovalTogglesTests(APITestCase):
         settings_obj.require_approval_add_rake = False
         settings_obj.save()
         gd, player = self._open_and_seat(213)
+        # Headroom for the rake below — see test_add_tip_needs_no_pin_once_disabled.
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=gd, player=player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
         txn = services.record_transaction(
             type=Transaction.Type.RAKE, amount=Decimal(15000), recorded_by=self.cashier, game_day=gd,
         )
@@ -2905,13 +3086,34 @@ class DirectPayoutTests(APITestCase):
 
     @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_direct'})
     @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_direct'})
-    def test_at_or_under_threshold_auto_approves_via_api(self, mock_recipient, mock_transfer):
+    def test_under_threshold_executes_immediately_via_api(self, mock_recipient, mock_transfer):
         self.client.force_authenticate(self.owner)
         response = self.client.post(
             '/api/transactions/direct-payout/', {'player': self.player.id, 'amount': '50000'},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(response.data['status'], 'APPROVED')
+
+    @patch('payments.paystack_client.initiate_transfer', return_value={'transfer_code': 'TRF_direct_big'})
+    @patch('payments.paystack_client.create_transfer_recipient', return_value={'recipient_code': 'RCP_direct_big'})
+    def test_above_threshold_still_executes_immediately_no_pending_approval(self, mock_recipient, mock_transfer):
+        # payout_auto_approve_threshold only ever gates a CASHIER's request
+        # (initiate_payout) — an Owner-initiated direct payout has no one
+        # left to seek approval from, so it must never sit PENDING_APPROVAL
+        # regardless of amount. See initiate_direct_payout's 2026-09-28 note.
+        big_player = Player.objects.create(account_code='DP 3', display_name='Big Direct Payout Player')
+        PlayerBankAccount.objects.create(
+            player=big_player, bank_name='GTBank', bank_code='058', account_number='0123456701',
+            account_name='Big Direct Payout Player', is_default=True,
+        )
+        Transaction.objects.create(
+            game_day=None, player=big_player, type=Transaction.Type.PAYMENT_TRANSFER, amount=Decimal(900000),
+            channel=Transaction.Channel.TRANSFER_DVA,
+        )
+        threshold = ClubSettings.load().payout_auto_approve_threshold
+        txn = services.initiate_direct_payout(big_player, threshold + Decimal(1), self.owner)
+        self.assertEqual(txn.status, Transaction.Status.APPROVED)
+        self.assertEqual(txn.approved_by, self.owner)
 
     def test_non_owner_cannot_initiate_a_direct_payout(self):
         self.client.force_authenticate(self.accountant)
