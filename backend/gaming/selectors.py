@@ -29,6 +29,15 @@ CREDIT_TYPES = {
     Transaction.Type.PAYMENT_DEAL,
     Transaction.Type.WRITE_OFF,
     Transaction.Type.DEAL_TRANSFER_IN,
+    # Revised 2026-09-28 (was excluded from both sets — a balance-neutral
+    # audit note only): the paired CHIPS_OUT next to a PROFIT_SPLIT_STAKE
+    # row now always records the FULL physical buy-in (see
+    # services.record_transaction), so the stake needs to be a real credit
+    # to bring the player's balance back down to what they actually owe —
+    # otherwise the house's share would silently double-count as the
+    # player's own debt. See services._apply_profit_split_stake and
+    # gaming/views.py's "SPA" label (constants/transactionTypes.js).
+    Transaction.Type.PROFIT_SPLIT_STAKE,
 }
 # Rake/tips have no player and never touch a player or game-day balance.
 EXCLUDED_FROM_GAME_DAY_LEDGER = {Transaction.Type.RAKE, Transaction.Type.TIP}
@@ -503,3 +512,61 @@ def profit_split_status(arrangement, now=None):
         'exhausted_reason': exhausted_reason,
         'available_stake_this_period': available_this_period,
     }
+
+
+def chips_room_remaining(player, game_day):
+    """
+    The Cashier-facing "how much more can this player be issued right
+    now" — added 2026-09-28, replacing an earlier attempt
+    (effective_chips_limit) that tried to show a single inflated ceiling
+    paired against chips_used_today as an "X of Y used" badge. That
+    pairing broke once any of tonight's buy-ins had partially consumed the
+    deal's stake cap — net debt (X) and gross chips issued don't share a
+    basis except for a single clean-slate buy-in. This function sidesteps
+    that entirely: it's not paired against anything, it's a single live
+    answer, always correct because it's derived fresh from the two
+    quantities the system already tracks correctly:
+      - L' = the player's own remaining debt room (chips_limit minus
+        their current TRUE net debt — already reflects any chips they've
+        returned mid-session, via player_game_day_balance).
+      - A' = the deal's remaining stake cap this period
+        (profit_split_status's available_stake_this_period).
+
+    room = min(L' / (1 − stake%), L' + A')
+
+    Same shape as the "total from a clean slate" formula, applied to what
+    L' is at THIS moment instead of the arrangement's original totals —
+    correct at every point in a night, not just before the first buy-in.
+    Worked example (limit 750000, stake 50%, cap 1000000): before any
+    buy-in, L'=750000, A'=1000000, room=min(1500000, 1750000)=1500000.
+    After one 1500000 buy-in (uses the player's FULL debt room and
+    exactly 750000 of the cap): L'=0, A'=250000, room=min(0, 250000)=0 —
+    correctly zero, matching record_transaction's own block. Reduces to
+    plain (chips_limit - current debt) whenever there's no active
+    arrangement (or it's exhausted, or stake%<=0) — one formula, one code
+    path, for both cases.
+
+    record_transaction's own chips_limit enforcement does not call this —
+    it already gets the correct answer, per buy-in, by checking the
+    player's own portion (after _apply_profit_split_stake) against the
+    real chips_limit directly. This exists purely for display.
+    """
+    if player.chips_limit is None:
+        return None
+    current_balance = player_game_day_balance(player, game_day) if game_day else Decimal('0')
+    current_debt = max(-current_balance, Decimal('0'))
+    remaining_debt_room = max(player.chips_limit - current_debt, Decimal('0'))
+
+    arrangement = (
+        ProfitSplitArrangement.objects.filter(player=player, is_active=True).order_by('-created_at').first()
+    )
+    if arrangement is None or arrangement.house_stake_pct <= 0:
+        return remaining_debt_room
+    status = profit_split_status(arrangement)
+    if status['is_exhausted']:
+        return remaining_debt_room
+
+    stake_fraction = arrangement.house_stake_pct / Decimal('100')
+    via_stake_ratio = remaining_debt_room / (Decimal('1') - stake_fraction)
+    via_remaining_cap = remaining_debt_room + status['available_stake_this_period']
+    return min(via_stake_ratio, via_remaining_cap).quantize(Decimal('1'))

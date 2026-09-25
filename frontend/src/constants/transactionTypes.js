@@ -45,8 +45,14 @@ export const TRANSACTION_TYPES = {
   DEAL_TRANSFER_IN: { label: 'Deal Transfer (in)', actionLabel: 'Deal Transfer', lane: 'other', physicalCount: false, amountTone: 'credit' },
   // "Deals" Profit Split's house-covered portion of a buy-in — never a
   // player-initiated entry, always auto-created by record_transaction's
-  // CHIPS_OUT branch. Same reason for adding a label 2026-09-23.
-  PROFIT_SPLIT_STAKE: { label: 'Profit Split Stake', actionLabel: 'Profit Split Stake', lane: 'other', physicalCount: false },
+  // CHIPS_OUT branch, paired via linked_transaction with the CHIPS_OUT it
+  // offsets. Labeled "SPA" (Stake/Profit-split Agreement) 2026-09-28, per
+  // explicit instruction — this is what the Cashier sees on their own
+  // ledger now that it's a real credit (see gaming.selectors.CREDIT_TYPES),
+  // not the earlier balance-neutral "Profit Split Stake" label from a time
+  // this was hidden/informational only. amountTone: credit, not neutral,
+  // now that it's a real balance-affecting entry like any other credit.
+  PROFIT_SPLIT_STAKE: { label: 'SPA', actionLabel: 'SPA', lane: 'other', physicalCount: false, amountTone: 'credit' },
 }
 
 // Status colors reuse the same badge--* classes as GameDay/Payout status

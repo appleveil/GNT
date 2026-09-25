@@ -537,13 +537,17 @@ def void_transaction(transaction_obj, actor, reason):
     Once closed (or for a between-game-day entry that's otherwise settled),
     only the Owner can amend/void it.
 
-    A Deals Transfer's two legs (DEAL_TRANSFER_OUT/IN, see
-    record_deal_transfer) are voided together, atomically — voiding only
-    one half would leave one player's debit undone without undoing the
-    other's matching credit, an inconsistent ledger. The linked leg is
-    voided with the same actor/reason, no separate authorization check
-    (voiding a transfer at all is already Owner-only in practice, since
-    Transfer creation itself is).
+    Any linked pair is voided together, atomically, via `linked_transaction`
+    — voiding only one half would leave one side's debit/credit undone
+    without undoing its match, an inconsistent ledger. Two cases use this
+    today: a Deals Transfer's two legs (DEAL_TRANSFER_OUT/IN, see
+    record_deal_transfer) and a stake-split CHIPS_OUT with its
+    PROFIT_SPLIT_STAKE credit (see record_transaction's 2026-09-28
+    revision — without this, voiding the buy-in would leave the house's
+    stake credit standing, wrongly crediting the player for chips they
+    never actually received). The linked leg is voided with the same
+    actor/reason, no separate authorization check (voiding either kind of
+    pair is already gated the same way creating it was).
     """
     game_day = transaction_obj.game_day
     is_open = game_day is None or game_day.status == GameDay.Status.OPEN
@@ -623,6 +627,15 @@ def _apply_profit_split_stake(player, amount):
     max cumulative value reached) all fall through to "house covers
     nothing," so this is a no-op for every player without one, by
     construction.
+
+    player_portion is used two ways by the caller: (1) as the amount of the
+    real PROFIT_SPLIT_STAKE credit that brings the player's balance back
+    down from the full CHIPS_OUT to what they actually owe (house_portion,
+    strictly — player_portion itself is never written anywhere; it exists
+    here only for the chips_limit check, which still enforces against it
+    directly). The CHIPS_OUT row itself is always recorded at the full
+    `amount`, physical-chip-count-accurate, regardless of any stake — see
+    record_transaction's 2026-09-28 revision.
     """
     arrangement = (
         ProfitSplitArrangement.objects.filter(player=player, is_active=True).order_by('-created_at').first()
@@ -712,6 +725,18 @@ def record_transaction(
     # owed by the player — see _apply_profit_split_stake. Computed BEFORE
     # the chips_limit check below, since chips_limit caps the player's own
     # debt, not the total chips handed to them at the table.
+    #
+    # This check itself needed NO changes for the 2026-09-28 revision below
+    # (full-amount CHIPS_OUT + a real PROFIT_SPLIT_STAKE credit) — it was
+    # already checking player_portion (the player's own real share) against
+    # their own real chips_limit, which is exactly right regardless of how
+    # the buy-in ends up recorded. It already naturally "reduces back to
+    # the original chips_limit" once the deal's own cap is exhausted, since
+    # _apply_profit_split_stake's house_portion then collapses to 0 and
+    # player_portion rises to the full amount — no special-casing needed.
+    # See selectors.effective_chips_limit for the Cashier-facing DISPLAY
+    # number this same math is mirrored into, so the Cashier's own screen
+    # stays internally consistent without ever being told a deal exists.
     player_portion, house_portion, arrangement = amount, Decimal('0'), None
     if type == Transaction.Type.CHIPS_OUT and player is not None:
         player_portion, house_portion, arrangement = _apply_profit_split_stake(player, amount)
@@ -840,9 +865,18 @@ def record_transaction(
         _ensure_seated(game_day, player, recorded_by, block_departed=(type == Transaction.Type.CHIPS_OUT))
 
     with db_transaction.atomic():
+        # Revised 2026-09-28: amount is always the FULL amount, matching the
+        # chips actually physically handed to the player — was
+        # player_portion, which under-recorded chips_out_total by the
+        # house's share and broke physical chip-count integrity (the whole
+        # point of this schema is that the four ledgers, derived from one
+        # verified stream, can never disagree — see CONCEPT.md). The
+        # PROFIT_SPLIT_STAKE row below is now a real credit (see
+        # selectors.CREDIT_TYPES) that brings the player's balance back
+        # down to their true player_portion, instead of baking the discount
+        # directly into this row.
         txn = Transaction.objects.create(
-            game_day=game_day, player=player, type=type,
-            amount=player_portion if type == Transaction.Type.CHIPS_OUT else amount,
+            game_day=game_day, player=player, type=type, amount=amount,
             currency=currency, conversion_rate=conversion_rate,
             channel=channel or DEFAULT_CHANNEL_BY_TYPE[type], notes=notes,
             recorded_by=recorded_by, floor_manager=fm,
@@ -851,12 +885,20 @@ def record_transaction(
             profit_split_arrangement=arrangement if house_portion > 0 else None,
         )
         if house_portion > 0:
-            Transaction.objects.create(
+            stake_txn = Transaction.objects.create(
                 game_day=game_day, player=player, type=Transaction.Type.PROFIT_SPLIT_STAKE,
                 amount=house_portion, channel=Transaction.Channel.DEAL,
                 notes=f'House stake ({arrangement.house_stake_pct}%) toward this buy-in',
                 recorded_by=recorded_by, profit_split_arrangement=arrangement,
+                linked_transaction=txn,
             )
+            # Bidirectional, same pattern as record_deal_transfer's OUT/IN
+            # pair — see void_transaction, which voids whichever leg's
+            # linked_transaction it finds along with it. Without this, a
+            # voided CHIPS_OUT would leave its stake credit standing,
+            # wrongly crediting the player for a buy-in that never happened.
+            txn.linked_transaction = stake_txn
+            txn.save(update_fields=['linked_transaction'])
     return txn
 
 

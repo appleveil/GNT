@@ -2047,6 +2047,77 @@ with a throwaway transfer between two players — each player's own history
 now shows exactly their own leg (no duplication), real numbers (no NaN),
 ~0.1s; throwaway data cleaned up afterward.
 
+### Profit-Split stake redesign: full-amount buy-ins, a real "SPA" credit, live chips-room display (2026-09-28)
+
+Explicit follow-up on how a Profit-Split ("stake") deal should affect a
+player's buy-in. Root problem found while tracing the existing code: a
+stake-covered `CHIPS_OUT` was recorded at the DISCOUNTED amount
+(`player_portion`), not what was physically handed to the player — under-
+recording `chips_out_total` (the figure the CHIPS_IN ceiling check, the
+rake/tip ceiling check, and close-time `chips_variance` all depend on) and
+already showing the Cashier a smaller number than they actually issued.
+
+1. **`CHIPS_OUT.amount` is now always the full physical amount**, never
+   `player_portion` — chip-count integrity restored regardless of any deal.
+2. **`PROFIT_SPLIT_STAKE` is now a real credit** (`selectors.CREDIT_TYPES`,
+   was excluded from both DEBIT/CREDIT_TYPES — purely informational
+   before). It's what brings the player's balance back down to what they
+   actually owe. Linked bidirectionally to its `CHIPS_OUT` via
+   `linked_transaction` (same mechanism `record_deal_transfer`'s OUT/IN
+   pair already used) — `void_transaction`'s existing linked-pair voiding
+   now also covers this pair, so voiding either side voids both instead
+   of leaving a stray credit or debit behind.
+3. **Labeled "SPA"** in `constants/transactionTypes.js`, per explicit
+   instruction — visible on the Cashier's own ledger now, not hidden.
+   Superseded an earlier, more complicated direction (attempted mid-session:
+   hide the stake entry from the Cashier entirely, show them an inflated
+   `chips_limit`) after working through the concrete numbers and finding a
+   real disconnect risk between what the Cashier would see and what the
+   system would actually allow.
+4. **`chips_limit` enforcement itself needed zero code changes** —
+   `record_transaction` already checked the player's own portion (via
+   `_apply_profit_split_stake`) against their real `chips_limit`, which is
+   correct at any stake % and already "reduces back to the real limit"
+   automatically once the deal's own cap is exhausted, with no special-
+   casing. This was true before this change and remains true after.
+5. **New `selectors.chips_room_remaining(player, game_day)`** — a live,
+   single "how much more can be issued right now" figure, wired into
+   `GameDaySeatedPlayerSerializer` and `ActiveGameDayView.vue`'s credit-
+   limit badge (now "X used · room for Y more") and
+   `TransactionEntryModal.vue`'s client-side guard (previously computed
+   `chips_limit - chips_used_today` locally, which ignores an active deal
+   entirely and would warn well before the real limit). Formula:
+   `min(L' / (1 − stake%), L' + A')` where `L'` = the player's own
+   remaining debt room (`chips_limit` minus their current TRUE net debt)
+   and `A'` = the deal's remaining stake cap this period
+   (`profit_split_status`). An earlier attempt at this
+   (`effective_chips_limit`, since removed) tried to show a single
+   inflated `chips_limit` value paired against the existing
+   `chips_used_today` as an "X of Y used" badge — worked from a clean
+   slate (750k limit/50% stake/1M cap → 1.5M) but broke the moment any
+   buy-in had partially consumed the cap, because net debt (X) and gross
+   chips issued aren't the same basis except for a single from-scratch
+   buy-in. `chips_room_remaining` sidesteps the pairing problem by not
+   pairing anything — it's one live number, correct at any point in a
+   session, proven by taking exactly the predicted room in a real buy-in
+   and landing exactly at the real limit (not over, not short).
+   `Player.chips_limit` itself, and what `chips_used_today` means, are
+   both completely unchanged.
+
+Verified: 34 tests in `ProfitSplitArrangementTests` (rewrote every
+existing assertion that depended on the old discounted-`CHIPS_OUT`
+behavior; added linked-transaction pairing/void-cascade tests and
+`chips_room_remaining` tests, including one that performs two real
+buy-ins and confirms the room figure predicted before each one exactly
+matches what the real enforcement allows), full suite green (313 tests),
+`npm run build` clean. Live-verified against the `test1` tenant: seated a
+player with an active 50%/₦1M-cap arrangement, confirmed the table's
+auto-issued default buy-in split correctly (₦500,000 physical / ₦250,000
+stake credit / ₦250,000 net debt), a further manual ₦300,000 buy-in split
+the same way, and `chips_room_remaining` matched the hand-computed formula
+at both points (₦1,000,000, then ₦700,000); throwaway data cleaned up
+afterward.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

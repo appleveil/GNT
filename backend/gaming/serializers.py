@@ -366,6 +366,13 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
     bank_accounts = PlayerBankAccountSerializer(source='player.bank_accounts', many=True)
     balance = serializers.SerializerMethodField()
     chips_used_today = serializers.SerializerMethodField()
+    # Live "how much more can be issued right now" — see
+    # selectors.chips_room_remaining. Added 2026-09-28 specifically so a
+    # Profit-Split stake deal doesn't make the plain chips_limit badge
+    # misleading (a Cashier comparing chips_used_today to the real
+    # chips_limit would think less room is left than a stake deal actually
+    # allows). None whenever chips_limit itself is None (no limit set).
+    chips_room_remaining = serializers.SerializerMethodField()
     gaming_account = serializers.SerializerMethodField()
     added_at = serializers.DateTimeField()
     # Null = still active at the table; set = "left the table" — see
@@ -393,6 +400,10 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
             return None
         balance = self.get_balance(obj)
         return -balance if balance < 0 else Decimal('0')
+
+    def get_chips_room_remaining(self, obj):
+        from . import selectors
+        return selectors.chips_room_remaining(obj.player, obj.game_day)
 
     def get_gaming_account(self, obj):
         # None until provisioned — mirrors accounts.PlayerSerializer.get_gaming_account.

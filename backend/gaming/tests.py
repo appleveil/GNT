@@ -2196,13 +2196,22 @@ class ProfitSplitArrangementTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     # --- buy-in stake application ---
+    # Revised 2026-09-28: CHIPS_OUT.amount is now ALWAYS the full physical
+    # amount (never player_portion — see record_transaction), and the
+    # PROFIT_SPLIT_STAKE row is now a real credit (selectors.CREDIT_TYPES)
+    # that brings the player's balance back down to what they actually
+    # owe, instead of the discount being baked directly into the CHIPS_OUT
+    # row. Every test below that used to assert txn.amount == the
+    # discounted figure now asserts txn.amount == the full requested
+    # amount, plus the resulting player_game_day_balance to prove the
+    # discount still lands correctly via the stake credit.
 
     def test_buy_in_is_split_between_player_and_house(self):
         services.create_profit_split_arrangement(
             self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
         )
         txn = self._buy_in(100000)
-        self.assertEqual(txn.amount, Decimal(50000))
+        self.assertEqual(txn.amount, Decimal(100000))  # full physical amount, not the discount
         stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
         self.assertEqual(stake_txn.amount, Decimal(50000))
         self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-50000))
@@ -2212,10 +2221,11 @@ class ProfitSplitArrangementTests(APITestCase):
             self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(20000),
         )
         txn = self._buy_in(100000)
+        self.assertEqual(txn.amount, Decimal(100000))  # full physical amount
         # 50% of 100000 = 50000, but capped at 20000.
-        self.assertEqual(txn.amount, Decimal(80000))
         stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
         self.assertEqual(stake_txn.amount, Decimal(20000))
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-80000))
 
     def test_no_arrangement_means_no_split(self):
         txn = self._buy_in(100000)
@@ -2230,14 +2240,21 @@ class ProfitSplitArrangementTests(APITestCase):
         txn = self._buy_in(100000)
         self.assertEqual(txn.amount, Decimal(100000))
 
-    def test_profit_split_stake_never_touches_player_balance_directly(self):
-        # It's excluded from both DEBIT_TYPES/CREDIT_TYPES by design — see
-        # selectors.py. Confirmed here rather than just by construction.
+    def test_stake_credit_offsets_the_players_balance(self):
+        # Renamed 2026-09-28 (was test_profit_split_stake_never_touches_
+        # player_balance_directly, asserting the exact opposite — that was
+        # the old, informational-only design). Same 0 end result at 100%
+        # stake, reached a completely different way now: a full -50000
+        # CHIPS_OUT offset by a real +50000 stake credit, not a single
+        # already-discounted CHIPS_OUT of 0.
         services.create_profit_split_arrangement(
             self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(1000000),
         )
-        self._buy_in(50000)
-        # Entirely house-covered — player's own debt is 0.
+        txn = self._buy_in(50000)
+        self.assertEqual(txn.amount, Decimal(50000))  # full amount, even at 100% house stake
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        self.assertEqual(stake_txn.amount, Decimal(50000))
+        # Entirely house-covered — player's own debt still nets to 0.
         self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
 
     def test_cumulative_cap_exhausts_the_arrangement(self):
@@ -2246,13 +2263,17 @@ class ProfitSplitArrangementTests(APITestCase):
             reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY, max_cumulative_value=Decimal(30000),
         )
         first = self._buy_in(20000)
-        self.assertEqual(first.amount, Decimal(0))  # fully house-covered
+        self.assertEqual(first.amount, Decimal(20000))  # full amount — fully house-covered via its stake credit
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
         second = self._buy_in(20000)
+        self.assertEqual(second.amount, Decimal(20000))
         # Only 10000 left of the 30000 cumulative cap; the rest (10000) is on the player.
-        self.assertEqual(second.amount, Decimal(10000))
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-10000))
         third = self._buy_in(20000)
-        # Cumulative cap fully exhausted — entirely on the player now.
         self.assertEqual(third.amount, Decimal(20000))
+        # Cumulative cap fully exhausted — entirely on the player now, no stake credit at all.
+        self.assertFalse(Transaction.objects.filter(pk=third.pk, profit_split_arrangement__isnull=False).exists())
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-30000))
 
     def test_daily_reset_gives_a_fresh_per_period_cap(self):
         arrangement = services.create_profit_split_arrangement(
@@ -2260,14 +2281,17 @@ class ProfitSplitArrangementTests(APITestCase):
             reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY,
         )
         first = self._buy_in(20000)
-        self.assertEqual(first.amount, Decimal(0))  # today's cap fully used
+        self.assertEqual(first.amount, Decimal(20000))  # full amount
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))  # today's cap fully used
 
         # Backdate the arrangement by 2 days so "now" falls in a new period.
         ProfitSplitArrangement.objects.filter(pk=arrangement.pk).update(
             created_at=timezone.now() - timedelta(days=2),
         )
         second = self._buy_in(20000)
-        self.assertEqual(second.amount, Decimal(0))  # fresh period, fresh cap
+        self.assertEqual(second.amount, Decimal(20000))
+        # Fresh period, fresh cap — still fully covered, balance unchanged.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
 
     def test_ended_arrangement_means_no_split(self):
         services.create_profit_split_arrangement(
@@ -2276,6 +2300,116 @@ class ProfitSplitArrangementTests(APITestCase):
         )
         txn = self._buy_in(100000)
         self.assertEqual(txn.amount, Decimal(100000))
+
+    # --- linked_transaction pairing (added 2026-09-28) ---
+
+    def test_chips_out_and_its_stake_credit_are_linked_both_ways(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        txn = self._buy_in(100000)
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        txn.refresh_from_db()
+        self.assertEqual(txn.linked_transaction_id, stake_txn.pk)
+        self.assertEqual(stake_txn.linked_transaction_id, txn.pk)
+
+    def test_voiding_the_chips_out_also_voids_its_stake_credit(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        txn = self._buy_in(100000)
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        services.void_transaction(txn, self.owner, 'mistaken buy-in')
+        stake_txn.refresh_from_db()
+        self.assertTrue(stake_txn.is_voided)
+        # Nothing left outstanding for this player.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+    def test_voiding_the_stake_credit_also_voids_its_chips_out(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        txn = self._buy_in(100000)
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        services.void_transaction(stake_txn, self.owner, 'mistaken stake')
+        txn.refresh_from_db()
+        self.assertTrue(txn.is_voided)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+    def test_no_arrangement_means_no_linked_transaction(self):
+        txn = self._buy_in(100000)
+        self.assertIsNone(txn.linked_transaction_id)
+
+    # --- chips_room_remaining (added 2026-09-28) ---
+
+    def test_room_uses_stake_ratio_when_it_is_the_tighter_bound(self):
+        self.player.chips_limit = Decimal(750000)
+        self.player.save()
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        # min(750000 / 0.5, 750000 + 1000000) = min(1500000, 1750000) = 1500000
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(1500000))
+
+    def test_room_uses_remaining_cap_when_it_is_the_tighter_bound(self):
+        self.player.chips_limit = Decimal(2000000)
+        self.player.save()
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(500000),
+        )
+        # min(2000000 / 0.5, 2000000 + 500000) = min(4000000, 2500000) = 2500000
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(2500000))
+
+    def test_room_stays_correct_across_multiple_buy_ins_then_reaches_exactly_zero(self):
+        # Real buy-ins (not raw Transaction rows) — this proves the figure
+        # this function predicts BEFORE each buy-in is exactly how much
+        # more record_transaction's own chips_limit gate actually allows,
+        # not just a formula that happens to match on paper. See
+        # PLAN.md's dated entry for why an earlier version of this
+        # (effective_chips_limit, since removed) got this wrong once any
+        # buy-in had partially consumed the deal's cap.
+        self.player.chips_limit = Decimal(750000)
+        self.player.save()
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        self._buy_in(600000)  # house covers 300000, player owes 300000
+        # L'=750000-300000=450000, A'=1000000-300000=700000
+        # room = min(450000/0.5, 450000+700000) = min(900000, 1150000) = 900000
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(900000))
+
+        # Taking exactly the predicted room lands the player EXACTLY at
+        # their real limit — must succeed, not be blocked.
+        self._buy_in(900000)  # house covers 450000, player owes 450000 more (total debt 750000)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-750000))
+        # L'=750000-750000=0 — no more room at all, regardless of leftover cap.
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(0))
+
+    def test_room_is_plain_remaining_limit_without_an_arrangement(self):
+        self.player.chips_limit = Decimal(750000)
+        self.player.save()
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(750000))
+        self._buy_in(300000)
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(450000))
+
+    def test_room_is_none_without_a_chips_limit_set(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        self.assertIsNone(selectors.chips_room_remaining(self.player, self.game_day))
+
+    def test_seated_players_endpoint_shows_room_remaining(self):
+        self.player.chips_limit = Decimal(750000)
+        self.player.save()
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/')
+        row = next(r for r in response.data if r['id'] == self.player.id)
+        self.assertEqual(Decimal(str(row['chips_room_remaining'])), Decimal(1500000))
+        self.assertEqual(Decimal(str(row['chips_limit'])), Decimal(750000))  # unchanged, still the real number
 
     # --- status endpoint ---
 

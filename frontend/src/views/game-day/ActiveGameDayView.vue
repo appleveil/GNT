@@ -493,8 +493,16 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <div class="panel-badges">
               <div v-if="selectedPlayer?.payout_failed" class="payout-failed-badge">Payout failed — ask the Owner</div>
               <div v-if="selectedPlayer?.left_at" class="left-badge">Left the table</div>
+              <!-- chips_room_remaining (added 2026-09-28) — a live "how much
+                   more" figure, not chips_limit itself: paired against
+                   chips_limit in an "X of Y" badge, a Profit-Split stake
+                   deal would silently allow more than the badge promised
+                   (net debt and gross chips issued aren't the same basis —
+                   see selectors.chips_room_remaining's own comment). This
+                   already collapses to the equivalent of the old badge
+                   whenever there's no active deal. -->
               <div v-else-if="selectedPlayer?.chips_limit != null" class="chips-limit-badge">
-                Credit limit: {{ N(selectedPlayer.chips_used_today) }} of {{ N(selectedPlayer.chips_limit) }} used
+                Credit limit: {{ N(selectedPlayer.chips_used_today) }} used &middot; room for {{ N(selectedPlayer.chips_room_remaining) }} more
               </div>
             </div>
           </div>

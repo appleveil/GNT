@@ -100,9 +100,13 @@ const nairaAmount = computed(() => {
 
 // Client-side mirror of record_transaction's chips_limit guard (backend still
 // enforces it — this is just so the cashier sees the block before submitting).
+// Reads player.chips_room_remaining directly (gaming.selectors.
+// chips_room_remaining) rather than recomputing chips_limit - chips_used_today
+// here — that subtraction ignores an active Profit-Split stake deal and
+// would warn the Cashier well before the real (higher) limit is actually hit.
 const chipsRemaining = computed(() => {
-  if (props.type !== 'CHIPS_OUT' || !props.player || props.player.chips_limit == null) return null
-  return Number(props.player.chips_limit) - Number(props.player.chips_used_today || 0)
+  if (props.type !== 'CHIPS_OUT' || !props.player || props.player.chips_room_remaining == null) return null
+  return Number(props.player.chips_room_remaining)
 })
 const exceedsChipsLimit = computed(
   () => chipsRemaining.value !== null && Number(amount.value || 0) > chipsRemaining.value,
@@ -238,8 +242,8 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
         />
       </div>
       <p v-if="exceedsChipsLimit" class="warn-text">
-        This exceeds {{ player.display_name }}'s credit limit for tonight ({{ N(player.chips_limit) }} total,
-        {{ N(player.chips_used_today) }} already used). Lower the amount, or ask the Owner to raise the limit.
+        This exceeds {{ player.display_name }}'s available room for tonight ({{ N(chipsRemaining) }} left).
+        Lower the amount, or ask the Owner to raise the limit.
       </p>
 
       <template v-if="config.needsCurrency">
