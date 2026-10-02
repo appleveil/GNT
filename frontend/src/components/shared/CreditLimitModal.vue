@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import api from '@/api/axios'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
+import { readApiError } from '@/utils/apiError'
 
 // Owner-only "Credit limit" action (2026-09-24, relabeled 2026-09-25 — see
 // PLAN.md), reached from the Players page's ⋮ menu — same PATCH
@@ -36,7 +37,7 @@ async function onSubmit() {
     toast.success('Credit limit updated.')
     emit('saved', data)
   } catch (err) {
-    error.value = err.response?.data?.chips_limit?.[0] || 'Could not update the credit limit.'
+    error.value = readApiError(err, 'Could not update the credit limit.').message
   } finally {
     submitting.value = false
   }
@@ -101,12 +102,5 @@ async function onSubmit() {
 }
 .ff:focus { outline: none; border-color: var(--accent); }
 
-.form-error {
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-}
 .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 </style>

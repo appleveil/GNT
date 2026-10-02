@@ -12,6 +12,7 @@ import PlayerBankAccountModal from '@/components/shared/PlayerBankAccountModal.v
 import { canVoidTransaction } from '@/utils/canVoid'
 import { currentPlayerBalance } from '@/utils/nettedPayout'
 import { useToast } from '@/composables/useToast'
+import { readApiError } from '@/utils/apiError'
 import api from '@/api/axios'
 
 const auth = useAuthStore()
@@ -135,7 +136,6 @@ const seatSlots = computed(() => {
     return { seatNumber, player: bySeat.get(seatNumber) || null }
   })
 })
-const unassignedPlayers = computed(() => players.value.filter(p => !p.left_at && !p.seat_number))
 const departedPlayers = computed(() => players.value.filter(p => p.left_at))
 
 function selectPlayer(p) {
@@ -195,7 +195,7 @@ async function onPickMoveSeat(seatNumber) {
     toast.success(`${player.display_name} moved to Seat ${seatNumber}.`)
     refreshAll()
   } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not move this player.')
+    toast.error(readApiError(err, 'Could not move this player.').message)
   }
 }
 
@@ -217,7 +217,7 @@ async function onPickRejoinSeat(seatNumber) {
     toast.success(`${player.display_name} rejoined at Seat ${seatNumber}.`)
     refreshAll()
   } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not rejoin this player.')
+    toast.error(readApiError(err, 'Could not rejoin this player.').message)
   }
 }
 
@@ -264,7 +264,7 @@ async function onPayoutClick() {
     toast.success(`Payout of ${N(data.amount)} ${verb} for ${p.display_name}.`)
     refreshAll()
   } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not initiate the payout.')
+    toast.error(readApiError(err, 'Could not initiate the payout.').message)
   } finally {
     payoutSubmitting.value = false
   }
@@ -328,7 +328,7 @@ async function onLeaveWithoutChips() {
     if (selectedPlayerId.value === player.id) selectedPlayerId.value = null
     refreshAll()
   } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not mark this player as left.')
+    toast.error(readApiError(err, 'Could not mark this player as left.').message)
   }
 }
 
@@ -458,17 +458,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
                   <span class="pill-label">{{ s.player ? `${s.player.display_name} · ${s.player.account_code}` : 'Empty' }}</span>
                 </button>
               </div>
-
-              <div v-if="unassignedPlayers.length" class="pills pills--secondary">
-                <div class="pills-label">Unassigned</div>
-                <button
-                  v-for="p in unassignedPlayers" :key="p.id" type="button" class="pill"
-                  :class="{ 'pill--active': p.id === selectedPlayerId }"
-                  @click="selectPlayer(p)"
-                >
-                  <span class="pill-label">{{ p.display_name }} &middot; {{ p.account_code }}</span>
-                </button>
-              </div>
             </template>
 
             <div v-else class="pills pills--secondary">
@@ -493,16 +482,19 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <div class="panel-badges">
               <div v-if="selectedPlayer?.payout_failed" class="payout-failed-badge">Payout failed — ask the Owner</div>
               <div v-if="selectedPlayer?.left_at" class="left-badge">Left the table</div>
-              <!-- chips_room_remaining (added 2026-09-28) — a live "how much
-                   more" figure, not chips_limit itself: paired against
-                   chips_limit in an "X of Y" badge, a Profit-Split stake
-                   deal would silently allow more than the badge promised
-                   (net debt and gross chips issued aren't the same basis —
-                   see selectors.chips_room_remaining's own comment). This
-                   already collapses to the equivalent of the old badge
-                   whenever there's no active deal. -->
-              <div v-else-if="selectedPlayer?.chips_limit != null" class="chips-limit-badge">
-                Credit limit: {{ N(selectedPlayer.chips_used_today) }} used &middot; room for {{ N(selectedPlayer.chips_room_remaining) }} more
+              <!-- Revised 2026-09-26 — the Cashier now sees ONE figure, not a
+                   paired "X used / Y left" badge: with a Profit-Split deal in
+                   play, the credit limit and "used" figure don't share a
+                   basis with the chips actually handed out (that pairing is
+                   exactly what confused the Cashier — see PLAN.md's dated
+                   entry), and it partially revealed the deal's existence.
+                   chips_room_remaining is still the one live source (see its
+                   own comment) — this just stops pairing it against
+                   anything. The credit limit, chips_used_today, and the
+                   deal's terms are never shown to the Cashier; the Owner and
+                   Accountant still see them via RosterListView. -->
+              <div v-else-if="selectedPlayer?.chips_room_remaining != null" class="chips-limit-badge">
+                Available now: {{ N(selectedPlayer.chips_room_remaining) }}
               </div>
             </div>
           </div>
@@ -591,6 +583,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
     <TransactionEntryModal
       v-if="entryModal" :type="entryModal.type" :player="entryModal.player" :game-day-id="gameDay.current.id"
+      :default-amount="gameDay.current.buy_in_amount || 500000"
       @close="onEntryClosed" @saved="onEntrySaved"
     />
 
@@ -809,7 +802,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .pill--active .pill-seat { background: rgba(255, 255, 255, 0.25); }
 .pills--secondary { margin-top: -4px; }
-.pills-label { grid-column: 1 / -1; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: -2px; }
 
 .seat-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 14px 0 4px; }
 .seat-option {

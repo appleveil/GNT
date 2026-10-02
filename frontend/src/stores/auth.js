@@ -12,6 +12,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { jwtDecode } from 'jwt-decode'
 import api, { clearAuth } from '@/api/axios'
+import { readApiError } from '@/utils/apiError'
 
 function decodeUser(accessToken) {
   const claims = jwtDecode(accessToken)
@@ -83,10 +84,7 @@ export const useAuthStore = defineStore('auth', () => {
       user.value = decodeUser(data.access)
       return { ok: true }
     } catch (err) {
-      const msg = err.response?.data?.detail
-        || Object.values(err.response?.data || {})[0]?.[0]
-        || 'Login failed. Check your username and password.'
-      return { ok: false, error: msg }
+      return { ok: false, error: readApiError(err, 'Login failed. Check your username and password.').message }
     } finally {
       loading.value = false
     }

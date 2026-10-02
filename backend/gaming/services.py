@@ -13,8 +13,37 @@ from django.utils import timezone
 from accounts.models import AccountCode, FloorManager, Player, StaffMember, StaffUser
 
 from . import selectors
+from .activity import log_activity
 from .exceptions import AuthorizationError, InvalidStateError, MinimumPlayerTimeNotMetError, TableFullError
-from .models import ClubSettings, ConversionRate, GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
+from .models import (
+    ActivityLog,
+    ClubSettings,
+    ConversionRate,
+    GameDay,
+    GameDayPlayer,
+    GameDaySummary,
+    ProfitSplitArrangement,
+    Transaction,
+)
+
+# record_transaction's own Activity log entry, keyed by Transaction.Type —
+# only the types a Cashier/Owner actually chooses from the entry grid, not
+# the system-generated side effects record_transaction ALSO creates
+# internally (PROFIT_SPLIT_STAKE, PLAYER_BALANCE_IN/OUT — covered by the
+# primary action's own entry) or the ones that go through their own
+# dedicated function instead (DEAL_TRANSFER_OUT/IN via record_deal_transfer,
+# PAYOUT via initiate_payout/approve_payout).
+ACTIVITY_LOG_ACTION_BY_TRANSACTION_TYPE = {
+    Transaction.Type.CHIPS_OUT: ActivityLog.Action.CHIPS_OUT,
+    Transaction.Type.CHIPS_IN: ActivityLog.Action.CHIPS_IN,
+    Transaction.Type.PAYMENT_CASH: ActivityLog.Action.PAYMENT,
+    Transaction.Type.PAYMENT_TRANSFER: ActivityLog.Action.PAYMENT,
+    Transaction.Type.PAYMENT_POS: ActivityLog.Action.PAYMENT,
+    Transaction.Type.PAYMENT_DEAL: ActivityLog.Action.PAYMENT,
+    Transaction.Type.RAKE: ActivityLog.Action.RAKE,
+    Transaction.Type.TIP: ActivityLog.Action.TIP,
+    Transaction.Type.WRITE_OFF: ActivityLog.Action.WRITE_OFF,
+}
 
 # A real table only has so many seats. Revised 2026-09-15: a departed player
 # returns ONLY by being issued chips (CHIPS_OUT) — never a bare re-add — and
@@ -135,11 +164,13 @@ def open_game_day(
         owner, fm = None, None
     if buy_in_amount is None and table is not None:
         buy_in_amount = table.default_buy_in
-    return GameDay.objects.create(
+    gd = GameDay.objects.create(
         number=number, started_at=started_at, status=GameDay.Status.OPEN,
         opened_by=owner, opened_by_floor_manager=fm,
         game=game, table=table, buy_in_amount=buy_in_amount,
     )
+    log_activity(operator, ActivityLog.Action.OPEN_GAME_DAY, f'Opened Game-Day #{gd.number}', game_day=gd)
+    return gd
 
 
 def close_blocked_reason(game_day):
@@ -252,6 +283,10 @@ def close_game_day(
     summary_data = selectors.game_day_summary_data(game_day)
     summary_data['chip_discrepancy_reason'] = discrepancy_reason.strip() if discrepancy is not None else ''
     GameDaySummary.objects.update_or_create(game_day=game_day, defaults=summary_data)
+    log_activity(
+        operator, ActivityLog.Action.CLOSE_GAME_DAY, f'Closed Game-Day #{game_day.number}', game_day=game_day,
+        details={'discrepancy_reason': discrepancy_reason.strip()} if discrepancy is not None else {},
+    )
     return game_day
 
 
@@ -369,17 +404,21 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
     directly. Left null (e.g. the bulk "+ Add Player" flow), the player is
     seated "unassigned" and can be placed into a seat later via move_seat.
 
-    Added 2026-09-21: if this game-day has a Table and a Buy-in amount set
-    (see GameDay.table/buy_in_amount and the "Start game-day" flow), and
-    this player has no CHIPS_OUT yet tonight, seating them ALSO
-    automatically issues that default buy-in — house to the player — with
-    NO Floor Manager PIN at all. This is the one deliberate automation
-    confirmed for this specific case (see record_transaction's
-    `_skip_pin_check`); a manual top-up beyond this default still requires
-    the PIN, exactly as before. Wrapped in one atomic block with the
-    seating itself: a rejection here (e.g. the default exceeds this
-    player's chips_limit) rolls the seat back too, rather than leaving
-    them seated but unchipped.
+    Added 2026-09-21, made OPT-IN 2026-10-02 (see
+    ClubSettings.auto_issue_buy_in_on_seating, default off): if this
+    game-day has a Table and a Buy-in amount set (see GameDay.table/
+    buy_in_amount and the "Start game-day" flow), and this player has no
+    CHIPS_OUT yet tonight, seating them can ALSO automatically issue that
+    default buy-in — house to the player — with NO Floor Manager PIN at
+    all. This is the one deliberate automation confirmed for this specific
+    case (see record_transaction's `_skip_pin_check`); a manual top-up
+    beyond this default still requires the PIN, exactly as before. Off by
+    default: Issue Chips now pre-fills the same buy_in_amount (see
+    TransactionEntryModal.vue), so the Cashier issues the first buy-in
+    themselves instead of chips appearing with no action behind them.
+    Wrapped in one atomic block with the seating itself: a rejection here
+    (e.g. the default exceeds this player's chips_limit) rolls the seat
+    back too, rather than leaving them seated but unchipped.
 
     Revised 2026-09-25: `player_fields` no longer carries `account_code` —
     a brand-new player is assigned the next available one from the
@@ -409,6 +448,7 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
             GameDayPlayer.objects.filter(game_day=game_day, player=player).update(seat_number=seat_number)
 
         if (
+            ClubSettings.load().auto_issue_buy_in_on_seating and
             game_day.table_id and game_day.buy_in_amount and
             not Transaction.objects.filter(
                 game_day=game_day, player=player, type=Transaction.Type.CHIPS_OUT,
@@ -419,6 +459,18 @@ def seat_player(game_day, operator, player=None, player_fields=None, seat_number
                 game_day=game_day, player=player, channel=Transaction.Channel.CASHIER,
                 notes='Default buy-in on seating', _skip_pin_check=True,
             )
+    # Only a genuinely new seating, or assigning a seat number that's
+    # actually different, counts as the action — a plain idempotent re-call
+    # (seat_player on an already-seated player, no seat_number change)
+    # isn't one.
+    newly_seated = existing_seat is None
+    seat_assigned = seat_number is not None and (existing_seat is None or existing_seat.seat_number != seat_number)
+    if newly_seated or seat_assigned:
+        log_activity(
+            operator, ActivityLog.Action.SEAT_PLAYER,
+            f'Seated {player.display_name}' + (f' at seat {seat_number}' if seat_number is not None else ''),
+            player=player, game_day=game_day,
+        )
     return player
 
 
@@ -457,6 +509,10 @@ def move_seat(game_day, player, seat_number, operator=None):
             occupant.save(update_fields=['seat_number'])
         seat.seat_number = seat_number
         seat.save(update_fields=['seat_number'])
+    log_activity(
+        operator, ActivityLog.Action.MOVE_SEAT, f'Moved {player.display_name} to seat {seat_number}',
+        player=player, game_day=game_day,
+    )
     return seat
 
 
@@ -489,6 +545,10 @@ def rejoin_at_seat(game_day, player, seat_number, operator=None):
         seat.left_at = None
         seat.seat_number = seat_number
         seat.save(update_fields=['left_at', 'seat_number'])
+    log_activity(
+        operator, ActivityLog.Action.SEAT_PLAYER, f'Rejoined {player.display_name} at seat {seat_number}',
+        player=player, game_day=game_day,
+    )
     return seat
 
 
@@ -517,6 +577,10 @@ def leave_table(game_day, player, operator=None):
         raise InvalidStateError(f"{player.display_name} isn't seated for tonight's game-day.")
     seat.left_at = timezone.now()
     seat.save(update_fields=['left_at'])
+    log_activity(
+        operator, ActivityLog.Action.LEAVE_TABLE, f'{player.display_name} left the table',
+        player=player, game_day=game_day,
+    )
     return seat
 
 
@@ -537,17 +601,26 @@ def void_transaction(transaction_obj, actor, reason):
     Once closed (or for a between-game-day entry that's otherwise settled),
     only the Owner can amend/void it.
 
-    Any linked pair is voided together, atomically, via `linked_transaction`
-    — voiding only one half would leave one side's debit/credit undone
-    without undoing its match, an inconsistent ledger. Two cases use this
-    today: a Deals Transfer's two legs (DEAL_TRANSFER_OUT/IN, see
-    record_deal_transfer) and a stake-split CHIPS_OUT with its
-    PROFIT_SPLIT_STAKE credit (see record_transaction's 2026-09-28
-    revision — without this, voiding the buy-in would leave the house's
-    stake credit standing, wrongly crediting the player for chips they
-    never actually received). The linked leg is voided with the same
-    actor/reason, no separate authorization check (voiding either kind of
-    pair is already gated the same way creating it was).
+    Everything connected to this row is voided together, atomically —
+    voiding only one piece of a related group would leave the rest of it
+    standing for an action that (from the ledger's point of view) never
+    happened. Three relationships chain together, and voiding any one row
+    now pulls in everything reachable through them, not just its immediate
+    partner: `linked_transaction` (a Deals Transfer's OUT/IN legs, a
+    stake-split CHIPS_OUT with its PROFIT_SPLIT_STAKE credit — see
+    record_transaction's 2026-09-28 revision, or a PLAYER_BALANCE_IN/OUT
+    pair — see record_transaction's 2026-09-25 revision), `source_buy_in`
+    (a PLAYER_BALANCE_IN row pointing at the CHIPS_OUT it was applied to —
+    a separate, non-unique FK, since that CHIPS_OUT's `linked_transaction`
+    slot may already be taken by a PROFIT_SPLIT_STAKE credit), and its
+    reverse, `balance_applications` (a CHIPS_OUT finding the
+    PLAYER_BALANCE_IN applied to it). Without walking all three, voiding
+    just one row of a group — say, only the "Player balance" credit —
+    would leave its buy-in standing as if the player's own carried credit
+    had never covered any of it, silently understating their real debt.
+    Every row found this way is voided with the same actor/reason, no
+    separate authorization check (voiding any row in a connected group is
+    already gated the same way creating the group was).
     """
     game_day = transaction_obj.game_day
     is_open = game_day is None or game_day.status == GameDay.Status.OPEN
@@ -561,20 +634,34 @@ def void_transaction(transaction_obj, actor, reason):
             'Only the recording Cashier (while the game-day is open) or the Owner can void this entry.'
         )
 
-    with db_transaction.atomic():
-        transaction_obj.is_voided = True
-        transaction_obj.voided_by = actor
-        transaction_obj.voided_at = timezone.now()
-        transaction_obj.void_reason = reason
-        transaction_obj.save(update_fields=['is_voided', 'voided_by', 'voided_at', 'void_reason'])
+    def _void(txn, seen):
+        if txn.pk in seen or txn.is_voided:
+            return
+        seen.add(txn.pk)
+        txn.is_voided = True
+        txn.voided_by = actor
+        txn.voided_at = timezone.now()
+        txn.void_reason = reason
+        txn.save(update_fields=['is_voided', 'voided_by', 'voided_at', 'void_reason'])
 
-        linked = transaction_obj.linked_transaction
-        if linked is not None and not linked.is_voided:
-            linked.is_voided = True
-            linked.voided_by = actor
-            linked.voided_at = timezone.now()
-            linked.void_reason = reason
-            linked.save(update_fields=['is_voided', 'voided_by', 'voided_at', 'void_reason'])
+        if txn.linked_transaction is not None:
+            _void(txn.linked_transaction, seen)
+        if txn.source_buy_in is not None:
+            _void(txn.source_buy_in, seen)
+        applied = txn.balance_applications.filter(is_voided=False).first()
+        if applied is not None:
+            _void(applied, seen)
+
+    with db_transaction.atomic():
+        _void(transaction_obj, set())
+    log_activity(
+        actor, ActivityLog.Action.VOID,
+        f'Voided {transaction_obj.get_type_display()} (₦{transaction_obj.amount:,})' + (
+            f' for {transaction_obj.player.display_name}' if transaction_obj.player_id else ''
+        ),
+        player=transaction_obj.player, game_day=transaction_obj.game_day, transaction=transaction_obj,
+        details={'reason': reason},
+    )
     return transaction_obj
 
 
@@ -618,15 +705,19 @@ DEFAULT_CHANNEL_BY_TYPE = {
 }
 
 
-def _apply_profit_split_stake(player, amount):
+def _apply_profit_split_stake(player, amount, game_day):
     """
     Returns (player_portion, house_portion, arrangement_or_None) for a
     CHIPS_OUT of `amount` — see ProfitSplitArrangement's docstring and
     record_transaction's CHIPS_OUT branch. No active arrangement, a zero
-    stake %, or an already-exhausted arrangement (end date / max resets /
-    max cumulative value reached) all fall through to "house covers
-    nothing," so this is a no-op for every player without one, by
-    construction.
+    stake %, or an already-exhausted arrangement (total value / end date /
+    number of games reached) all fall through to "house covers nothing,"
+    so this is a no-op for every player without one, by construction.
+
+    `game_day` (added 2026-10-02 for the PER_GAME cadence) is passed
+    straight through to profit_split_status — it's the game-day THIS buy-in
+    belongs to, which for PER_GAME determines both which cap period applies
+    and whether it counts as a new "game played" toward max_resets.
 
     player_portion is used two ways by the caller: (1) as the amount of the
     real PROFIT_SPLIT_STAKE credit that brings the player's balance back
@@ -642,7 +733,7 @@ def _apply_profit_split_stake(player, amount):
     )
     if arrangement is None or arrangement.house_stake_pct <= 0:
         return amount, Decimal('0'), arrangement
-    status = selectors.profit_split_status(arrangement)
+    status = selectors.profit_split_status(arrangement, game_day=game_day)
     if status['is_exhausted']:
         return amount, Decimal('0'), arrangement
     uncapped_house_share = amount * arrangement.house_stake_pct / Decimal('100')
@@ -734,21 +825,44 @@ def record_transaction(
     # the original chips_limit" once the deal's own cap is exhausted, since
     # _apply_profit_split_stake's house_portion then collapses to 0 and
     # player_portion rises to the full amount — no special-casing needed.
-    # See selectors.effective_chips_limit for the Cashier-facing DISPLAY
+    # See selectors.chips_room_remaining for the Cashier-facing DISPLAY
     # number this same math is mirrored into, so the Cashier's own screen
     # stays internally consistent without ever being told a deal exists.
     player_portion, house_portion, arrangement = amount, Decimal('0'), None
     if type == Transaction.Type.CHIPS_OUT and player is not None:
-        player_portion, house_portion, arrangement = _apply_profit_split_stake(player, amount)
+        player_portion, house_portion, arrangement = _apply_profit_split_stake(player, amount, game_day)
 
     if type == Transaction.Type.CHIPS_OUT and player is not None and player.chips_limit is not None:
-        current_balance = selectors.player_game_day_balance(player, game_day) if game_day else Decimal('0')
+        # cashier_visible_balance (not the raw game-day balance): a credit
+        # carried over from a previous game-day (the house owes the
+        # player) is drawn against before any of tonight's own chips count
+        # as new debt against chips_limit — see that selector's docstring
+        # and CONCEPT.md's "Cashier player-history visibility". A debt
+        # carried over stays invisible here exactly as before.
+        current_balance = selectors.cashier_visible_balance(player, game_day)
         debt_after = max(Decimal('0'), player_portion - current_balance)
         if debt_after > player.chips_limit:
+            # Revised 2026-09-26: no longer names the credit limit or the
+            # debt this issuance would create — a Profit-Split deal is now
+            # deliberately hidden from the Cashier entirely (not just its
+            # ratio/cap — the credit limit itself and any "used" figure
+            # too), so the rejection names only the one figure the Cashier
+            # is shown on screen: chips_room_remaining, the most that could
+            # have been issued right now. See CONCEPT.md's "Chips limit".
+            room = selectors.chips_room_remaining(player, game_day)
             raise InvalidStateError(
-                f"This would exceed {player.display_name}'s chips limit for tonight "
-                f'(limit ₦{player.chips_limit:,}, debt after this issuance would be ₦{debt_after:,}).'
+                f'This exceeds the maximum available for {player.display_name} right now (₦{room:,}).'
             )
+
+    # How much of the player's own carried-forward credit (the house owes
+    # them from before today — see player_prior_balance) is drawn down by
+    # THIS buy-in, against their own share only (player_portion, after any
+    # stake deal) — never against the house's own stake share. Recorded
+    # below as its own ledger line ("Player balance"), see CONCEPT.md's
+    # "Cashier player-history visibility" (widened 2026-09-25).
+    applied_balance = Decimal('0')
+    if type == Transaction.Type.CHIPS_OUT and player is not None and player_portion > 0:
+        applied_balance = min(max(selectors.player_prior_balance(player, game_day), Decimal('0')), player_portion)
 
     # Per-issuance cap (added 2026-09-23, Owner/Floor-Manager-editable via
     # Table.max_chips_issuable — see the Settings screen): how much can be
@@ -899,6 +1013,42 @@ def record_transaction(
             # wrongly crediting the player for a buy-in that never happened.
             txn.linked_transaction = stake_txn
             txn.save(update_fields=['linked_transaction'])
+        if applied_balance > 0:
+            # "Player balance" (added 2026-09-25): one line per action — the
+            # CHIPS_OUT row above stays "chips issued" only, and this pair
+            # is the separate, explicit record of the player's own carried
+            # credit being drawn down to cover (part of) it, rather than
+            # that happening silently via cashier_visible_balance alone.
+            # PLAYER_BALANCE_OUT is dateless (game_day=None, an Outstanding-
+            # ledger entry — same convention as record_deal_transfer)
+            # because it's debiting the pre-existing credit itself, not
+            # tonight's activity; PLAYER_BALANCE_IN is dated tonight because
+            # it's what actually offsets tonight's CHIPS_OUT on the
+            # Cashier's own ledger. linked_transaction pairs the two (same
+            # pattern as record_deal_transfer's OUT/IN); source_buy_in on
+            # the IN leg points back at this CHIPS_OUT specifically, since
+            # linked_transaction on this CHIPS_OUT may already be taken by
+            # a PROFIT_SPLIT_STAKE credit above — see void_transaction,
+            # which follows both to void everything together.
+            balance_out_txn = Transaction.objects.create(
+                player=player, type=Transaction.Type.PLAYER_BALANCE_OUT, amount=applied_balance,
+                channel=Transaction.Channel.DEAL, notes='Carried-forward balance applied to a buy-in',
+                recorded_by=recorded_by,
+            )
+            balance_in_txn = Transaction.objects.create(
+                game_day=game_day, player=player, type=Transaction.Type.PLAYER_BALANCE_IN, amount=applied_balance,
+                channel=Transaction.Channel.DEAL, notes='Existing balance applied to this buy-in',
+                recorded_by=recorded_by, source_buy_in=txn, linked_transaction=balance_out_txn,
+            )
+            balance_out_txn.linked_transaction = balance_in_txn
+            balance_out_txn.save(update_fields=['linked_transaction'])
+    if type in ACTIVITY_LOG_ACTION_BY_TRANSACTION_TYPE:
+        action = ACTIVITY_LOG_ACTION_BY_TRANSACTION_TYPE[type]
+        who = f' for {player.display_name}' if player is not None else ''
+        log_activity(
+            recorded_by, action, f'{txn.get_type_display()}: ₦{amount:,}{who}',
+            player=player, game_day=game_day, transaction=txn,
+        )
     return txn
 
 
@@ -948,6 +1098,11 @@ def record_deal_transfer(source_player, destination_player, amount, reason, oper
         out_txn.save(update_fields=['linked_transaction'])
         in_txn.linked_transaction = out_txn
         in_txn.save(update_fields=['linked_transaction'])
+    log_activity(
+        operator, ActivityLog.Action.DEAL_TRANSFER,
+        f'Transferred ₦{amount:,} from {source_player.display_name} to {destination_player.display_name}',
+        player=destination_player, details={'source_player_id': source_player.pk, 'reason': reason},
+    )
     return out_txn, in_txn
 
 
@@ -962,10 +1117,10 @@ def _validate_profit_split_arrangement(
     if reset_cadence == ProfitSplitArrangement.ResetCadence.ONE_OFF:
         if ends_at or max_resets or max_cumulative_value:
             raise InvalidStateError(
-                'End date / number of times / max value only apply to a recurring reset.'
+                'End date / number of games / max value only apply to a Per game reset.'
             )
     if max_resets is not None and max_resets <= 0:
-        raise InvalidStateError('Number of times must be a positive number.')
+        raise InvalidStateError('Number of games must be a positive number.')
     if max_cumulative_value is not None and max_cumulative_value < 0:
         raise InvalidStateError('Max value cannot be negative.')
     if payout_split_method == ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO and house_stake_pct <= 0:
@@ -1006,13 +1161,18 @@ def create_profit_split_arrangement(
         ProfitSplitArrangement.objects.filter(player=player, is_active=True).update(
             is_active=False, deactivated_at=timezone.now(),
         )
-        return ProfitSplitArrangement.objects.create(
+        arrangement = ProfitSplitArrangement.objects.create(
             player=player, house_stake_pct=house_stake_pct, cap_amount=cap_amount,
             reset_cadence=reset_cadence, ends_at=ends_at, max_resets=max_resets,
             max_cumulative_value=max_cumulative_value, payout_basis=payout_basis,
             payout_split_method=payout_split_method, custom_ratio_pct=custom_ratio_pct,
             fixed_amount=fixed_amount, fixed_offset=fixed_offset, created_by=operator,
         )
+    log_activity(
+        operator, ActivityLog.Action.DEAL_CREATED,
+        f'Set up a {house_stake_pct}% stake deal for {player.display_name}', player=player,
+    )
+    return arrangement
 
 
 def deactivate_profit_split_arrangement(arrangement, operator):
@@ -1022,6 +1182,10 @@ def deactivate_profit_split_arrangement(arrangement, operator):
     arrangement.is_active = False
     arrangement.deactivated_at = timezone.now()
     arrangement.save(update_fields=['is_active', 'deactivated_at'])
+    log_activity(
+        operator, ActivityLog.Action.DEAL_ENDED, f'Ended the deal for {arrangement.player.display_name}',
+        player=arrangement.player,
+    )
     return arrangement
 
 
@@ -1142,11 +1306,16 @@ def initiate_payout(player, amount, operator, game_day=None):
             f'Cashier requested ₦{amount:,}. All of it applied to an outstanding balance '
             f'from a previous game-day; net ₦0 payable.'
         )
-        return Transaction.objects.create(
+        txn = Transaction.objects.create(
             game_day=game_day, player=player, type=Transaction.Type.PAYOUT, amount=Decimal('0'),
             requested_amount=amount, channel=Transaction.Channel.CASHIER, recorded_by=operator,
             notes=notes, status=Transaction.Status.APPROVED, approved_by=None, approved_at=timezone.now(),
         )
+        log_activity(
+            operator, ActivityLog.Action.PAYOUT_REQUESTED, f'Requested a payout of ₦{amount:,} for {player.display_name}',
+            player=player, game_day=game_day, transaction=txn,
+        )
+        return txn
 
     notes = ''
     if net_amount < amount:
@@ -1164,6 +1333,10 @@ def initiate_payout(player, amount, operator, game_day=None):
         requested_amount=amount if net_amount < amount else None,
         channel=Transaction.Channel.CASHIER, recorded_by=operator, notes=notes,
         status=Transaction.Status.PENDING_APPROVAL,
+    )
+    log_activity(
+        operator, ActivityLog.Action.PAYOUT_REQUESTED, f'Requested a payout of ₦{amount:,} for {player.display_name}',
+        player=player, game_day=game_day, transaction=transaction_obj,
     )
     if net_amount <= ClubSettings.load().payout_auto_approve_threshold:
         return _execute_payout_transfer(transaction_obj, approved_by=None)
@@ -1212,7 +1385,13 @@ def initiate_direct_payout(player, amount, operator):
         channel=Transaction.Channel.CASHIER, recorded_by=operator,
         status=Transaction.Status.PENDING_APPROVAL,
     )
-    return _execute_payout_transfer(transaction_obj, approved_by=operator)
+    result = _execute_payout_transfer(transaction_obj, approved_by=operator)
+    outcome = 'but the transfer failed' if result.status == Transaction.Status.TRANSFER_FAILED else 'and it was transferred'
+    log_activity(
+        operator, ActivityLog.Action.PAYOUT_APPROVED, f'Paid out ₦{amount:,} to {player.display_name} ({outcome})',
+        player=player, transaction=result,
+    )
+    return result
 
 
 def _execute_payout_transfer(transaction_obj, approved_by):
@@ -1281,7 +1460,14 @@ def approve_payout(transaction_obj, operator):
         raise AuthorizationError('Only the Owner can approve a payout.')
     if transaction_obj.type != Transaction.Type.PAYOUT:
         raise ValueError('Not a payout transaction.')
-    return _execute_payout_transfer(transaction_obj, approved_by=operator)
+    result = _execute_payout_transfer(transaction_obj, approved_by=operator)
+    outcome = 'but the transfer failed' if result.status == Transaction.Status.TRANSFER_FAILED else 'and it was transferred'
+    log_activity(
+        operator, ActivityLog.Action.PAYOUT_APPROVED,
+        f'Approved a payout of ₦{result.amount:,} for {result.player.display_name} ({outcome})',
+        player=result.player, game_day=result.game_day, transaction=result,
+    )
+    return result
 
 
 def reject_payout(transaction_obj, operator, reason):
@@ -1309,4 +1495,10 @@ def reject_payout(transaction_obj, operator, reason):
     transaction_obj.voided_at = timezone.now()
     transaction_obj.void_reason = reason
     transaction_obj.save(update_fields=['status', 'is_voided', 'voided_by', 'voided_at', 'void_reason'])
+    log_activity(
+        operator, ActivityLog.Action.PAYOUT_REJECTED,
+        f'Rejected a payout of ₦{transaction_obj.amount:,} for {transaction_obj.player.display_name}',
+        player=transaction_obj.player, game_day=transaction_obj.game_day, transaction=transaction_obj,
+        details={'reason': reason},
+    )
     return transaction_obj

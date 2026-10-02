@@ -5,6 +5,7 @@ import api from '@/api/axios'
 import { useGameDayStore } from '@/stores/gameDay'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
+import { useFormValidation, required } from '@/composables/useFormValidation'
 
 // "Deals" Fixed write-off (2026-09-23) — mirrors mobile's FixedScreen.tsx,
 // wired to the real backend: POST /transactions/ {type: 'WRITE_OFF'}.
@@ -46,15 +47,25 @@ const amount = ref('') // plain numeric string, no commas
 const displayAmount = computed(() => formatAmountForDisplay(amount.value))
 const reason = ref('')
 const submitting = ref(false)
-const error = ref('')
 
 const amountNumber = computed(() => Number(amount.value) || 0)
-const over = computed(() => amountNumber.value > outstanding.value)
-const canSubmit = computed(() => amountNumber.value > 0 && !over.value && reason.value.trim().length > 0 && outstanding.value > 0)
+
+const { touched, errors, isValid, formError, touch, applyServerErrors } = useFormValidation({
+  amount: {
+    value: amount,
+    rules: [
+      v => (Number(v) > 0 ? null : 'Enter an amount greater than zero.'),
+      v => (Number(v) > outstanding.value ? "Can't enter more than the outstanding balance." : null),
+    ],
+  },
+  reason: { value: reason, rules: [required('A reason is required.')] },
+})
+const canSubmit = computed(() => isValid.value && outstanding.value > 0)
 
 async function onSubmit() {
+  touch('amount')
+  touch('reason')
   if (!canSubmit.value) return
-  error.value = ''
   submitting.value = true
   try {
     await api.post('/transactions/', {
@@ -67,7 +78,7 @@ async function onSubmit() {
     toast.success(`₦${amountNumber.value.toLocaleString()} cleared from ${player.value.display_name}'s outstanding balance.`)
     router.push(`/deals/${route.params.playerId}`)
   } catch (err) {
-    error.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not save this write-off.'
+    applyServerErrors(err)
   } finally {
     submitting.value = false
   }
@@ -97,20 +108,26 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <span class="field-label">Clear balance by <span class="req">*</span></span>
         <input
           :value="displayAmount" type="text" inputmode="numeric" placeholder="0" class="ff"
+          :class="{ 'input--invalid': touched.amount && errors.amount }"
           @input="e => { amount = parseAmountInput(e.target.value); e.target.value = displayAmount }"
+          @blur="touch('amount')"
         />
-        <span v-if="over" class="field-error">Can't enter more than the outstanding balance.</span>
+        <p v-if="touched.amount && errors.amount" class="field-error">{{ errors.amount }}</p>
       </label>
       <button type="button" class="link-btn" @click="amount = String(outstanding)">Clear all ({{ N(outstanding) }})</button>
 
       <label class="field">
         <span class="field-label">Reason <span class="req">*</span></span>
-        <textarea v-model="reason" class="ff ff--area" placeholder="Why is this being written off?" rows="3" />
+        <textarea
+          v-model="reason" class="ff ff--area" placeholder="Why is this being written off?" rows="3"
+          :class="{ 'input--invalid': touched.reason && errors.reason }" @blur="touch('reason')"
+        />
+        <p v-if="touched.reason && errors.reason" class="field-error">{{ errors.reason }}</p>
       </label>
 
       <div class="banner banner--warn">This can't be reversed once submitted.</div>
 
-      <p v-if="error" class="form-error">{{ error }}</p>
+      <p v-if="formError" class="form-error">{{ formError }}</p>
 
       <button class="btn btn--primary submit-btn" type="button" :disabled="!canSubmit || submitting" @click="onSubmit">
         {{ submitting ? 'Applying…' : 'Apply write-off' }}
@@ -150,7 +167,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .ff:focus { outline: none; border-color: var(--accent); }
 .ff--area { height: auto; padding: 12px 14px; resize: vertical; font-size: 13.5px; }
-.field-error { display: block; font-size: 11.5px; color: var(--danger-text); margin-top: 4px; }
 
 .link-btn { border: none; background: none; font-size: 12.5px; font-weight: 700; color: var(--accent-text); cursor: pointer; padding: 0; margin: 8px 0 20px; display: block; }
 .link-btn:hover { text-decoration: underline; }
@@ -162,15 +178,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
   margin-bottom: 20px;
 }
 .banner--warn { background: var(--warning-bg); color: var(--warning-text); }
-
-.form-error {
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-bottom: 16px;
-}
 
 .submit-btn { width: 100%; }
 </style>

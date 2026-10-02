@@ -10,8 +10,19 @@ from lpc_backend.testing import APITestCase, TestCase
 from accounts.models import AccountCode, FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 
 from . import selectors, services
+from .activity import log_activity
 from .exceptions import AuthorizationError, InvalidStateError, TableFullError
-from .models import ClubSettings, ConversionRate, Game, GameDay, GameDayPlayer, ProfitSplitArrangement, Table, Transaction
+from .models import (
+    ActivityLog,
+    ClubSettings,
+    ConversionRate,
+    Game,
+    GameDay,
+    GameDayPlayer,
+    ProfitSplitArrangement,
+    Table,
+    Transaction,
+)
 
 
 def _disable_payout_auto_approval():
@@ -1085,6 +1096,21 @@ class GameDaySeatingTests(APITestCase):
         services.seat_player(self.game_day, self.owner, player=player)
         services.seat_player(self.game_day, self.owner, player=player)  # should not raise / duplicate
         self.assertEqual(GameDayPlayer.objects.filter(game_day=self.game_day, player=player).count(), 1)
+
+    def test_seating_an_already_seated_unassigned_player_with_a_seat_number_assigns_it(self):
+        """
+        AddPlayerModal.vue's Existing-player list (revised 2026-10-02) now
+        offers a seated-but-unassigned player so they can be seated — this
+        is that: seat_player on an already-seated player, this time with a
+        seat_number, moves them into it rather than being a no-op.
+        """
+        player = Player.objects.create(account_code='WWI 39', display_name='Was Unassigned')
+        services.seat_player(self.game_day, self.owner, player=player)
+        seat = GameDayPlayer.objects.get(game_day=self.game_day, player=player)
+        self.assertIsNone(seat.seat_number)
+        services.seat_player(self.game_day, self.owner, player=player, seat_number=4)
+        seat.refresh_from_db()
+        self.assertEqual(seat.seat_number, 4)
 
     def test_recording_a_transaction_auto_seats(self):
         """A player with real activity tonight shows up seated even without the explicit add-player step."""
@@ -2260,7 +2286,7 @@ class ProfitSplitArrangementTests(APITestCase):
     def test_cumulative_cap_exhausts_the_arrangement(self):
         services.create_profit_split_arrangement(
             self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(1000000),
-            reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY, max_cumulative_value=Decimal(30000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.PER_GAME, max_cumulative_value=Decimal(30000),
         )
         first = self._buy_in(20000)
         self.assertEqual(first.amount, Decimal(20000))  # full amount — fully house-covered via its stake credit
@@ -2275,28 +2301,94 @@ class ProfitSplitArrangementTests(APITestCase):
         self.assertFalse(Transaction.objects.filter(pk=third.pk, profit_split_arrangement__isnull=False).exists())
         self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-30000))
 
-    def test_daily_reset_gives_a_fresh_per_period_cap(self):
-        arrangement = services.create_profit_split_arrangement(
+    def test_per_game_reset_gives_a_fresh_cap_on_a_new_game_day(self):
+        # Rewritten 2026-10-02 — the cap now refills per game-day actually
+        # opened/played, not on a wall clock (see ResetCadence's comment).
+        services.create_profit_split_arrangement(
             self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(20000),
-            reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY,
+            reset_cadence=ProfitSplitArrangement.ResetCadence.PER_GAME,
         )
         first = self._buy_in(20000)
         self.assertEqual(first.amount, Decimal(20000))  # full amount
-        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))  # today's cap fully used
-
-        # Backdate the arrangement by 2 days so "now" falls in a new period.
-        ProfitSplitArrangement.objects.filter(pk=arrangement.pk).update(
-            created_at=timezone.now() - timedelta(days=2),
-        )
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))  # tonight's cap fully used
+        # A second buy-in the SAME night gets nothing more from the cap —
+        # it's already exhausted for tonight.
         second = self._buy_in(20000)
-        self.assertEqual(second.amount, Decimal(20000))
-        # Fresh period, fresh cap — still fully covered, balance unchanged.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-20000))
+
+        # A new game-day is a fresh period — the cap refills.
+        next_game_day = services.open_game_day(71, timezone.now(), self.owner)
+        third = services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(20000), recorded_by=self.cashier,
+            game_day=next_game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+        self.assertEqual(third.amount, Decimal(20000))
+        self.assertEqual(selectors.player_game_day_balance(self.player, next_game_day), Decimal(0))
+
+    def test_max_resets_counts_games_played_not_calendar_periods(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(20000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.PER_GAME, max_resets=2,
+        )
+        # Game 1 (periods_elapsed=0 — the current game is never counted
+        # against itself) and game 2 (periods_elapsed=1, one prior game
+        # played) both still get the stake; a third game is exhausted.
+        self._buy_in(20000)
         self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+        gd2 = services.open_game_day(72, timezone.now(), self.owner)
+        txn2 = services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(20000), recorded_by=self.cashier,
+            game_day=gd2, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+        self.assertTrue(Transaction.objects.filter(pk=txn2.pk, profit_split_arrangement__isnull=False).exists())
+        self.assertEqual(selectors.player_game_day_balance(self.player, gd2), Decimal(0))
+
+        gd3 = services.open_game_day(73, timezone.now(), self.owner)
+        txn3 = services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(20000), recorded_by=self.cashier,
+            game_day=gd3, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+        # Third game — max_resets=2 games played (game 1, game 2) reached — exhausted.
+        self.assertFalse(Transaction.objects.filter(pk=txn3.pk, profit_split_arrangement__isnull=False).exists())
+        self.assertEqual(selectors.player_game_day_balance(self.player, gd3), Decimal(-20000))
+
+    def test_a_night_with_no_stake_activity_does_not_count_as_a_game_played(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(20000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.PER_GAME, max_resets=1,
+        )
+        # An empty night (player never buys in) — no stake transaction, so
+        # it must not consume a reset.
+        services.open_game_day(74, timezone.now(), self.owner)
+        gd2 = services.open_game_day(75, timezone.now(), self.owner)
+        txn = services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(20000), recorded_by=self.cashier,
+            game_day=gd2, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='7777',
+        )
+        self.assertTrue(Transaction.objects.filter(pk=txn.pk, profit_split_arrangement__isnull=False).exists())
+        self.assertEqual(selectors.player_game_day_balance(self.player, gd2), Decimal(0))
+
+    def test_end_condition_priority_is_value_then_date_then_resets(self):
+        # 2026-10-02, per explicit instruction: total value, then end date,
+        # then number of games — whichever is hit first is reported, even
+        # when several are already satisfied at once. max_cumulative_value=0
+        # is trivially satisfied (0 covered >= 0) without any buy-in, same
+        # as ends_at already being in the past — both are true here, so
+        # this only proves something if value really does win.
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(100), cap_amount=Decimal(1000000),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.PER_GAME,
+            ends_at=timezone.now() - timedelta(days=1), max_resets=1, max_cumulative_value=Decimal(0),
+        )
+        status = selectors.profit_split_status(arrangement, game_day=self.game_day)
+        self.assertEqual(status['exhausted_reason'], 'max cumulative value reached')
 
     def test_ended_arrangement_means_no_split(self):
         services.create_profit_split_arrangement(
             self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
-            reset_cadence=ProfitSplitArrangement.ResetCadence.DAILY, ends_at=timezone.now() - timedelta(days=1),
+            reset_cadence=ProfitSplitArrangement.ResetCadence.PER_GAME, ends_at=timezone.now() - timedelta(days=1),
         )
         txn = self._buy_in(100000)
         self.assertEqual(txn.amount, Decimal(100000))
@@ -2391,6 +2483,83 @@ class ProfitSplitArrangementTests(APITestCase):
         self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(750000))
         self._buy_in(300000)
         self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(450000))
+
+    def test_room_rounds_down_never_up(self):
+        # 1 / 0.6 = 1.67 — rounding to nearest would advertise ₦2, which a
+        # real ₦2 buy-in would then push ₦1 over the limit.
+        self.player.chips_limit = Decimal(1)
+        self.player.save()
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(1000000),
+        )
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(1))
+
+    # --- 0026 backfill of pre-redesign stake pairs ---
+
+    def _old_style_pair(self, arrangement, chips_out_amount, stake_amount):
+        chips_out = Transaction.objects.create(
+            game_day=self.game_day, player=self.player, type=Transaction.Type.CHIPS_OUT,
+            amount=Decimal(chips_out_amount), channel=Transaction.Channel.CASHIER,
+            recorded_by=self.cashier, profit_split_arrangement=arrangement,
+        )
+        stake = Transaction.objects.create(
+            game_day=self.game_day, player=self.player, type=Transaction.Type.PROFIT_SPLIT_STAKE,
+            amount=Decimal(stake_amount), channel=Transaction.Channel.DEAL,
+            recorded_by=self.cashier, profit_split_arrangement=arrangement,
+        )
+        return chips_out, stake
+
+    def _run_backfill(self):
+        import importlib
+        from django.apps import apps
+        importlib.import_module('gaming.migrations.0026_backfill_profit_split_stake_pairs').backfill(apps, None)
+
+    def test_backfill_restores_full_chips_out_and_links_the_pair(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(10000000),
+        )
+        chips_out, stake = self._old_style_pair(arrangement, 250000, 250000)
+        self._run_backfill()
+        chips_out.refresh_from_db()
+        stake.refresh_from_db()
+        self.assertEqual(chips_out.amount, Decimal(500000))
+        self.assertEqual(chips_out.linked_transaction_id, stake.pk)
+        self.assertEqual(stake.linked_transaction_id, chips_out.pk)
+        # Same net debt the old design gave: the reduced 250000.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-250000))
+
+    def test_backfill_pairs_each_stake_with_its_own_buy_in(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(10000000),
+        )
+        first_out, first_stake = self._old_style_pair(arrangement, 250000, 250000)
+        second_out, second_stake = self._old_style_pair(arrangement, 500000, 500000)
+        self._run_backfill()
+        for out, stake, full in ((first_out, first_stake, 500000), (second_out, second_stake, 1000000)):
+            out.refresh_from_db()
+            self.assertEqual(out.amount, Decimal(full))
+            self.assertEqual(out.linked_transaction_id, stake.pk)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-750000))
+
+    def test_backfill_voids_the_stake_of_an_already_voided_buy_in(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(10000000),
+        )
+        chips_out, stake = self._old_style_pair(arrangement, 250000, 250000)
+        Transaction.objects.filter(pk=chips_out.pk).update(is_voided=True, void_reason='old void')
+        self._run_backfill()
+        stake.refresh_from_db()
+        self.assertTrue(stake.is_voided)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+    def test_backfill_leaves_already_linked_pairs_alone(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(10000000),
+        )
+        txn = self._buy_in(100000)
+        self._run_backfill()
+        txn.refresh_from_db()
+        self.assertEqual(txn.amount, Decimal(100000))
 
     def test_room_is_none_without_a_chips_limit_set(self):
         services.create_profit_split_arrangement(
@@ -2942,6 +3111,63 @@ class MaxChipsIssuablePerTableTests(APITestCase):
         self.assertIn('300,000', message)
 
 
+class AutoIssueBuyInOnSeatingTests(APITestCase):
+    """
+    ClubSettings.auto_issue_buy_in_on_seating (added 2026-10-02) — seat_player's
+    automatic default-buy-in CHIPS_OUT, made opt-in and off by default. See
+    that setting's own comment and seat_player's docstring.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='aibs_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='aibs_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.game = Game.objects.create(name='Test Game — Auto Issue')
+        self.table = Table.objects.create(
+            game=self.game, name='Auto Issue Table', default_buy_in=Decimal(500000),
+        )
+        self.game_day = services.open_game_day(
+            240, timezone.now(), self.owner, game=self.game, table=self.table,
+        )
+        self.player = Player.objects.create(account_code='WWI 240', display_name='Auto Issue Player')
+
+    def test_off_by_default_seating_issues_no_chips(self):
+        self.assertFalse(ClubSettings.load().auto_issue_buy_in_on_seating)
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        self.assertFalse(
+            Transaction.objects.filter(game_day=self.game_day, player=self.player, type=Transaction.Type.CHIPS_OUT).exists()
+        )
+
+    def test_once_enabled_seating_issues_the_default_buy_in(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.auto_issue_buy_in_on_seating = True
+        settings_obj.save()
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        txn = Transaction.objects.get(game_day=self.game_day, player=self.player, type=Transaction.Type.CHIPS_OUT)
+        self.assertEqual(txn.amount, Decimal(500000))
+        self.assertIsNone(txn.floor_manager)  # no PIN — _skip_pin_check
+
+    def test_enabled_and_rejected_default_buy_in_rolls_back_the_seat(self):
+        settings_obj = ClubSettings.load()
+        settings_obj.auto_issue_buy_in_on_seating = True
+        settings_obj.save()
+        self.player.chips_limit = Decimal(100000)  # below the table's 500,000 default buy-in
+        self.player.save()
+        with self.assertRaises(InvalidStateError):
+            services.seat_player(self.game_day, self.owner, player=self.player)
+        self.assertFalse(GameDayPlayer.objects.filter(game_day=self.game_day, player=self.player).exists())
+
+    def test_owner_can_toggle_via_api(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch('/api/club-settings/', {'auto_issue_buy_in_on_seating': True})
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(ClubSettings.load().auto_issue_buy_in_on_seating)
+
+    def test_cashier_cannot_toggle_via_api(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.patch('/api/club-settings/', {'auto_issue_buy_in_on_seating': True})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
 class TableMaxPlayersOverrideTests(TestCase):
     """selectors.max_active_players' table-first tier (added 2026-09-23)."""
 
@@ -3408,3 +3634,477 @@ class ClubSettingsAndTablePermissionsAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.table.refresh_from_db()
         self.assertEqual(self.table.name, 'Perms Table')  # read_only_fields silently ignores it, not rejects
+
+
+class CashierVisibleCreditTests(APITestCase):
+    """
+    2026-09-25: a credit carried forward from a previous game-day (the
+    house owes the player) is now visible to the Cashier and drawn against
+    before any of tonight's own buy-ins count as new debt against
+    chips_limit — see selectors.cashier_visible_balance and CONCEPT.md's
+    "Cashier player-history visibility" (widened 2026-09-25). Mirrors the
+    setup style of PayoutNettingAgainstPriorDebtTests, but for a CREDIT
+    instead of a debt, and for balance display/chips_limit rather than payout.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='cvc_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cvc_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(
+            account_code='WWI 300', display_name='Credit Player', chips_limit=Decimal(300000),
+        )
+        self.fm = FloorManager(name='CVC Floor Boss', created_by=self.owner)
+        self.fm.set_pin('9999')
+        self.fm.save()
+
+        # A prior, closed-out game-day the house owes the player ₦600,000
+        # from (chips returned, never paid out) — not closed via
+        # services.close_game_day, same as PayoutNettingAgainstPriorDebtTests
+        # (irrelevant here; player_balance doesn't care about GameDay.status).
+        old_gd = services.open_game_day(300, timezone.now() - timedelta(days=3), self.owner)
+        services.seat_player(old_gd, self.owner, player=self.player)
+        Transaction.objects.create(
+            game_day=old_gd, player=self.player, type=Transaction.Type.CHIPS_IN, amount=Decimal(600000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.assertEqual(selectors.player_balance(self.player), Decimal(600000))
+
+        self.game_day = services.open_game_day(301, timezone.now(), self.owner)
+
+    def _buy_in(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+
+    # --- selectors.cashier_visible_balance ---
+
+    def test_prior_credit_is_visible_before_any_activity_tonight(self):
+        self.assertEqual(selectors.cashier_visible_balance(self.player, self.game_day), Decimal(600000))
+
+    def test_prior_debt_stays_hidden_unchanged(self):
+        debtor = Player.objects.create(account_code='WWI 301', display_name='Debtor Player')
+        old_gd = services.open_game_day(302, timezone.now() - timedelta(days=3), self.owner)
+        services.seat_player(old_gd, self.owner, player=debtor)
+        Transaction.objects.create(
+            game_day=old_gd, player=debtor, type=Transaction.Type.CHIPS_OUT, amount=Decimal(400000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.assertEqual(selectors.player_balance(debtor), Decimal(-400000))
+        # No activity yet tonight — the -400,000 stays invisible; today's own (zero) is shown instead.
+        self.assertEqual(selectors.cashier_visible_balance(debtor, self.game_day), Decimal(0))
+
+    def test_credit_is_drawn_down_by_tonights_buy_in(self):
+        self._buy_in(200000)
+        # 600,000 credit - 200,000 buy-in = 400,000 still owed to the player.
+        self.assertEqual(selectors.cashier_visible_balance(self.player, self.game_day), Decimal(400000))
+
+    def test_balance_goes_negative_once_the_credit_is_exhausted(self):
+        self._buy_in(600000)  # exactly exhausts the credit
+        self._buy_in(50000)   # now genuinely new debt, incurred tonight
+        self.assertEqual(selectors.cashier_visible_balance(self.player, self.game_day), Decimal(-50000))
+
+    # --- chips_limit enforcement (record_transaction) ---
+
+    def test_buy_in_within_credit_plus_limit_succeeds(self):
+        # 600,000 credit + 300,000 limit = 900,000 available before real debt is blocked.
+        txn = self._buy_in(900000)
+        self.assertEqual(txn.amount, Decimal(900000))
+        self.assertEqual(selectors.cashier_visible_balance(self.player, self.game_day), Decimal(-300000))
+
+    def test_buy_in_beyond_credit_plus_limit_is_rejected(self):
+        with self.assertRaises(InvalidStateError):
+            self._buy_in(900001)
+
+    def test_rejection_names_only_the_available_figure_not_the_limit_or_debt(self):
+        # 2026-09-26: the Cashier is never shown the credit limit, the "used"
+        # figure, or a Profit-Split deal's terms — only chips_room_remaining
+        # ("Available now"). The rejection message must match what's on
+        # screen: it should name that figure and nothing else.
+        room = selectors.chips_room_remaining(self.player, self.game_day)
+        with self.assertRaises(InvalidStateError) as ctx:
+            self._buy_in(900001)
+        message = str(ctx.exception)
+        self.assertIn(f'{room:,}', message)
+        self.assertNotIn('limit', message.lower())
+        self.assertNotIn('debt', message.lower())
+
+    def test_buy_in_that_only_partly_consumes_the_credit_is_never_blocked(self):
+        # Nowhere near the limit — the credit alone covers it several times over.
+        txn = self._buy_in(100000)
+        self.assertEqual(txn.amount, Decimal(100000))
+
+    # --- chips_room_remaining (display) ---
+
+    def test_room_remaining_includes_the_carried_credit(self):
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(900000))
+
+    def test_room_remaining_shrinks_as_the_credit_and_then_the_limit_are_used(self):
+        self._buy_in(700000)  # uses the full 600,000 credit + 100,000 of the limit
+        self.assertEqual(selectors.chips_room_remaining(self.player, self.game_day), Decimal(200000))
+
+    # --- API-level: seated-player list & general Player list ---
+
+    def test_seated_player_endpoint_shows_the_carried_credit(self):
+        services.seat_player(self.game_day, self.owner, player=self.player)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = next(r for r in response.data if r['id'] == self.player.id)
+        self.assertEqual(Decimal(str(row['balance'])), Decimal(600000))
+        self.assertEqual(Decimal(str(row['chips_room_remaining'])), Decimal(900000))
+
+    def test_general_player_list_shows_the_carried_credit_to_cashier(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/players/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = next(r for r in response.data if r['id'] == self.player.id)
+        self.assertEqual(Decimal(str(row['balance'])), Decimal(600000))
+
+    def test_general_player_list_still_hides_a_prior_debt_from_cashier(self):
+        debtor = Player.objects.create(account_code='WWI 302', display_name='Debtor Player Two')
+        old_gd = services.open_game_day(303, timezone.now() - timedelta(days=3), self.owner)
+        services.seat_player(old_gd, self.owner, player=debtor)
+        Transaction.objects.create(
+            game_day=old_gd, player=debtor, type=Transaction.Type.CHIPS_OUT, amount=Decimal(400000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/players/')
+        row = next(r for r in response.data if r['id'] == debtor.id)
+        self.assertEqual(Decimal(str(row['balance'])), Decimal(0))  # not -400,000
+
+    def test_owner_sees_raw_lifetime_balance_regardless(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/players/')
+        row = next(r for r in response.data if r['id'] == self.player.id)
+        self.assertEqual(Decimal(str(row['balance'])), Decimal(600000))
+
+
+class PlayerBalanceLedgerLineTests(APITestCase):
+    """
+    2026-09-25 follow-up on CashierVisibleCreditTests: "one line per
+    action" — a buy-in's CHIPS_OUT row stays "chips issued" only, and
+    drawing down a player's carried-forward credit against it gets its own
+    explicit ledger line ("Player balance"), a real linked
+    PLAYER_BALANCE_IN/OUT pair created by record_transaction, mirroring how
+    PROFIT_SPLIT_STAKE is a real credit alongside its CHIPS_OUT. See
+    Transaction.Type's own comment and record_transaction's CHIPS_OUT branch.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='pbl_owner', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='pbl_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(
+            account_code='WWI 400', display_name='Ledger Line Player', chips_limit=Decimal(300000),
+        )
+        self.fm = FloorManager(name='PBL Floor Boss', created_by=self.owner)
+        self.fm.set_pin('4444')
+        self.fm.save()
+
+        old_gd = services.open_game_day(400, timezone.now() - timedelta(days=3), self.owner)
+        services.seat_player(old_gd, self.owner, player=self.player)
+        Transaction.objects.create(
+            game_day=old_gd, player=self.player, type=Transaction.Type.CHIPS_IN, amount=Decimal(600000),
+            channel=Transaction.Channel.CASHIER, recorded_by=self.cashier,
+        )
+        self.game_day = services.open_game_day(401, timezone.now(), self.owner)
+
+    def _buy_in(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='4444',
+        )
+
+    # --- creation ---
+
+    def test_no_pair_when_there_is_no_carried_credit(self):
+        debtor = Player.objects.create(account_code='WWI 401', display_name='No Credit Player')
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(100000), recorded_by=self.cashier,
+            game_day=self.game_day, player=debtor, floor_manager_id=self.fm.pk, floor_manager_pin='4444',
+        )
+        self.assertFalse(Transaction.objects.filter(player=debtor, type=Transaction.Type.PLAYER_BALANCE_IN).exists())
+
+    def test_pair_is_created_and_sized_at_the_full_buy_in_when_credit_covers_it(self):
+        txn = self._buy_in(200000)
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        out_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_OUT, player=self.player)
+        self.assertEqual(in_txn.amount, Decimal(200000))
+        self.assertEqual(out_txn.amount, Decimal(200000))
+        self.assertEqual(in_txn.game_day_id, self.game_day.id)
+        self.assertIsNone(out_txn.game_day_id)  # dateless — Outstanding ledger only
+        self.assertEqual(in_txn.source_buy_in_id, txn.pk)
+        self.assertEqual(in_txn.linked_transaction_id, out_txn.pk)
+        self.assertEqual(out_txn.linked_transaction_id, in_txn.pk)
+        # Net effect for tonight: the buy-in nets to zero — fully covered.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+    def test_pair_is_capped_at_the_available_credit_not_the_full_buy_in(self):
+        self._buy_in(900000)  # only 600,000 of credit exists
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        self.assertEqual(in_txn.amount, Decimal(600000))
+        # 900,000 issued, 600,000 covered by credit, 300,000 genuinely new debt.
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(-300000))
+
+    def test_credit_is_drawn_down_progressively_across_two_buy_ins(self):
+        self._buy_in(400000)
+        first_in = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        self.assertEqual(first_in.amount, Decimal(400000))
+
+        self._buy_in(300000)
+        second_in = Transaction.objects.filter(
+            type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player,
+        ).exclude(pk=first_in.pk).get()
+        # Only 200,000 of credit remained (600,000 - 400,000).
+        self.assertEqual(second_in.amount, Decimal(200000))
+
+    def test_pair_applies_against_the_players_own_share_when_a_stake_deal_is_also_active(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        # 400,000 buy-in: house covers 200,000 (stake), player's own share is 200,000.
+        self._buy_in(400000)
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        # Capped at the player's own 200,000 share, not the full 400,000 or the 600,000 credit.
+        self.assertEqual(in_txn.amount, Decimal(200000))
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+    # --- visibility ---
+
+    def test_out_leg_never_appears_on_the_game_day_ledger(self):
+        self._buy_in(200000)
+        rows = list(selectors.player_game_day_ledger(self.game_day, self.player))
+        types = {row.type for row in rows}
+        self.assertIn(Transaction.Type.PLAYER_BALANCE_IN, types)
+        self.assertNotIn(Transaction.Type.PLAYER_BALANCE_OUT, types)
+
+    def test_cashier_facing_ledger_endpoint_shows_both_lines(self):
+        txn = self._buy_in(200000)
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/game-days/{self.game_day.id}/players/{self.player.id}/ledger/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_id = {row['id']: row for row in response.data}
+        self.assertEqual(by_id[txn.pk]['type'], 'CHIPS_OUT')
+        self.assertEqual(Decimal(str(by_id[txn.pk]['amount'])), Decimal(200000))
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        self.assertEqual(by_id[in_txn.pk]['type'], 'PLAYER_BALANCE_IN')
+        self.assertEqual(Decimal(str(by_id[in_txn.pk]['amount'])), Decimal(200000))
+
+    # --- void cascade ---
+
+    def test_voiding_the_chips_out_voids_both_legs_of_the_pair(self):
+        txn = self._buy_in(200000)
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        out_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_OUT, player=self.player)
+        services.void_transaction(txn, self.owner, 'mistaken buy-in')
+        in_txn.refresh_from_db()
+        out_txn.refresh_from_db()
+        self.assertTrue(in_txn.is_voided)
+        self.assertTrue(out_txn.is_voided)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+        # The credit is restored — nothing was really drawn down.
+        self.assertEqual(selectors.player_prior_balance(self.player, self.game_day), Decimal(600000))
+
+    def test_voiding_the_player_balance_in_leg_also_voids_the_chips_out_and_out_leg(self):
+        txn = self._buy_in(200000)
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        out_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_OUT, player=self.player)
+        services.void_transaction(in_txn, self.owner, 'mistaken credit')
+        txn.refresh_from_db()
+        out_txn.refresh_from_db()
+        self.assertTrue(txn.is_voided)
+        self.assertTrue(out_txn.is_voided)
+
+    def test_voiding_cascades_through_stake_and_player_balance_together(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(1000000),
+        )
+        txn = self._buy_in(400000)  # 200,000 stake + 200,000 player-balance credit
+        stake_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_STAKE, player=self.player)
+        in_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_IN, player=self.player)
+        out_txn = Transaction.objects.get(type=Transaction.Type.PLAYER_BALANCE_OUT, player=self.player)
+
+        services.void_transaction(txn, self.owner, 'mistaken buy-in')
+        for row in (stake_txn, in_txn, out_txn):
+            row.refresh_from_db()
+            self.assertTrue(row.is_voided, f'{row.type} was not voided')
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(0))
+
+
+class ActivityLogTests(APITestCase):
+    """
+    gaming.models.ActivityLog, gaming.activity.log_activity, and
+    gaming.selectors.visible_activity (added 2026-10-02) — see
+    ActivityLog's own docstring for why this lives in `gaming`, not
+    `accounts`, even though several of its entries come from accounts.views.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='al_owner', password='x', role=StaffUser.Role.OWNER)
+        self.accountant = StaffUser.objects.create_user(
+            username='al_accountant', password='x', role=StaffUser.Role.ACCOUNTANT,
+        )
+        self.fm_user = StaffUser.objects.create_user(
+            username='al_fm_user', password='x', role=StaffUser.Role.FLOOR_MANAGER,
+        )
+        self.cashier = StaffUser.objects.create_user(username='al_cashier', password='x', role=StaffUser.Role.CASHIER)
+        self.cashier2 = StaffUser.objects.create_user(username='al_cashier2', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI AL1', display_name='Activity Player')
+        self.fm = FloorManager(name='AL Floor Boss', created_by=self.owner)
+        self.fm.set_pin('5555')
+        self.fm.save()
+
+    # --- log_activity / model ---
+
+    def test_log_activity_creates_a_row_with_the_snapshotted_role(self):
+        log_activity(self.cashier, ActivityLog.Action.LOGIN, 'Test entry', player=self.player)
+        entry = ActivityLog.objects.get()
+        self.assertEqual(entry.actor, self.cashier)
+        self.assertEqual(entry.actor_role, StaffUser.Role.CASHIER)
+        self.assertEqual(entry.summary, 'Test entry')
+        self.assertEqual(entry.player, self.player)
+
+    def test_log_activity_with_no_actor_is_fine(self):
+        log_activity(None, ActivityLog.Action.LOGIN, 'System entry')
+        entry = ActivityLog.objects.get()
+        self.assertIsNone(entry.actor)
+        self.assertEqual(entry.actor_role, '')
+
+    def test_log_activity_no_ops_in_the_public_schema(self):
+        # The public schema has no gaming_activitylog table at all (gaming
+        # is tenant-only) — patching just the name this module reads,
+        # never the real test DB connection, so this only exercises the
+        # guard itself. See ActivityLog's own docstring.
+        with patch('gaming.activity.connection') as mock_conn:
+            mock_conn.schema_name = 'public'
+            log_activity(self.owner, ActivityLog.Action.LOGIN, 'Should not be written')
+        self.assertFalse(ActivityLog.objects.exists())
+
+    def test_log_activity_writes_outside_the_public_schema(self):
+        with patch('gaming.activity.connection') as mock_conn:
+            mock_conn.schema_name = 'test1'
+            log_activity(self.owner, ActivityLog.Action.LOGIN, 'Should be written')
+        self.assertTrue(ActivityLog.objects.exists())
+
+    # --- visibility ---
+
+    def _make_entries(self):
+        log_activity(self.owner, ActivityLog.Action.OPEN_GAME_DAY, 'Owner action')
+        log_activity(self.accountant, ActivityLog.Action.SETTINGS_CHANGED, 'Accountant action')
+        log_activity(self.fm_user, ActivityLog.Action.PIN_RESET, 'FM action')
+        log_activity(self.cashier, ActivityLog.Action.CHIPS_OUT, 'Cashier 1 action')
+        log_activity(self.cashier2, ActivityLog.Action.CHIPS_OUT, 'Cashier 2 action')
+
+    def test_owner_sees_everything(self):
+        self._make_entries()
+        self.assertEqual(selectors.visible_activity(self.owner).count(), 5)
+
+    def test_accountant_sees_every_cashier_plus_own(self):
+        self._make_entries()
+        visible = selectors.visible_activity(self.accountant)
+        summaries = set(visible.values_list('summary', flat=True))
+        self.assertEqual(summaries, {'Accountant action', 'Cashier 1 action', 'Cashier 2 action'})
+
+    def test_floor_manager_sees_every_cashier_plus_own(self):
+        self._make_entries()
+        visible = selectors.visible_activity(self.fm_user)
+        summaries = set(visible.values_list('summary', flat=True))
+        self.assertEqual(summaries, {'FM action', 'Cashier 1 action', 'Cashier 2 action'})
+
+    def test_cashier_sees_only_their_own(self):
+        self._make_entries()
+        visible = selectors.visible_activity(self.cashier)
+        summaries = set(visible.values_list('summary', flat=True))
+        self.assertEqual(summaries, {'Cashier 1 action'})
+
+    def test_visibility_filters_on_the_snapshotted_role_not_a_live_role_change(self):
+        log_activity(self.cashier, ActivityLog.Action.CHIPS_OUT, 'Before promotion')
+        self.cashier.role = StaffUser.Role.FLOOR_MANAGER
+        self.cashier.save()
+        # Still visible to the Accountant as a Cashier entry, even though
+        # self.cashier is now (live) a Floor Manager.
+        visible = selectors.visible_activity(self.accountant)
+        self.assertIn('Before promotion', visible.values_list('summary', flat=True))
+
+    # --- a representative service call per category ---
+
+    def test_seat_player_writes_a_log_entry(self):
+        game_day = services.open_game_day(400, timezone.now(), self.owner)
+        services.seat_player(game_day, self.owner, player=self.player)
+        entry = ActivityLog.objects.get(action=ActivityLog.Action.SEAT_PLAYER)
+        self.assertEqual(entry.player, self.player)
+        self.assertEqual(entry.game_day, game_day)
+
+    def test_open_and_close_game_day_write_log_entries(self):
+        game_day = services.open_game_day(401, timezone.now(), self.owner)
+        self.assertTrue(
+            ActivityLog.objects.filter(action=ActivityLog.Action.OPEN_GAME_DAY, game_day=game_day).exists()
+        )
+        services.close_game_day(game_day, self.cashier, floor_manager_id=self.fm.pk, floor_manager_pin='5555')
+        self.assertTrue(
+            ActivityLog.objects.filter(action=ActivityLog.Action.CLOSE_GAME_DAY, game_day=game_day).exists()
+        )
+
+    def test_record_transaction_writes_a_log_entry_for_chips_out(self):
+        game_day = services.open_game_day(402, timezone.now(), self.owner)
+        services.seat_player(game_day, self.owner, player=self.player)
+        txn = services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(100000), recorded_by=self.cashier,
+            game_day=game_day, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='5555',
+        )
+        entry = ActivityLog.objects.get(action=ActivityLog.Action.CHIPS_OUT)
+        self.assertEqual(entry.transaction, txn)
+        self.assertEqual(entry.actor, self.cashier)
+
+    def test_void_transaction_writes_a_log_entry(self):
+        game_day = services.open_game_day(403, timezone.now(), self.owner)
+        services.seat_player(game_day, self.owner, player=self.player)
+        txn = services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(50000), recorded_by=self.cashier,
+            game_day=game_day, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='5555',
+        )
+        services.void_transaction(txn, self.owner, 'mistake')
+        self.assertTrue(ActivityLog.objects.filter(action=ActivityLog.Action.VOID, transaction=txn).exists())
+
+    def test_create_and_deactivate_profit_split_write_log_entries(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+        )
+        self.assertTrue(
+            ActivityLog.objects.filter(action=ActivityLog.Action.DEAL_CREATED, player=self.player).exists()
+        )
+        services.deactivate_profit_split_arrangement(arrangement, self.owner)
+        self.assertTrue(
+            ActivityLog.objects.filter(action=ActivityLog.Action.DEAL_ENDED, player=self.player).exists()
+        )
+
+    # --- API ---
+
+    def test_api_scopes_results_by_role(self):
+        self._make_entries()
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/activity-log/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['summary'], 'Cashier 1 action')
+
+    def test_api_filters_by_action(self):
+        self._make_entries()
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/activity-log/', {'action': 'SETTINGS_CHANGED'})
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['summary'], 'Accountant action')
+
+    def test_api_filters_by_actor(self):
+        self._make_entries()
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/activity-log/', {'actor': self.cashier2.id})
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['summary'], 'Cashier 2 action')
+
+    def test_api_requires_authentication(self):
+        response = self.client.get('/api/activity-log/')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)

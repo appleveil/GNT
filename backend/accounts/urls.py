@@ -27,4 +27,5 @@ urlpatterns = [
         bank_accounts.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'}),
         name='player-bank-account-detail',
     ),
+    path('activity-log/', views.ActivityLogView.as_view(), name='activity-log'),
 ] + router.urls

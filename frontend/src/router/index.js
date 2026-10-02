@@ -70,6 +70,7 @@ const DashboardView = () => import('@/views/accountant/DashboardView.vue')
 const LedgersLayout = () => import('@/views/accountant/LedgersLayout.vue')
 const GameDaysListView = () => import('@/views/accountant/GameDaysListView.vue')
 const OffTableView = () => import('@/views/accountant/OffTableView.vue')
+const LedgersDealsView = () => import('@/views/accountant/LedgersDealsView.vue')
 const RosterListView = () => import('@/views/accountant/RosterListView.vue')
 const PlayerLedgerView = () => import('@/views/accountant/PlayerLedgerView.vue')
 const PlayerPayoutView = () => import('@/views/accountant/PlayerPayoutView.vue')
@@ -84,6 +85,7 @@ const MasseuseListView = () => import('@/views/floor-manager/MasseuseListView.vu
 // the Owner-only half of the page (approval toggles, payout threshold) is
 // hidden inline via v-if, not by a second route.
 const ClubSettingsView = () => import('@/views/shared/ClubSettingsView.vue')
+const ActivityLogView = () => import('@/views/shared/ActivityLogView.vue')
 
 // Owner-only additions (Phase C, 2026-09-14).
 const AdminView = () => import('@/views/owner/AdminView.vue')
@@ -116,6 +118,11 @@ const OWNER_ONLY_ROLES = ['OWNER']
 // Owner can also reach Masseuses (MasseuseViewSet allows both) even
 // though it's primarily the Floor Manager's own screen/nav entry.
 const FLOOR_MANAGER_ROLES = ['FLOOR_MANAGER', 'OWNER']
+// Activity log (added 2026-10-02) — ActivityLogView.vue is the Floor
+// Manager's sidebar tab and the Cashier's avatar-menu entry; Owner/
+// Accountant instead get the same ActivityLogList.vue embedded inside
+// AdminView.vue, but nothing stops Owner reaching this route too.
+const ACTIVITY_LOG_ROLES = ['CASHIER', 'FLOOR_MANAGER', 'OWNER']
 
 const routes = [
   { path: '/login', component: LoginView, meta: { public: true } },
@@ -139,6 +146,8 @@ const routes = [
           { path: '', redirect: 'game-days' },
           { path: 'game-days', name: 'ledgers-game-days', component: GameDaysListView, meta: { roles: BACK_OFFICE_ROLES } },
           { path: 'off-table', name: 'ledgers-off-table', component: OffTableView, meta: { roles: BACK_OFFICE_ROLES } },
+          // Owner-only placeholder, added 2026-10-02 — see LedgersDealsView.vue.
+          { path: 'deals', name: 'ledgers-deals', component: LedgersDealsView, meta: { roles: OWNER_ONLY_ROLES } },
         ],
       },
       { path: 'roster', name: 'roster', component: RosterListView, meta: { roles: BACK_OFFICE_ROLES } },
@@ -158,6 +167,7 @@ const routes = [
       { path: 'deals/:playerId/profit-split', name: 'deal-profit-split', component: DealProfitSplitView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'masseuses', name: 'masseuses', component: MasseuseListView, meta: { roles: FLOOR_MANAGER_ROLES } },
       { path: 'settings', name: 'club-settings', component: ClubSettingsView, meta: { roles: FLOOR_MANAGER_ROLES } },
+      { path: 'activity', name: 'activity-log', component: ActivityLogView, meta: { roles: ACTIVITY_LOG_ROLES } },
     ],
   },
 

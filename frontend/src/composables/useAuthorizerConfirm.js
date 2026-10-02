@@ -15,6 +15,7 @@
  */
 import { ref } from 'vue'
 import api from '@/api/axios'
+import { readApiError } from '@/utils/apiError'
 
 export const isOpen = ref(false)
 export const step = ref('select') // 'select' | 'pin'
@@ -125,7 +126,11 @@ export function useAuthorizerConfirm() {
       isOpen.value = false
       onSubmitCallback = null
     } catch (err) {
-      error.value = err.response?.data?.detail || 'Something went wrong. Try again.'
+      // Was `detail`-only — a real bug (2026-10-02 fix): a field error (e.g.
+      // on the amount this PIN sheet is confirming, not the PIN itself)
+      // used to be swallowed into a generic "Something went wrong." See
+      // utils/apiError.js's readApiError.
+      error.value = readApiError(err).message
       pin.value = ''
     } finally {
       submitting.value = false

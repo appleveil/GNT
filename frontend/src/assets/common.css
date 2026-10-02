@@ -100,3 +100,26 @@ input:focus {
   outline: none;
   border-color: var(--accent);
 }
+
+/* One validation style, everywhere (added 2026-10-02 — see
+   composables/useFormValidation.js's own comment for the full rationale).
+   .input--invalid goes on the input/select/textarea itself;
+   .field-error is the message directly under it; .form-error is the one
+   banner for anything that isn't a specific field (non_field_errors,
+   detail, a field the form doesn't render). Sizes come from the
+   surrounding --control-row-* tokens (density-aware), not hardcoded here. */
+.input--invalid {
+  border-color: var(--danger) !important;
+}
+.field-error {
+  font-size: 12.5px;
+  color: var(--danger-text);
+  margin-top: 4px;
+}
+.form-error {
+  font-size: 13px;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}

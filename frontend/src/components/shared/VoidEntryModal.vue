@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import api from '@/api/axios'
 import { TRANSACTION_TYPES } from '@/constants/transactionTypes'
+import { readApiError } from '@/utils/apiError'
 
 // Centered confirm dialog (not a bottom sheet — matches the Close-Game-Day
 // confirm's .overlay/.dialog pattern, per HiFiVoidEntry.dc.html). The caller
@@ -32,9 +33,7 @@ async function onSubmit() {
     })
     emit('voided', data)
   } catch (err) {
-    error.value = err.response?.data?.detail
-      || err.response?.data?.reason?.[0]
-      || 'Could not void this entry.'
+    error.value = readApiError(err, 'Could not void this entry.').message
   } finally {
     submitting.value = false
   }
@@ -118,14 +117,7 @@ textarea {
 }
 textarea:focus { outline: none; border-color: var(--accent); }
 
-.form-error {
-  font-size: 13px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
-  margin-bottom: 12px;
-}
+.form-error { margin-bottom: 12px; }
 
 .actions { display: flex; gap: 14px; }
 .actions .btn { flex: 1; }

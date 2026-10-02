@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useGameDayStore } from '@/stores/gameDay'
 import { useClubSettingsStore } from '@/stores/clubSettings'
 import { useToast } from '@/composables/useToast'
+import { readApiError } from '@/utils/apiError'
 
 // Accountant/Owner back-office dashboard (Phase B, 2026-09-14). Phase C
 // (2026-09-14) adds two Owner-only pieces: main_account_balance (already
@@ -101,7 +102,7 @@ async function onOpenGameDay() {
     openGameDays.value = [data, ...openGameDays.value]
     toast.success(`Game-Day #${number} opened.`)
   } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not open a game-day.')
+    toast.error(readApiError(err, 'Could not open a game-day.').message)
   } finally {
     opening.value = false
   }
@@ -149,6 +150,16 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div v-if="totals.main_account_balance !== undefined" class="card stat-card">
           <div class="stat-label">Main account balance</div>
           <div class="stat-value">{{ N(totals.main_account_balance) }}</div>
+        </div>
+        <!-- Placeholder, added 2026-10-02 — Owner asked for a "Deals ROI"
+             card; definition (what counts as the return, over what period)
+             is still pending from them, so this shows "—" until there's a
+             real number to compute. No backend field yet — see PLAN.md's
+             dated entry. -->
+        <div v-if="auth.isOwner" class="card stat-card">
+          <div class="stat-label">Deals ROI</div>
+          <div class="stat-value">—</div>
+          <div class="stat-stub">This month</div>
         </div>
       </div>
 

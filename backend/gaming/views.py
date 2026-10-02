@@ -10,8 +10,9 @@ from accounts.models import Player, StaffUser
 from accounts.permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner, IsOwnerOrAccountant
 
 from . import selectors, services
+from .activity import log_activity
 from .exceptions import TableFullError
-from .models import ClubSettings, ConversionRate, Game, GameDay, ProfitSplitArrangement, Table, Transaction
+from .models import ActivityLog, ClubSettings, ConversionRate, Game, GameDay, ProfitSplitArrangement, Table, Transaction
 from .serializers import (
     ClubSettingsSerializer,
     CloseGameDaySerializer,
@@ -318,6 +319,13 @@ class TableViewSet(viewsets.ModelViewSet):
             qs = qs.filter(game_id=game_id)
         return qs
 
+    def perform_update(self, serializer):
+        table = serializer.save()
+        log_activity(
+            self.request.user, ActivityLog.Action.TABLE_CHANGED, f'Changed table {table.name}',
+            details=dict(self.request.data),
+        )
+
 
 class ClubSettingsView(APIView):
     """
@@ -362,6 +370,11 @@ class ClubSettingsView(APIView):
         serializer = ClubSettingsSerializer(ClubSettings.load(), data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        log_activity(
+            request.user, ActivityLog.Action.SETTINGS_CHANGED,
+            f'Changed club settings: {", ".join(sorted(request.data.keys()))}',
+            details=dict(request.data),
+        )
         return Response(serializer.data)
 
 

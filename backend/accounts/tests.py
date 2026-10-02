@@ -61,6 +61,25 @@ class PlayerAPITests(APITestCase):
         response = self.client.get('/api/players/')
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_create_without_account_code_auto_assigns_from_the_pool(self):
+        """
+        AddPlayerModal.vue's "+ New Player" button (2026-10-02) — registers
+        a brand-new player with no game-day/seat involved at all, mirroring
+        seat_player's own player_fields path. See PlayerViewSet.create.
+        """
+        AccountCode.objects.create(code='WWI 900', account_number='9000000900', account_name='WWI 900 DVA')
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/players/', {'display_name': 'No Code Typed'})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['account_code'], 'WWI 900')
+        self.assertFalse(Player.objects.get(account_code='WWI 900').transactions.exists())
+
+    def test_create_without_account_code_fails_when_pool_is_empty(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.post('/api/players/', {'display_name': 'No Code Left'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('No available account codes', response.data['detail'])
+
 
 class StaffAndFloorManagerAPITests(APITestCase):
     def setUp(self):

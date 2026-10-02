@@ -1,12 +1,18 @@
 from django.db import transaction as db_transaction
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.generics import ListAPIView
+from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
+
+from gaming import selectors
+from gaming.activity import log_activity
+from gaming.models import ActivityLog
 
 from .models import AccountCode, FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
 from .permissions import IsCashierOrOwner, IsFloorManagerOrOwner, IsOwner, IsOwnerOrAccountant
@@ -15,6 +21,7 @@ PIN_MIN_LENGTH = 4
 PIN_MAX_LENGTH = 8
 from .serializers import (
     AccountCodeSerializer,
+    ActivityLogSerializer,
     FloorManagerSerializer,
     PlayerBankAccountSerializer,
     PlayerSerializer,
@@ -29,6 +36,17 @@ from .serializers import (
 class StaffLoginView(TokenObtainPairView):
     serializer_class = StaffLoginSerializer
     permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            # Looked up post-hoc rather than threaded through the JWT
+            # serializer — login is case-insensitive (accounts/backends.py),
+            # so this mirrors that lookup exactly.
+            user = StaffUser.objects.filter(username__iexact=request.data.get('username', '')).first()
+            if user is not None:
+                log_activity(user, ActivityLog.Action.LOGIN, f'{user.get_full_name() or user.username} logged in')
+        return response
 
 
 class LogoutView(APIView):
@@ -62,6 +80,7 @@ class SetOwnPinView(APIView):
             )
         request.user.set_pin(pin)
         request.user.save(update_fields=['pin_hash'])
+        log_activity(request.user, ActivityLog.Action.PIN_RESET, 'Set their own PIN')
         return Response(status=204)
 
 
@@ -73,6 +92,13 @@ class StaffUserViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         return StaffUserCreateSerializer if self.action == 'create' else StaffUserSerializer
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+        log_activity(
+            self.request.user, ActivityLog.Action.STAFF_CREATED,
+            f'Created {user.get_role_display()} account for {user.get_full_name() or user.username}',
+        )
 
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def owners(self, request):
@@ -97,6 +123,10 @@ class StaffUserViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         user.set_password(serializer.validated_data['password'])
         user.save(update_fields=['password'])
+        log_activity(
+            request.user, ActivityLog.Action.PASSWORD_RESET,
+            f"Reset {user.get_full_name() or user.username}'s password",
+        )
         return Response(status=204)
 
 
@@ -121,6 +151,19 @@ class FloorManagerViewSet(viewsets.ModelViewSet):
         if self.action in ('list', 'retrieve'):
             return [IsAuthenticated()]
         return [IsOwner()]
+
+    def perform_create(self, serializer):
+        fm = serializer.save()
+        log_activity(self.request.user, ActivityLog.Action.STAFF_CREATED, f'Added Floor Manager {fm.name}')
+
+    def perform_update(self, serializer):
+        # Only a PIN change is itself an "action" worth a log entry — a
+        # plain name/is_active edit isn't one of the categories this log
+        # covers.
+        pin_changed = bool(self.request.data.get('pin'))
+        fm = serializer.save()
+        if pin_changed:
+            log_activity(self.request.user, ActivityLog.Action.PIN_RESET, f"Reset Floor Manager {fm.name}'s PIN")
 
 
 class StaffMemberViewSet(viewsets.ModelViewSet):
@@ -156,6 +199,13 @@ class StaffMemberViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated()]
         return [IsFloorManagerOrOwner()]
 
+    def perform_create(self, serializer):
+        member = serializer.save()
+        log_activity(
+            self.request.user, ActivityLog.Action.STAFF_CREATED,
+            f'Added {member.get_role_display()} {member.name}',
+        )
+
 
 class PlayerViewSet(viewsets.ModelViewSet):
     """Read: any authenticated staff. Write: Cashier or Owner only."""
@@ -168,6 +218,54 @@ class PlayerViewSet(viewsets.ModelViewSet):
         if self.action in ('create', 'update', 'partial_update', 'destroy', 'provision_gaming_account'):
             return [IsCashierOrOwner()]
         return super().get_permissions()
+
+    def create(self, request, *args, **kwargs):
+        """
+        Added 2026-10-02 for AddPlayerModal.vue's "+ New Player" button,
+        which now registers a player here directly instead of going through
+        seat_player (see that function's own "made OPT-IN" note) — it no
+        longer seats them for any game-day at all, closing the old
+        "Unassigned" list. Without an `account_code` in the payload, this
+        mirrors seat_player's own path exactly: the next code is assigned
+        from the AccountCode pool via gaming.services._assign_next_account_code
+        (raises InvalidStateError, surfaced as 400 by the global exception
+        handler, if the pool is empty). Passing an explicit `account_code`
+        (not used by the frontend, but not removed) still goes through the
+        normal serializer path unchanged.
+        """
+        if not request.data.get('account_code'):
+            from gaming.services import _assign_next_account_code
+
+            player = _assign_next_account_code(request.data.get('display_name', ''))
+            log_activity(
+                request.user, ActivityLog.Action.PLAYER_CREATED, f'Registered player {player.display_name}',
+                player=player,
+            )
+            serializer = self.get_serializer(player)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        player = serializer.save()
+        log_activity(
+            self.request.user, ActivityLog.Action.PLAYER_CREATED, f'Registered player {player.display_name}',
+            player=player,
+        )
+
+    def perform_update(self, serializer):
+        # Credit limit is the one field on this viewset worth its own log
+        # entry (Owner-only, per PlayerSerializer.validate_chips_limit) —
+        # a display_name edit or similar isn't one of this log's categories.
+        old_limit = serializer.instance.chips_limit
+        player = serializer.save()
+        if 'chips_limit' in serializer.validated_data and player.chips_limit != old_limit:
+            log_activity(
+                self.request.user, ActivityLog.Action.CREDIT_LIMIT_CHANGED,
+                f"Changed {player.display_name}'s credit limit from "
+                f'{old_limit if old_limit is not None else "none"} to '
+                f'{player.chips_limit if player.chips_limit is not None else "none"}',
+                player=player, details={'old': str(old_limit), 'new': str(player.chips_limit)},
+            )
 
     def list(self, request, *args, **kwargs):
         """
@@ -305,6 +403,11 @@ class AccountCodeViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewset
             to_create = []
 
         created = AccountCode.objects.bulk_create(to_create)
+        if created:
+            log_activity(
+                request.user, ActivityLog.Action.ACCOUNT_CODES_ADDED,
+                f'Added {len(created)} account code(s)', details={'codes': [c.code for c in created]},
+            )
         return Response(
             {'created': AccountCodeSerializer(created, many=True).data, 'errors': errors},
             status=status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST,
@@ -313,3 +416,35 @@ class AccountCodeViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewset
     @action(detail=False, methods=['get'], url_path='available-count', permission_classes=[IsAuthenticated])
     def available_count(self, request):
         return Response({'count': AccountCode.objects.filter(linked_player__isnull=True).count()})
+
+
+class ActivityLogPagination(LimitOffsetPagination):
+    default_limit = 50
+    max_limit = 200
+
+
+class ActivityLogView(ListAPIView):
+    """
+    GET /activity-log/ — see ActivityLog's own docstring and
+    gaming.selectors.visible_activity for the role-scoping rule (every
+    authenticated role can read this endpoint; what they see back differs).
+    Optional filters: ?actor=<StaffUser id>, ?action=<ActivityLog.Action
+    value>, ?date_from=<YYYY-MM-DD>, ?date_to=<YYYY-MM-DD> (inclusive).
+    """
+
+    serializer_class = ActivityLogSerializer
+    pagination_class = ActivityLogPagination
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = selectors.visible_activity(self.request.user)
+        params = self.request.query_params
+        if params.get('actor'):
+            qs = qs.filter(actor_id=params['actor'])
+        if params.get('action'):
+            qs = qs.filter(action=params['action'])
+        if params.get('date_from'):
+            qs = qs.filter(created_at__date__gte=params['date_from'])
+        if params.get('date_to'):
+            qs = qs.filter(created_at__date__lte=params['date_to'])
+        return qs

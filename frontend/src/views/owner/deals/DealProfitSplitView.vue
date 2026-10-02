@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
+import { useFormValidation, minPct, maxPct } from '@/composables/useFormValidation'
 
 // "Deals" Stake and Profit Split (2026-09-23) — mirrors mobile's
 // ProfitSplitScreen.tsx/ProfitSplitDetailScreen.tsx, wired to the real
@@ -94,12 +95,23 @@ watch(stakeOn, on => {
 })
 
 const submitting = ref(false)
-const error = ref('')
-const canSubmit = computed(() => stakeOn.value || payoutOn.value)
+
+// House stake % and the custom payout % are the only two free-text numeric
+// fields here that can be out of range — validated live (2026-10-02, see
+// PLAN.md's dated entry on the site-wide validation pass). Each rule is a
+// no-op while its section is off/inapplicable, so turning Stake or Payout
+// off never blocks Save on a percentage that no longer matters.
+const { touched, errors, isValid, formError, touch, applyServerErrors } = useFormValidation({
+  housePct: { value: housePct, rules: [v => (stakeOn.value ? minPct()(v) || maxPct()(v) : null)] },
+  customRatioPct: {
+    value: customRatioPct,
+    rules: [v => (payoutOn.value && payoutSplitMethod.value === 'CUSTOM_RATIO' ? minPct()(v) || maxPct()(v) : null)],
+  },
+})
+const canSubmit = computed(() => (stakeOn.value || payoutOn.value) && isValid.value)
 
 async function onSubmit() {
   if (!canSubmit.value) return
-  error.value = ''
   submitting.value = true
   try {
     const payload = {
@@ -129,13 +141,13 @@ async function onSubmit() {
     toast.success(`Arrangement set up for ${player.value.display_name}.`)
     router.push(`/deals/${route.params.playerId}`)
   } catch (err) {
-    error.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not save this arrangement.'
+    applyServerErrors(err)
   } finally {
     submitting.value = false
   }
 }
 
-const RESET_CADENCE_LABEL = { ONE_OFF: 'One-off', DAILY: 'Daily', WEEKLY: 'Weekly', MONTHLY: 'Monthly' }
+const RESET_CADENCE_LABEL = { ONE_OFF: 'One-off', PER_GAME: 'Per game' }
 const PAYOUT_BASIS_LABEL = { BEFORE_BUYIN: 'Before buy-in', AFTER_BUYIN: 'After buy-in' }
 const PAYOUT_METHOD_LABEL = { STAKE_RATIO: 'Ratio: according to stake', CUSTOM_RATIO: 'Ratio: house percentage', FIXED: 'Fixed amount' }
 
@@ -183,7 +195,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <div class="config-lines">
           <div class="config-line">
             <span class="config-key">Stake</span>
-            <span>{{ status.arrangement.house_stake_pct }}% of buy-in, capped at {{ N(status.arrangement.cap_amount) }} per {{ RESET_CADENCE_LABEL[status.arrangement.reset_cadence].toLowerCase() }} period</span>
+            <span>{{ status.arrangement.house_stake_pct }}% of buy-in, capped at {{ N(status.arrangement.cap_amount) }} {{ status.arrangement.reset_cadence === 'ONE_OFF' ? 'total' : 'per game' }}</span>
           </div>
           <div class="config-line">
             <span class="config-key">Payout</span>
@@ -196,7 +208,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
       <button v-if="status && !showForm" class="link-btn" type="button" @click="showForm = true">Set up a new arrangement &rarr;</button>
 
-      <form v-if="showForm" class="deal-form" @submit.prevent="onSubmit">
+      <form v-if="showForm" class="deal-form" novalidate @submit.prevent="onSubmit">
         <p v-if="status" class="replace-note">Setting up a new arrangement replaces the active one above.</p>
 
         <div class="section">
@@ -210,10 +222,14 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <template v-if="stakeOn">
             <label class="field">
               <span class="field-label">House stake %</span>
-              <input v-model="housePct" type="number" min="0" max="100" step="0.5" placeholder="0" class="ff" />
+              <input
+                v-model="housePct" type="number" step="0.5" placeholder="0" class="ff"
+                :class="{ 'input--invalid': touched.housePct && errors.housePct }" @blur="touch('housePct')"
+              />
+              <p v-if="touched.housePct && errors.housePct" class="field-error">{{ errors.housePct }}</p>
             </label>
             <label class="field">
-              <span class="field-label">Cap per period</span>
+              <span class="field-label">Cap per game</span>
               <input
                 :value="displayCapAmount" type="text" inputmode="numeric" placeholder="0" class="ff"
                 @input="e => { capAmount = parseAmountInput(e.target.value); e.target.value = displayCapAmount }"
@@ -223,26 +239,28 @@ const N = n => `₦${Number(n).toLocaleString()}`
               <span class="field-label">Resets</span>
               <select v-model="resetCadence" class="ff">
                 <option value="ONE_OFF">One-off (no reset)</option>
-                <option value="DAILY">Daily</option>
-                <option value="WEEKLY">Weekly</option>
-                <option value="MONTHLY">Monthly</option>
+                <option value="PER_GAME">Per game</option>
               </select>
             </label>
+            <!-- Order matches the end-condition check itself (whichever is
+                 reached first ends the arrangement — see
+                 selectors.profit_split_status): max total value, then end
+                 date, then number of games. -->
             <template v-if="resetCadence !== 'ONE_OFF'">
-              <label class="field">
-                <span class="field-label">Ends on <span class="optional">(optional)</span></span>
-                <input v-model="endsAt" type="date" class="ff" />
-              </label>
-              <label class="field">
-                <span class="field-label">Number of resets <span class="optional">(optional)</span></span>
-                <input v-model="maxResets" type="number" min="1" placeholder="Unlimited" class="ff" />
-              </label>
               <label class="field">
                 <span class="field-label">Max total value covered <span class="optional">(optional)</span></span>
                 <input
                   :value="displayMaxCumulativeValue" type="text" inputmode="numeric" placeholder="Unlimited" class="ff"
                   @input="e => { maxCumulativeValue = parseAmountInput(e.target.value); e.target.value = displayMaxCumulativeValue }"
                 />
+              </label>
+              <label class="field">
+                <span class="field-label">Ends on <span class="optional">(optional)</span></span>
+                <input v-model="endsAt" type="date" class="ff" />
+              </label>
+              <label class="field">
+                <span class="field-label">Number of games <span class="optional">(optional)</span></span>
+                <input v-model="maxResets" type="number" min="1" placeholder="Unlimited" class="ff" />
               </label>
             </template>
           </template>
@@ -283,7 +301,12 @@ const N = n => `₦${Number(n).toLocaleString()}`
             </div>
             <label v-if="payoutSplitMethod === 'CUSTOM_RATIO'" class="field">
               <span class="field-label">House percentage</span>
-              <input v-model="customRatioPct" type="number" min="0" max="100" step="0.5" placeholder="0" class="ff" />
+              <input
+                v-model="customRatioPct" type="number" step="0.5" placeholder="0" class="ff"
+                :class="{ 'input--invalid': touched.customRatioPct && errors.customRatioPct }"
+                @blur="touch('customRatioPct')"
+              />
+              <p v-if="touched.customRatioPct && errors.customRatioPct" class="field-error">{{ errors.customRatioPct }}</p>
             </label>
             <template v-if="payoutSplitMethod === 'FIXED'">
               <label class="field">
@@ -304,7 +327,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
           </template>
         </div>
 
-        <p v-if="error" class="form-error">{{ error }}</p>
+        <p v-if="formError" class="form-error">{{ formError }}</p>
 
         <button class="btn btn--primary submit-btn" type="submit" :disabled="!canSubmit || submitting">
           {{ submitting ? 'Saving…' : 'Save arrangement' }}
@@ -385,14 +408,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .radio-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
 .radio-row--disabled { opacity: 0.45; cursor: default; }
 
-.form-error {
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-bottom: 16px;
-}
 .submit-btn { width: 100%; }
 
 .overlay { position: fixed; inset: 0; background: rgba(20, 25, 32, 0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }

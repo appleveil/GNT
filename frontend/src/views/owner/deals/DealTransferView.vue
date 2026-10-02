@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/axios'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
+import { useFormValidation, required } from '@/composables/useFormValidation'
 
 // "Deals" Transfer (2026-09-23) — mirrors mobile's TransferScreen.tsx, wired
 // to the real backend: POST /deals/transfer/ {source_player, destination_player,
@@ -23,7 +24,6 @@ const targetId = ref(null)
 const amount = ref('')
 const reason = ref('')
 const submitting = ref(false)
-const error = ref('')
 
 async function load() {
   loading.value = true
@@ -53,8 +53,18 @@ const filteredTargets = computed(() => {
 
 const displayAmount = computed(() => formatAmountForDisplay(amount.value))
 const amountNumber = computed(() => Number(amount.value) || 0)
-const over = computed(() => amountNumber.value > available.value)
-const canSubmit = computed(() => !!target.value && amountNumber.value > 0 && !over.value && reason.value.trim().length > 0)
+
+const { touched, errors, isValid, formError, touch, applyServerErrors } = useFormValidation({
+  amount: {
+    value: amount,
+    rules: [
+      v => (Number(v) > 0 ? null : 'Enter an amount greater than zero.'),
+      v => (Number(v) > available.value ? "Can't exceed the available balance." : null),
+    ],
+  },
+  reason: { value: reason, rules: [required('A reason is required.')] },
+})
+const canSubmit = computed(() => !!target.value && isValid.value)
 
 // Once real progress has been made, switching the recipient by mistake
 // would silently misattribute what was typed — confirm first, same rule as
@@ -76,7 +86,6 @@ function onConfirmSwitch() {
 
 async function onSubmit() {
   if (!canSubmit.value) return
-  error.value = ''
   submitting.value = true
   try {
     await api.post('/deals/transfer/', {
@@ -88,7 +97,7 @@ async function onSubmit() {
     toast.success(`₦${amountNumber.value.toLocaleString()} moved from ${player.value.display_name} to ${target.value.display_name}.`)
     router.push(`/deals/${route.params.playerId}`)
   } catch (err) {
-    error.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not save this transfer.'
+    applyServerErrors(err)
   } finally {
     submitting.value = false
   }
@@ -137,17 +146,23 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <span class="field-label">Amount <span class="req">*</span></span>
           <input
             :value="displayAmount" type="text" inputmode="numeric" placeholder="0" class="ff"
+            :class="{ 'input--invalid': touched.amount && errors.amount }"
             @input="e => { amount = parseAmountInput(e.target.value); e.target.value = displayAmount }"
+            @blur="touch('amount')"
           />
-          <span v-if="over" class="field-error">Can't exceed the available balance.</span>
+          <p v-if="touched.amount && errors.amount" class="field-error">{{ errors.amount }}</p>
         </label>
 
         <label class="field">
           <span class="field-label">Reason <span class="req">*</span></span>
-          <textarea v-model="reason" class="ff ff--area" placeholder="Why is this being transferred?" rows="3" />
+          <textarea
+            v-model="reason" class="ff ff--area" placeholder="Why is this being transferred?" rows="3"
+            :class="{ 'input--invalid': touched.reason && errors.reason }" @blur="touch('reason')"
+          />
+          <p v-if="touched.reason && errors.reason" class="field-error">{{ errors.reason }}</p>
         </label>
 
-        <p v-if="error" class="form-error">{{ error }}</p>
+        <p v-if="formError" class="form-error">{{ formError }}</p>
 
         <button class="btn btn--primary submit-btn" type="button" :disabled="!canSubmit || submitting" @click="onSubmit">
           {{ submitting ? 'Transferring…' : 'Transfer' }}
@@ -233,19 +248,9 @@ const N = n => `₦${Number(n).toLocaleString()}`
 }
 .ff:focus { outline: none; border-color: var(--accent); }
 .ff--area { height: auto; padding: 12px 14px; resize: vertical; font-size: 13.5px; }
-.field-error { display: block; font-size: 11.5px; color: var(--danger-text); margin-top: 4px; }
 
 .banner { border-radius: var(--radius-sm); padding: 12px 14px; font-size: 12.5px; }
 .banner--danger { background: var(--danger-bg); color: var(--danger-text); }
-
-.form-error {
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-bottom: 16px;
-}
 
 .submit-btn { width: 100%; }
 

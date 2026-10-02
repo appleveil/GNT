@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import api from '@/api/axios'
 import BankAccountFields from '@/components/shared/BankAccountFields.vue'
 import { useToast } from '@/composables/useToast'
+import { readApiError } from '@/utils/apiError'
 
 // Replaces sending the Cashier to the old Player Detail page just to add a
 // bank account before a payout — same add-bank-account capability that page
@@ -35,7 +36,7 @@ async function onAddBank() {
     })
     emit('added')
   } catch (err) {
-    error.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add bank account.'
+    error.value = readApiError(err, 'Could not add bank account.').message
   } finally {
     submitting.value = false
   }
@@ -130,11 +131,4 @@ async function onSetDefault(bank) {
 .link-btn.small { font-size: 11px; }
 
 .bank-form { display: flex; flex-direction: column; gap: 12px; }
-.form-error {
-  font-size: 13px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
-}
 </style>

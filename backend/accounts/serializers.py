@@ -3,7 +3,33 @@ from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from gaming.models import ActivityLog
+
 from .models import AccountCode, FloorManager, Player, PlayerBankAccount, StaffMember, StaffUser
+
+
+class ActivityLogSerializer(serializers.ModelSerializer):
+    """Read-only — see ActivityLog's own docstring and views.ActivityLogView."""
+
+    actor_name = serializers.SerializerMethodField()
+    action_display = serializers.CharField(source='get_action_display', read_only=True)
+    player_name = serializers.CharField(source='player.display_name', read_only=True, default=None)
+    game_day_number = serializers.IntegerField(source='game_day.number', read_only=True, default=None)
+
+    class Meta:
+        model = ActivityLog
+        fields = [
+            'id', 'actor', 'actor_name', 'actor_role', 'action', 'action_display', 'summary',
+            'player', 'player_name', 'game_day', 'game_day_number', 'transaction', 'details', 'created_at',
+        ]
+
+    def get_actor_name(self, obj):
+        # Falls back to "System" for a webhook/automated entry (actor=None)
+        # or one whose actor account was since deleted (SET_NULL) — never
+        # a blank cell.
+        if obj.actor_id is None:
+            return 'System'
+        return obj.actor.get_full_name() or obj.actor.username
 
 
 class StaffLoginSerializer(TokenObtainPairSerializer):
@@ -184,27 +210,36 @@ class PlayerSerializer(serializers.ModelSerializer):
             return Decimal('0')
         return player_game_day_balance(obj, game_day)
 
-    def get_balance(self, obj):
+    def _cashier_visible_balance(self, obj):
+        """
+        gaming.selectors.cashier_visible_balance, reimplemented against this
+        serializer's own (possibly bulk-context-backed) helpers rather than
+        called directly, so PlayerViewSet.list's N+1 fix still applies here.
+        See CONCEPT.md's "Cashier player-history visibility": a DEBT carried
+        over from before today stays hidden — only today's own game-day
+        debt (if any) is surfaced. A CREDIT carried over (the house owes
+        this player) is shown instead, drawn down by today's own activity;
+        once it's exhausted the figure can legitimately go negative — that
+        portion is today's own net activity, not old debt resurfacing.
+        """
         lifetime = self._lifetime_balance(obj)
+        today = self._game_day_balance(obj)
+        prior = lifetime - today
+        if prior >= 0:
+            return lifetime
+        return today if today < 0 else Decimal('0')
+
+    def get_balance(self, obj):
         request = self.context.get('request')
         if not (request and getattr(request.user, 'role', None) == StaffUser.Role.CASHIER):
-            return lifetime
-
-        # Cashier visibility rule (see CONCEPT.md's "Cashier player-history
-        # visibility"): positive is always shown, regardless of when it accrued —
-        # it's what makes a payout possible. A negative lifetime figure is NEVER
-        # shown as-is; only today's own game-day debt (if any) is surfaced, not
-        # even a hint of how much is carried over from a previous day.
-        if lifetime >= 0:
-            return lifetime
-        today = self._game_day_balance(obj)
-        return today if today < 0 else Decimal('0')
+            return self._lifetime_balance(obj)
+        return self._cashier_visible_balance(obj)
 
     def get_chips_used_today(self, obj):
         """How much of chips_limit is already used tonight, for the inline Cashier UI."""
         if obj.chips_limit is None:
             return None
-        balance = self._game_day_balance(obj)
+        balance = self._cashier_visible_balance(obj)
         return -balance if balance < 0 else Decimal('0')
 
     def get_gaming_account(self, obj):

@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useFormValidation, required } from '@/composables/useFormValidation'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -10,7 +11,14 @@ const username = ref('')
 const password = ref('')
 const error = ref('')
 
+const { touched, errors, isValid, touch, touchAll } = useFormValidation({
+  username: { value: username, rules: [required()] },
+  password: { value: password, rules: [required()] },
+})
+
 async function onSubmit() {
+  touchAll()
+  if (!isValid.value) return
   error.value = ''
   const result = await auth.login(username.value, password.value)
   if (result.ok) {
@@ -27,7 +35,7 @@ async function onSubmit() {
 
 <template>
   <div class="login-page">
-    <form class="login-card card" @submit.prevent="onSubmit">
+    <form class="login-card card" novalidate @submit.prevent="onSubmit">
       <div class="login-brand">
         <div class="login-logo">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8">
@@ -40,15 +48,23 @@ async function onSubmit() {
 
       <label class="field">
         <span class="eyebrow">Username</span>
-        <input v-model="username" type="text" autocomplete="username" required autofocus />
+        <input
+          v-model="username" type="text" autocomplete="username" autofocus
+          :class="{ 'input--invalid': touched.username && errors.username }" @blur="touch('username')"
+        />
+        <p v-if="touched.username && errors.username" class="field-error">{{ errors.username }}</p>
       </label>
 
       <label class="field">
         <span class="eyebrow">Password</span>
-        <input v-model="password" type="password" autocomplete="current-password" required />
+        <input
+          v-model="password" type="password" autocomplete="current-password"
+          :class="{ 'input--invalid': touched.password && errors.password }" @blur="touch('password')"
+        />
+        <p v-if="touched.password && errors.password" class="field-error">{{ errors.password }}</p>
       </label>
 
-      <p v-if="error" class="login-error">{{ error }}</p>
+      <p v-if="error" class="form-error">{{ error }}</p>
 
       <button class="btn btn--primary" type="submit" :disabled="auth.loading">
         {{ auth.loading ? 'Signing in…' : 'Sign In' }}
@@ -112,13 +128,6 @@ async function onSubmit() {
 .field input[type='password'] {
   font-family: var(--font-mono);
   letter-spacing: 0.12em;
-}
-.login-error {
-  font-size: 13px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
 }
 .login-help {
   text-align: center;

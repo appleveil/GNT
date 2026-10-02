@@ -153,6 +153,9 @@ class ClubSettings(models.Model):
     that excess added to their own min_player_time_minutes, but only while
     it hasn't already elapsed) is left for a later pass. Stored now so the
     Settings screen has a stable place for it ahead of that work.
+
+    auto_issue_buy_in_on_seating, added 2026-10-02 — see its own field
+    comment below.
     """
 
     require_approval_open_game_day = models.BooleanField(default=True)
@@ -173,6 +176,16 @@ class ClubSettings(models.Model):
 
     track_away_from_table = models.BooleanField(default=False)
     away_max_minutes = models.PositiveIntegerField(default=10)
+
+    # Added 2026-10-02: whether seat_player's automatic default-buy-in
+    # (CHIPS_OUT for game_day.buy_in_amount, no Floor Manager PIN — see
+    # that function's own docstring) fires at all. Off by default — the
+    # Cashier issues the first buy-in manually via Issue Chips instead,
+    # which now pre-fills with the same buy_in_amount (see
+    # TransactionEntryModal.vue), so nothing is lost by turning this off;
+    # it only removes the surprise of chips appearing with no Cashier
+    # action behind them. Owner-only, like cashier_can_initiate_payout.
+    auto_issue_buy_in_on_seating = models.BooleanField(default=False)
 
     def save(self, *args, **kwargs):
         self.pk = 1
@@ -353,9 +366,16 @@ class ProfitSplitArrangement(models.Model):
 
     class ResetCadence(models.TextChoices):
         ONE_OFF = 'ONE_OFF', 'One-off'
-        DAILY = 'DAILY', 'Daily'
-        WEEKLY = 'WEEKLY', 'Weekly'
-        MONTHLY = 'MONTHLY', 'Monthly'
+        # Replaced DAILY/WEEKLY/MONTHLY 2026-10-02 — those refilled on a
+        # wall clock measured from the exact moment the deal was created,
+        # which is the wrong basis for a cap meant to apply "per game
+        # night": a night that runs past the refill time got charged two
+        # caps, a night with no game still consumed a reset, and
+        # max_resets counted periods, not nights actually played. PER_GAME
+        # refills when a new game-day opens and counts resets by distinct
+        # game-days the arrangement actually saw stake activity on — see
+        # selectors.profit_split_status.
+        PER_GAME = 'PER_GAME', 'Per game'
 
     class PayoutBasis(models.TextChoices):
         BEFORE_BUYIN = 'BEFORE_BUYIN', 'Before buy-in'
@@ -371,12 +391,14 @@ class ProfitSplitArrangement(models.Model):
     # Stake — how much of a buy-in the house covers. A cap of 0 effectively
     # means no real stake even with a nonzero percentage, per the concept doc.
     house_stake_pct = models.DecimalField(max_digits=5, decimal_places=2)  # 0-100
-    cap_amount = models.DecimalField(max_digits=14, decimal_places=0)  # per-period ceiling
+    cap_amount = models.DecimalField(max_digits=14, decimal_places=0)  # per-game ceiling (ONE_OFF: lifetime)
     reset_cadence = models.CharField(max_length=10, choices=ResetCadence.choices, default=ResetCadence.ONE_OFF)
     # The following three only apply when reset_cadence != ONE_OFF, and are
-    # all optional — whichever is reached first ends the arrangement.
+    # all optional. Whichever is reached first ends the arrangement — in
+    # priority order (per explicit instruction, 2026-10-02): total value →
+    # end date → number of games. See selectors.profit_split_status.
     ends_at = models.DateTimeField(null=True, blank=True)
-    max_resets = models.PositiveIntegerField(null=True, blank=True)
+    max_resets = models.PositiveIntegerField(null=True, blank=True)  # number of GAMES, not periods — see ResetCadence
     max_cumulative_value = models.DecimalField(max_digits=14, decimal_places=0, null=True, blank=True)
 
     # Payout split — configuration only for now, see docstring above.
@@ -427,15 +449,34 @@ class Transaction(models.Model):
         DEAL_TRANSFER_OUT = 'DEAL_TRANSFER_OUT', 'Deal transfer (out)'
         DEAL_TRANSFER_IN = 'DEAL_TRANSFER_IN', 'Deal transfer (in)'
         # Added 2026-09-20 — "Deals" Profit Split's stake side: the house's
-        # own contribution toward a buy-in, never a debit against the
-        # player (see selectors.DEBIT_TYPES/CREDIT_TYPES — deliberately in
-        # neither, contributes 0 to player_balance). See
-        # ProfitSplitArrangement's docstring and services.record_transaction.
+        # own contribution toward a buy-in. Revised 2026-09-28: now a real
+        # credit against the player (see selectors.CREDIT_TYPES) — was
+        # excluded from both DEBIT/CREDIT_TYPES and balance-neutral before
+        # that. See ProfitSplitArrangement's docstring and
+        # services.record_transaction.
         PROFIT_SPLIT_STAKE = 'PROFIT_SPLIT_STAKE', 'Profit split — house stake'
         # TABLE_BUY_IN/TABLE_CASH_OUT (added 2026-09-21, a second tracked
         # step between CHIPS_OUT and a Table) were REMOVED 2026-09-21 —
         # reverted back to one step: CHIPS_OUT alone represents a buy-in.
         # See PLAN.md's dated revert entry.
+        # Added 2026-09-25 — the ledger-visible half of drawing down a
+        # player's carried-forward credit (the house owes them from a
+        # previous game-day) against a buy-in: "one line per action," so
+        # the CHIPS_OUT line stays "chips issued" only, and this is the
+        # separate line for "this much was covered by your own existing
+        # balance instead of becoming new debt." Always created as a linked
+        # pair with PLAYER_BALANCE_OUT (see Transaction.linked_transaction),
+        # and always points back at the CHIPS_OUT it was applied to via
+        # source_buy_in. See selectors.cashier_visible_balance/
+        # player_prior_balance and services.record_transaction.
+        PLAYER_BALANCE_IN = 'PLAYER_BALANCE_IN', 'Player balance'
+        # The other half of the pair above: a dateless (game_day=None)
+        # debit against the player's carried-forward credit itself — see
+        # outstanding_ledger. Never shown on any game-day-scoped ledger
+        # (nothing filters game_day=None into one), by construction rather
+        # than by any masking rule; visible only on the Owner/Accountant
+        # Outstanding ledger.
+        PLAYER_BALANCE_OUT = 'PLAYER_BALANCE_OUT', 'Player balance (carried forward)'
 
     class TipCategory(models.TextChoices):
         """
@@ -547,13 +588,30 @@ class Transaction(models.Model):
     # Paystack transaction ID — unique when set, used for webhook idempotency.
     external_reference = models.CharField(max_length=100, null=True, blank=True, unique=True)
 
-    # Set only on a DEAL_TRANSFER_OUT/DEAL_TRANSFER_IN pair (added 2026-09-20)
-    # — each row points at its counterpart so a ledger listing can render
-    # "Transfer to <player>" / "Transfer from <player>". SET_NULL, not
+    # Set on any TRUE PAIR, both legs pointing at each other: a
+    # DEAL_TRANSFER_OUT/IN pair (2026-09-20), a CHIPS_OUT and the
+    # PROFIT_SPLIT_STAKE credit split from it (2026-09-20), or a
+    # PLAYER_BALANCE_IN/OUT pair (2026-09-25) — each row points at its
+    # counterpart so a ledger listing can render "Transfer to <player>" and
+    # so void_transaction can void both legs together. SET_NULL, not
     # PROTECT: losing the link on deletion would only weaken display, never
     # the ledger math itself (each row's own amount/type stands alone).
+    # Strictly one-to-one, so a CHIPS_OUT with an active stake deal uses
+    # this slot for its PROFIT_SPLIT_STAKE credit — its (separate)
+    # PLAYER_BALANCE_IN, if any, is found via source_buy_in below instead.
     linked_transaction = models.OneToOneField(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    # Set only on a PLAYER_BALANCE_IN row, pointing at the CHIPS_OUT it was
+    # applied to (added 2026-09-25) — a plain, non-unique FK rather than
+    # reusing linked_transaction, since a CHIPS_OUT may already have that
+    # slot taken by a PROFIT_SPLIT_STAKE credit and still separately draw
+    # down a carried balance. void_transaction uses
+    # chips_out.balance_applications to find and cascade-void it. SET_NULL,
+    # same reasoning as linked_transaction.
+    source_buy_in = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='balance_applications',
     )
 
     # Set only on a PROFIT_SPLIT_STAKE row (and, for display, on the paired
@@ -616,3 +674,98 @@ class GameDaySummary(models.Model):
 
     def __str__(self):
         return f'Summary — Game-day {self.game_day.number}'
+
+
+class ActivityLog(models.Model):
+    """
+    Append-only record of staff actions — added 2026-10-02 so the Owner,
+    Accountant, and Floor Manager can see who did what and when (see
+    CONCEPT.md's "Activity log"). `gaming.activity.log_activity` is the
+    ONE place that writes a row (called from gaming.services alongside the
+    service functions it documents each action, and from a handful of
+    accounts.views endpoints — staff/PIN management, player creation,
+    login); `gaming.selectors.visible_activity` is the one place that
+    scopes what a given role can read back. No update/delete endpoint —
+    this is a log, not an editable record.
+
+    Lives in `gaming`, not `accounts`, even though several of its entries
+    come from accounts.views — `accounts` is in BOTH SHARED_APPS and
+    TENANT_APPS (see settings/base.py's comment on why), so its own tables
+    are also created in the public schema, where `gaming`'s tables don't
+    exist at all. A model in `accounts` can't carry a hard FK into
+    `gaming` (GameDay/Transaction below) without that CREATE TABLE failing
+    in public. `gaming` itself is tenant-only, so this never runs there;
+    `gaming.activity.log_activity` additionally no-ops entirely when called
+    from the public schema (e.g. a site-wide admin login), since there's no
+    gaming_activitylog table to write into there either.
+
+    `actor_role` is a SNAPSHOT of the actor's role at the time of the
+    action, not a live join to their current one — a Cashier later
+    promoted to Floor Manager still shows as a Cashier on their old
+    entries, which is what they actually were acting as when they did it.
+    This is also what `visible_activity` filters on for the "Accountant/
+    Floor Manager see every Cashier's entries" rule, for the same reason.
+
+    `player`/`game_day`/`transaction` are optional cross-references for
+    entries that have one (most do) — SET_NULL, not PROTECT: losing the
+    link on deletion should never block deleting the thing it points to,
+    and the human-readable `summary` stands on its own either way.
+    `details` is a free-form JSON bag for whatever extra context one
+    specific action wants to keep (e.g. a void's reason, a settings
+    change's old/new values, which Floor Manager/Owner signed off) —
+    deliberately not normalized into more columns, since every action
+    shape is different and none of this is ever queried on, only displayed.
+    """
+
+    class Action(models.TextChoices):
+        CHIPS_OUT = 'CHIPS_OUT', 'Issued chips'
+        CHIPS_IN = 'CHIPS_IN', 'Returned chips'
+        PAYMENT = 'PAYMENT', 'Recorded a payment'
+        RAKE = 'RAKE', 'Recorded rake'
+        TIP = 'TIP', 'Recorded a tip'
+        WRITE_OFF = 'WRITE_OFF', 'Wrote off a balance'
+        DEAL_TRANSFER = 'DEAL_TRANSFER', "Transferred a player's balance"
+        VOID = 'VOID', 'Voided an entry'
+        SEAT_PLAYER = 'SEAT_PLAYER', 'Seated a player'
+        LEAVE_TABLE = 'LEAVE_TABLE', 'Marked a player as left the table'
+        MOVE_SEAT = 'MOVE_SEAT', 'Moved a seat'
+        OPEN_GAME_DAY = 'OPEN_GAME_DAY', 'Opened a game-day'
+        CLOSE_GAME_DAY = 'CLOSE_GAME_DAY', 'Closed a game-day'
+        PAYOUT_REQUESTED = 'PAYOUT_REQUESTED', 'Requested a payout'
+        PAYOUT_APPROVED = 'PAYOUT_APPROVED', 'Approved a payout'
+        PAYOUT_REJECTED = 'PAYOUT_REJECTED', 'Rejected a payout'
+        DEAL_CREATED = 'DEAL_CREATED', 'Set up a deal'
+        DEAL_ENDED = 'DEAL_ENDED', 'Ended a deal'
+        CREDIT_LIMIT_CHANGED = 'CREDIT_LIMIT_CHANGED', "Changed a player's credit limit"
+        SETTINGS_CHANGED = 'SETTINGS_CHANGED', 'Changed club settings'
+        TABLE_CHANGED = 'TABLE_CHANGED', 'Changed a table'
+        STAFF_CREATED = 'STAFF_CREATED', 'Created a staff account'
+        PASSWORD_RESET = 'PASSWORD_RESET', 'Reset a password'
+        PIN_RESET = 'PIN_RESET', 'Reset a PIN'
+        ACCOUNT_CODES_ADDED = 'ACCOUNT_CODES_ADDED', 'Added account codes'
+        PLAYER_CREATED = 'PLAYER_CREATED', 'Registered a player'
+        LOGIN = 'LOGIN', 'Logged in'
+
+    actor = models.ForeignKey(
+        'accounts.StaffUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs',
+    )
+    actor_role = models.CharField(max_length=20, blank=True)
+    action = models.CharField(max_length=30, choices=Action.choices)
+    summary = models.CharField(max_length=255)
+    player = models.ForeignKey(
+        'accounts.Player', on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs',
+    )
+    game_day = models.ForeignKey(
+        GameDay, on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs',
+    )
+    transaction = models.ForeignKey(
+        'Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs',
+    )
+    details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.get_action_display()} — {self.summary}'

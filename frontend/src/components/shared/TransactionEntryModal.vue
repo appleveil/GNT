@@ -6,6 +6,7 @@ import { usePlainConfirm } from '@/composables/usePlainConfirm'
 import { useClubSettingsStore } from '@/stores/clubSettings'
 import { TRANSACTION_TYPES } from '@/constants/transactionTypes'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
+import { readApiError } from '@/utils/apiError'
 
 // Which of the physical-count types has an Owner-configurable "require
 // approval" toggle (see ClubSettings, added 2026-09-23; CHIPS_OUT added
@@ -27,6 +28,13 @@ const props = defineProps({
   type: { type: String, required: true },
   player: { type: Object, default: null }, // seated-player row, or null for Rake/Tip
   gameDayId: { type: Number, required: true },
+  // Pre-fills the amount field for CHIPS_OUT (Issue Chips) — added
+  // 2026-10-02 alongside auto_issue_buy_in_on_seating going opt-in:
+  // without an automatic buy-in at seating, the Cashier's first buy-in is
+  // always manual, so it should start at the same default amount the
+  // automation used to issue (tonight's buy-in amount), not blank. Ignored
+  // for every other type.
+  defaultAmount: { type: [Number, String], default: null },
 })
 const emit = defineEmits(['close', 'saved'])
 
@@ -38,7 +46,9 @@ const config = computed(() => TRANSACTION_TYPES[props.type])
 
 const CURRENCIES = ['NGN', 'USD', 'GBP', 'EUR', 'OTHER']
 
-const amount = ref('') // plain numeric string, no commas — see utils/amountInput.js
+const amount = ref(
+  props.type === 'CHIPS_OUT' && props.defaultAmount ? String(props.defaultAmount) : '',
+) // plain numeric string, no commas — see utils/amountInput.js
 const displayAmount = computed(() => formatAmountForDisplay(amount.value))
 const notes = ref('')
 const provider = ref('')
@@ -101,20 +111,22 @@ const nairaAmount = computed(() => {
 // Client-side mirror of record_transaction's chips_limit guard (backend still
 // enforces it — this is just so the cashier sees the block before submitting).
 // Reads player.chips_room_remaining directly (gaming.selectors.
-// chips_room_remaining) rather than recomputing chips_limit - chips_used_today
-// here — that subtraction ignores an active Profit-Split stake deal and
-// would warn the Cashier well before the real (higher) limit is actually hit.
+// chips_room_remaining) — the one live "how much can this player be issued
+// right now" figure. Revised 2026-09-26: this is now the ONLY chips-limit
+// figure shown to the Cashier at all (was previously paired against a
+// chips_limit/chips_used_today badge elsewhere on screen) — see PLAN.md's
+// dated entry. The credit limit and any Profit-Split deal stay hidden.
 const chipsRemaining = computed(() => {
   if (props.type !== 'CHIPS_OUT' || !props.player || props.player.chips_room_remaining == null) return null
   return Number(props.player.chips_room_remaining)
 })
-const exceedsChipsLimit = computed(
+const exceedsAvailable = computed(
   () => chipsRemaining.value !== null && Number(amount.value || 0) > chipsRemaining.value,
 )
 
 const canSubmit = computed(() => {
   if (!amount.value || Number(amount.value) <= 0) return false
-  if (exceedsChipsLimit.value) return false
+  if (exceedsAvailable.value) return false
   if (config.value.needsCurrency && currency.value !== 'NGN' && !conversionRate.value) return false
   if (isTip.value && tipCategory.value === 'MASSEUSE' && !selectedMasseuseId.value) return false
   return true
@@ -156,9 +168,7 @@ async function onSubmit() {
       await doSave()
       emit('saved')
     } catch (err) {
-      error.value = Object.values(err.response?.data || {})[0]?.[0]
-        || err.response?.data?.detail
-        || 'Could not save this entry.'
+      error.value = readApiError(err, 'Could not save this entry.').message
     } finally {
       submitting.value = false
     }
@@ -230,20 +240,20 @@ const N = n => `₦${Number(n || 0).toLocaleString()}`
 
       <div class="lbl">
         Amount
-        <span v-if="chipsRemaining !== null" class="lbl-hint" :class="{ 'lbl-hint--danger': exceedsChipsLimit }">
-          ({{ N(chipsRemaining) }} left of credit limit tonight)
+        <span v-if="chipsRemaining !== null" class="lbl-hint" :class="{ 'lbl-hint--danger': exceedsAvailable }">
+          ({{ N(chipsRemaining) }} available now)
         </span>
       </div>
-      <div class="amount-box" :class="{ 'amount-box--danger': exceedsChipsLimit }">
+      <div class="amount-box" :class="{ 'amount-box--danger': exceedsAvailable }">
         <span class="amount-prefix">{{ config.needsCurrency && currency !== 'NGN' ? currency : '₦' }}</span>
         <input
           :value="displayAmount" type="text" inputmode="numeric" placeholder="0" class="amount-input" autofocus
           @input="e => (amount = parseAmountInput(e.target.value))"
         />
       </div>
-      <p v-if="exceedsChipsLimit" class="warn-text">
-        This exceeds {{ player.display_name }}'s available room for tonight ({{ N(chipsRemaining) }} left).
-        Lower the amount, or ask the Owner to raise the limit.
+      <p v-if="exceedsAvailable" class="warn-text">
+        This exceeds the maximum available for {{ player.display_name }} right now ({{ N(chipsRemaining) }}).
+        Lower the amount, or ask the Owner.
       </p>
 
       <template v-if="config.needsCurrency">

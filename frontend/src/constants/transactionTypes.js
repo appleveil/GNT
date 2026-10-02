@@ -53,6 +53,20 @@ export const TRANSACTION_TYPES = {
   // this was hidden/informational only. amountTone: credit, not neutral,
   // now that it's a real balance-affecting entry like any other credit.
   PROFIT_SPLIT_STAKE: { label: 'SPA', actionLabel: 'SPA', lane: 'other', physicalCount: false, amountTone: 'credit' },
+  // "One line per action" (added 2026-09-25, explicit instruction): a
+  // buy-in's CHIPS_OUT line stays "chips issued" only — when part of it is
+  // covered by a player's own carried-forward credit (the house owes them
+  // from a previous game-day), that's a separate line, auto-created by
+  // record_transaction's CHIPS_OUT branch and paired via linked_transaction
+  // with PLAYER_BALANCE_OUT. PLAYER_BALANCE_OUT itself is dateless
+  // (game_day=None) and never appears on any game-day-scoped ledger, so it
+  // has no realistic path onto a Cashier screen — labeled here anyway for
+  // the Owner/Accountant Outstanding ledger.
+  PLAYER_BALANCE_IN: { label: 'Player balance', actionLabel: 'Player balance', lane: 'other', physicalCount: false, amountTone: 'credit' },
+  PLAYER_BALANCE_OUT: {
+    label: 'Player balance (carried forward)', actionLabel: 'Player balance', lane: 'other', physicalCount: false,
+    amountTone: 'debit',
+  },
 }
 
 // Status colors reuse the same badge--* classes as GameDay/Payout status

@@ -4,6 +4,8 @@ import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import { useClubSettingsStore } from '@/stores/clubSettings'
 import { useToast } from '@/composables/useToast'
+import { useFormValidation, required, minValue, minPct, maxPct } from '@/composables/useFormValidation'
+import { readApiError } from '@/utils/apiError'
 
 // Shared "Settings" page (added 2026-09-23) — visible to both Owner and
 // Floor Manager (see router/index.js's FLOOR_MANAGER_ROLES), copying
@@ -31,7 +33,28 @@ const tablesLoading = ref(true)
 const editingTableId = ref(null) // a Table's id currently showing the edit form, or null
 const editForm = ref({})
 const tableSaving = ref(false)
-const tableError = ref('')
+
+// editForm is reassigned wholesale on each onStartEditTable (not a stable
+// reactive object useFormValidation could toRef into), so each tracked
+// field gets its own get/set computed over the current editForm.value.
+const editDefaultBuyIn = computed({ get: () => editForm.value.default_buy_in, set: v => { editForm.value.default_buy_in = v } })
+const editMaxChips = computed({ get: () => editForm.value.max_chips_issuable, set: v => { editForm.value.max_chips_issuable = v } })
+const editMaxPlayers = computed({ get: () => editForm.value.max_players, set: v => { editForm.value.max_players = v } })
+const editSmallBlind = computed({ get: () => editForm.value.small_blind, set: v => { editForm.value.small_blind = v } })
+const editBigBlind = computed({ get: () => editForm.value.big_blind, set: v => { editForm.value.big_blind = v } })
+const editRakePct = computed({ get: () => editForm.value.rake_percentage, set: v => { editForm.value.rake_percentage = v } })
+
+const {
+  touched: tableTouched, errors: tableErrors, isValid: tableIsValid, formError: tableFormError,
+  touch: touchTable, touchAll: touchAllTable, applyServerErrors: applyTableServerErrors, reset: resetTableValidation,
+} = useFormValidation({
+  default_buy_in: { value: editDefaultBuyIn, rules: [required('A default buy-in is required.'), minValue(0)] },
+  max_chips_issuable: { value: editMaxChips, rules: [minValue(0)] },
+  max_players: { value: editMaxPlayers, rules: [minValue(1)] },
+  small_blind: { value: editSmallBlind, rules: [minValue(0)] },
+  big_blind: { value: editBigBlind, rules: [minValue(0)] },
+  rake_percentage: { value: editRakePct, rules: [minPct(), maxPct()] },
+})
 
 async function loadTables() {
   tablesLoading.value = true
@@ -52,7 +75,7 @@ function gameName(gameId) {
 
 function onStartEditTable(table) {
   editingTableId.value = table.id
-  tableError.value = ''
+  resetTableValidation()
   editForm.value = {
     default_buy_in: table.default_buy_in,
     rake_percentage: table.rake_percentage ?? '',
@@ -65,12 +88,13 @@ function onStartEditTable(table) {
 
 function onCancelEditTable() {
   editingTableId.value = null
-  tableError.value = ''
+  resetTableValidation()
 }
 
 async function onSaveTable(table) {
+  touchAllTable()
+  if (!tableIsValid.value) return
   tableSaving.value = true
-  tableError.value = ''
   try {
     // '' -> null: an emptied field means "no override"/"no cap," not 0 —
     // matches every field's own nullable meaning (see Table's docstring).
@@ -82,7 +106,7 @@ async function onSaveTable(table) {
     editingTableId.value = null
     toast.success(`${table.name} updated.`)
   } catch (err) {
-    tableError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not save this table.'
+    applyTableServerErrors(err)
   } finally {
     tableSaving.value = false
   }
@@ -104,8 +128,8 @@ async function onToggleFloorRule(field) {
   try {
     const { data } = await api.patch('/club-settings/', { [field]: !clubSettings.current[field] })
     clubSettings.current = data
-  } catch {
-    toast.error('Could not update that setting.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that setting.').message)
   } finally {
     floorRuleTogglingField.value = ''
   }
@@ -113,16 +137,23 @@ async function onToggleFloorRule(field) {
 
 const minPlayerTimeInput = ref('')
 const minPlayerTimeSaving = ref(false)
-const minPlayerTimeError = ref('')
+const {
+  touched: minPlayerTimeTouched, errors: minPlayerTimeErrors, isValid: minPlayerTimeIsValid,
+  formError: minPlayerTimeFormError, touch: touchMinPlayerTime, touchAll: touchAllMinPlayerTime,
+  applyServerErrors: applyMinPlayerTimeServerErrors,
+} = useFormValidation({
+  minPlayerTimeInput: { value: minPlayerTimeInput, rules: [required(), minValue(1)] },
+})
 async function onSaveMinPlayerTime() {
+  touchAllMinPlayerTime()
+  if (!minPlayerTimeIsValid.value) return
   minPlayerTimeSaving.value = true
-  minPlayerTimeError.value = ''
   try {
     const { data } = await api.patch('/club-settings/', { min_player_time_minutes: minPlayerTimeInput.value })
     clubSettings.current = data
     toast.success('Minimum player time updated.')
   } catch (err) {
-    minPlayerTimeError.value = err.response?.data?.min_player_time_minutes?.[0] || 'Could not save this.'
+    applyMinPlayerTimeServerErrors(err)
   } finally {
     minPlayerTimeSaving.value = false
   }
@@ -130,16 +161,22 @@ async function onSaveMinPlayerTime() {
 
 const awayMaxInput = ref('')
 const awayMaxSaving = ref(false)
-const awayMaxError = ref('')
+const {
+  touched: awayMaxTouched, errors: awayMaxErrors, isValid: awayMaxIsValid, formError: awayMaxFormError,
+  touch: touchAwayMax, touchAll: touchAllAwayMax, applyServerErrors: applyAwayMaxServerErrors,
+} = useFormValidation({
+  awayMaxInput: { value: awayMaxInput, rules: [required(), minValue(1)] },
+})
 async function onSaveAwayMax() {
+  touchAllAwayMax()
+  if (!awayMaxIsValid.value) return
   awayMaxSaving.value = true
-  awayMaxError.value = ''
   try {
     const { data } = await api.patch('/club-settings/', { away_max_minutes: awayMaxInput.value })
     clubSettings.current = data
     toast.success('Away time updated.')
   } catch (err) {
-    awayMaxError.value = err.response?.data?.away_max_minutes?.[0] || 'Could not save this.'
+    applyAwayMaxServerErrors(err)
   } finally {
     awayMaxSaving.value = false
   }
@@ -154,10 +191,25 @@ async function onToggleCashierCanInitiatePayout() {
       cashier_can_initiate_payout: !clubSettings.current.cashier_can_initiate_payout,
     })
     clubSettings.current = data
-  } catch {
-    toast.error('Could not update that setting.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that setting.').message)
   } finally {
     cashierPayoutToggling.value = false
+  }
+}
+
+const autoIssueToggling = ref(false)
+async function onToggleAutoIssueBuyIn() {
+  autoIssueToggling.value = true
+  try {
+    const { data } = await api.patch('/club-settings/', {
+      auto_issue_buy_in_on_seating: !clubSettings.current.auto_issue_buy_in_on_seating,
+    })
+    clubSettings.current = data
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that setting.').message)
+  } finally {
+    autoIssueToggling.value = false
   }
 }
 
@@ -177,8 +229,8 @@ async function onToggleApproval(field) {
   try {
     const { data } = await api.patch('/club-settings/', { [field]: !clubSettings.current[field] })
     clubSettings.current = data
-  } catch {
-    toast.error('Could not update that setting.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that setting.').message)
   } finally {
     togglingField.value = ''
   }
@@ -198,8 +250,8 @@ async function onToggleDashboardGameDay() {
       owner_dashboard_game_day_enabled: !clubSettings.current.owner_dashboard_game_day_enabled,
     })
     clubSettings.current = data
-  } catch {
-    toast.error('Could not update that setting.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that setting.').message)
   } finally {
     dashboardTogglingField.value = ''
   }
@@ -208,17 +260,23 @@ async function onToggleDashboardGameDay() {
 // ── Payout auto-approval (Owner-only) ───────────────────────────────────
 const thresholdInput = ref('')
 const thresholdSaving = ref(false)
-const thresholdError = ref('')
+const {
+  touched: thresholdTouched, errors: thresholdErrors, isValid: thresholdIsValid, formError: thresholdFormError,
+  touch: touchThreshold, touchAll: touchAllThreshold, applyServerErrors: applyThresholdServerErrors,
+} = useFormValidation({
+  thresholdInput: { value: thresholdInput, rules: [required(), minValue(0)] },
+})
 
 async function onSaveThreshold() {
+  touchAllThreshold()
+  if (!thresholdIsValid.value) return
   thresholdSaving.value = true
-  thresholdError.value = ''
   try {
     const { data } = await api.patch('/club-settings/', { payout_auto_approve_threshold: thresholdInput.value })
     clubSettings.current = data
     toast.success('Payout auto-approval threshold updated.')
   } catch (err) {
-    thresholdError.value = err.response?.data?.payout_auto_approve_threshold?.[0] || 'Could not save this threshold.'
+    applyThresholdServerErrors(err)
   } finally {
     thresholdSaving.value = false
   }
@@ -230,7 +288,13 @@ const ratesLoading = ref(true)
 const gameDaysForRates = ref([])
 const newRate = ref({ currency: 'USD', rate_to_naira: '', game_day: '' })
 const rateSubmitting = ref(false)
-const rateError = ref('')
+const newRateToNaira = computed({ get: () => newRate.value.rate_to_naira, set: v => { newRate.value.rate_to_naira = v } })
+const {
+  touched: rateTouched, errors: rateErrors, isValid: rateIsValid, formError: rateFormError,
+  touch: touchRate, touchAll: touchAllRate, applyServerErrors: applyRateServerErrors, reset: resetRateValidation,
+} = useFormValidation({
+  rate_to_naira: { value: newRateToNaira, rules: [required('A rate is required.'), minValue(0)] },
+})
 
 async function loadRates() {
   ratesLoading.value = true
@@ -264,17 +328,19 @@ const standingByCurrency = computed(() => {
 const recentRates = computed(() => rates.value.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 10))
 
 async function onSetRate() {
-  rateError.value = ''
+  touchAllRate()
+  if (!rateIsValid.value) return
   rateSubmitting.value = true
   try {
     const payload = { currency: newRate.value.currency, rate_to_naira: newRate.value.rate_to_naira }
     if (newRate.value.game_day) payload.game_day = newRate.value.game_day
     await api.post('/conversion-rates/set_rate/', payload)
     newRate.value = { currency: newRate.value.currency, rate_to_naira: '', game_day: '' }
+    resetRateValidation()
     await loadRates()
     toast.success('Rate set.')
   } catch (err) {
-    rateError.value = Object.values(err.response?.data || {})[0]?.[0] || err.response?.data?.detail || 'Could not set this rate.'
+    applyRateServerErrors(err)
   } finally {
     rateSubmitting.value = false
   }
@@ -326,36 +392,66 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <button v-if="editingTableId !== t.id" class="link-btn" type="button" @click="onStartEditTable(t)">Edit</button>
           </div>
 
-          <form v-if="editingTableId === t.id" class="edit-form" @submit.prevent="onSaveTable(t)">
+          <form v-if="editingTableId === t.id" class="edit-form" novalidate @submit.prevent="onSaveTable(t)">
             <label class="field">
               <span class="field-label">Default buy-in</span>
-              <input v-model="editForm.default_buy_in" type="number" min="0" step="1000" class="ff" required />
+              <input
+                v-model="editForm.default_buy_in" type="number" min="0" step="1000" class="ff"
+                :class="{ 'input--invalid': tableTouched.default_buy_in && tableErrors.default_buy_in }"
+                @blur="touchTable('default_buy_in')"
+              />
+              <p v-if="tableTouched.default_buy_in && tableErrors.default_buy_in" class="field-error">{{ tableErrors.default_buy_in }}</p>
             </label>
             <label class="field">
               <span class="field-label">Max chips per buy-in</span>
-              <input v-model="editForm.max_chips_issuable" type="number" min="0" step="1000" placeholder="No cap" class="ff" />
+              <input
+                v-model="editForm.max_chips_issuable" type="number" min="0" step="1000" placeholder="No cap" class="ff"
+                :class="{ 'input--invalid': tableTouched.max_chips_issuable && tableErrors.max_chips_issuable }"
+                @blur="touchTable('max_chips_issuable')"
+              />
+              <p v-if="tableTouched.max_chips_issuable && tableErrors.max_chips_issuable" class="field-error">{{ tableErrors.max_chips_issuable }}</p>
             </label>
             <label class="field">
               <span class="field-label">Max players</span>
-              <input v-model="editForm.max_players" type="number" min="1" placeholder="Use the game's default" class="ff" />
+              <input
+                v-model="editForm.max_players" type="number" min="1" placeholder="Use the game's default" class="ff"
+                :class="{ 'input--invalid': tableTouched.max_players && tableErrors.max_players }"
+                @blur="touchTable('max_players')"
+              />
+              <p v-if="tableTouched.max_players && tableErrors.max_players" class="field-error">{{ tableErrors.max_players }}</p>
             </label>
             <label class="field">
               <span class="field-label">Small blind</span>
-              <input v-model="editForm.small_blind" type="number" min="0" step="100" placeholder="—" class="ff" />
+              <input
+                v-model="editForm.small_blind" type="number" min="0" step="100" placeholder="—" class="ff"
+                :class="{ 'input--invalid': tableTouched.small_blind && tableErrors.small_blind }"
+                @blur="touchTable('small_blind')"
+              />
+              <p v-if="tableTouched.small_blind && tableErrors.small_blind" class="field-error">{{ tableErrors.small_blind }}</p>
             </label>
             <label class="field">
               <span class="field-label">Big blind</span>
-              <input v-model="editForm.big_blind" type="number" min="0" step="100" placeholder="—" class="ff" />
+              <input
+                v-model="editForm.big_blind" type="number" min="0" step="100" placeholder="—" class="ff"
+                :class="{ 'input--invalid': tableTouched.big_blind && tableErrors.big_blind }"
+                @blur="touchTable('big_blind')"
+              />
+              <p v-if="tableTouched.big_blind && tableErrors.big_blind" class="field-error">{{ tableErrors.big_blind }}</p>
             </label>
             <label class="field">
               <span class="field-label">Rake %</span>
-              <input v-model="editForm.rake_percentage" type="number" min="0" max="100" step="0.5" placeholder="—" class="ff" />
+              <input
+                v-model="editForm.rake_percentage" type="number" min="0" max="100" step="0.5" placeholder="—" class="ff"
+                :class="{ 'input--invalid': tableTouched.rake_percentage && tableErrors.rake_percentage }"
+                @blur="touchTable('rake_percentage')"
+              />
+              <p v-if="tableTouched.rake_percentage && tableErrors.rake_percentage" class="field-error">{{ tableErrors.rake_percentage }}</p>
             </label>
             <div class="edit-actions">
               <button class="btn btn--secondary" type="button" :disabled="tableSaving" @click="onCancelEditTable">Cancel</button>
-              <button class="btn btn--primary" type="submit" :disabled="tableSaving">{{ tableSaving ? 'Saving…' : 'Save' }}</button>
+              <button class="btn btn--primary" type="submit" :disabled="tableSaving || !tableIsValid">{{ tableSaving ? 'Saving…' : 'Save' }}</button>
             </div>
-            <p v-if="tableError" class="form-error">{{ tableError }}</p>
+            <p v-if="tableFormError" class="form-error">{{ tableFormError }}</p>
           </form>
         </div>
       </template>
@@ -383,15 +479,20 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <span class="switch-knob" />
           </button>
         </div>
-        <form v-if="clubSettings.current.observe_min_player_time" class="sub-form" @submit.prevent="onSaveMinPlayerTime">
+        <form v-if="clubSettings.current.observe_min_player_time" class="sub-form" novalidate @submit.prevent="onSaveMinPlayerTime">
           <label class="field">
             <span class="field-label">Minimum player time (minutes)</span>
-            <input v-model="minPlayerTimeInput" type="number" min="30" step="30" required class="ff" />
+            <input
+              v-model="minPlayerTimeInput" type="number" min="30" step="30" class="ff"
+              :class="{ 'input--invalid': minPlayerTimeTouched.minPlayerTimeInput && minPlayerTimeErrors.minPlayerTimeInput }"
+              @blur="touchMinPlayerTime('minPlayerTimeInput')"
+            />
           </label>
-          <button class="btn btn--secondary" type="submit" :disabled="minPlayerTimeSaving">
+          <button class="btn btn--secondary" type="submit" :disabled="minPlayerTimeSaving || !minPlayerTimeIsValid">
             {{ minPlayerTimeSaving ? 'Saving…' : 'Save' }}
           </button>
-          <p v-if="minPlayerTimeError" class="form-error">{{ minPlayerTimeError }}</p>
+          <p v-if="minPlayerTimeTouched.minPlayerTimeInput && minPlayerTimeErrors.minPlayerTimeInput" class="field-error">{{ minPlayerTimeErrors.minPlayerTimeInput }}</p>
+          <p v-if="minPlayerTimeFormError" class="form-error">{{ minPlayerTimeFormError }}</p>
         </form>
 
         <div class="toggle-row">
@@ -412,15 +513,20 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <span class="switch-knob" />
           </button>
         </div>
-        <form v-if="clubSettings.current.track_away_from_table" class="sub-form" @submit.prevent="onSaveAwayMax">
+        <form v-if="clubSettings.current.track_away_from_table" class="sub-form" novalidate @submit.prevent="onSaveAwayMax">
           <label class="field">
             <span class="field-label">Max time away (minutes)</span>
-            <input v-model="awayMaxInput" type="number" min="1" step="1" required class="ff" />
+            <input
+              v-model="awayMaxInput" type="number" min="1" step="1" class="ff"
+              :class="{ 'input--invalid': awayMaxTouched.awayMaxInput && awayMaxErrors.awayMaxInput }"
+              @blur="touchAwayMax('awayMaxInput')"
+            />
           </label>
-          <button class="btn btn--secondary" type="submit" :disabled="awayMaxSaving">
+          <button class="btn btn--secondary" type="submit" :disabled="awayMaxSaving || !awayMaxIsValid">
             {{ awayMaxSaving ? 'Saving…' : 'Save' }}
           </button>
-          <p v-if="awayMaxError" class="form-error">{{ awayMaxError }}</p>
+          <p v-if="awayMaxTouched.awayMaxInput && awayMaxErrors.awayMaxInput" class="field-error">{{ awayMaxErrors.awayMaxInput }}</p>
+          <p v-if="awayMaxFormError" class="form-error">{{ awayMaxFormError }}</p>
         </form>
       </div>
     </div>
@@ -487,6 +593,20 @@ const N = n => `₦${Number(n).toLocaleString()}`
               <span class="switch-knob" />
             </button>
           </div>
+          <div class="toggle-row">
+            <div class="row-info">
+              <div class="row-name">Automatically issue the default buy-in on seating</div>
+              <div class="row-sub">Off by default — the Cashier issues the first buy-in manually via Issue Chips, which pre-fills with tonight's buy-in amount.</div>
+            </div>
+            <button
+              class="switch" type="button" :class="{ 'switch--on': clubSettings.current.auto_issue_buy_in_on_seating }"
+              :disabled="autoIssueToggling" role="switch"
+              :aria-checked="clubSettings.current.auto_issue_buy_in_on_seating"
+              @click="onToggleAutoIssueBuyIn"
+            >
+              <span class="switch-knob" />
+            </button>
+          </div>
         </div>
 
 
@@ -501,19 +621,22 @@ const N = n => `₦${Number(n).toLocaleString()}`
         </p>
         <form
           class="create-form" :class="{ 'create-form--disabled': clubSettings.current && !clubSettings.current.cashier_can_initiate_payout }"
-          @submit.prevent="onSaveThreshold"
+          novalidate @submit.prevent="onSaveThreshold"
         >
           <span class="amount-prefix">₦</span>
           <input
-            v-model="thresholdInput" type="number" min="0" step="1000" class="ff" required
+            v-model="thresholdInput" type="number" min="0" step="1000" class="ff"
+            :class="{ 'input--invalid': thresholdTouched.thresholdInput && thresholdErrors.thresholdInput }"
             :disabled="clubSettings.current && !clubSettings.current.cashier_can_initiate_payout"
+            @blur="touchThreshold('thresholdInput')"
           />
           <button
             class="btn btn--primary" type="submit"
-            :disabled="thresholdSaving || (clubSettings.current && !clubSettings.current.cashier_can_initiate_payout)"
+            :disabled="thresholdSaving || !thresholdIsValid || (clubSettings.current && !clubSettings.current.cashier_can_initiate_payout)"
           >{{ thresholdSaving ? 'Saving…' : 'Save' }}</button>
         </form>
-        <p v-if="thresholdError" class="form-error">{{ thresholdError }}</p>
+        <p v-if="thresholdTouched.thresholdInput && thresholdErrors.thresholdInput" class="field-error">{{ thresholdErrors.thresholdInput }}</p>
+        <p v-if="thresholdFormError" class="form-error">{{ thresholdFormError }}</p>
       </div>
 
       <div class="card section-card">
@@ -528,21 +651,26 @@ const N = n => `₦${Number(n).toLocaleString()}`
             <p v-if="!Object.keys(standingByCurrency).length" class="muted">No standing rate set yet.</p>
           </div>
 
-          <form class="create-form" @submit.prevent="onSetRate">
+          <form class="create-form" novalidate @submit.prevent="onSetRate">
             <select v-model="newRate.currency" class="ff">
               <option value="USD">USD</option>
               <option value="GBP">GBP</option>
               <option value="EUR">EUR</option>
               <option value="OTHER">Other</option>
             </select>
-            <input v-model="newRate.rate_to_naira" type="number" min="0" step="0.0001" placeholder="Rate to ₦1" required class="ff" />
+            <input
+              v-model="newRate.rate_to_naira" type="number" min="0" step="0.0001" placeholder="Rate to ₦1" class="ff"
+              :class="{ 'input--invalid': rateTouched.rate_to_naira && rateErrors.rate_to_naira }"
+              @blur="touchRate('rate_to_naira')"
+            />
             <select v-model="newRate.game_day" class="ff">
               <option value="">Standing rate (no override)</option>
               <option v-for="gd in gameDaysForRates" :key="gd.id" :value="gd.id">Override for Game-Day #{{ gd.number }}</option>
             </select>
-            <button class="btn btn--primary" type="submit" :disabled="rateSubmitting">{{ rateSubmitting ? 'Setting…' : 'Set rate' }}</button>
+            <button class="btn btn--primary" type="submit" :disabled="rateSubmitting || !rateIsValid">{{ rateSubmitting ? 'Setting…' : 'Set rate' }}</button>
           </form>
-          <p v-if="rateError" class="form-error">{{ rateError }}</p>
+          <p v-if="rateTouched.rate_to_naira && rateErrors.rate_to_naira" class="field-error">{{ rateErrors.rate_to_naira }}</p>
+          <p v-if="rateFormError" class="form-error">{{ rateFormError }}</p>
 
           <div class="rate-history">
             <div class="lbl--muted">Recent changes</div>
@@ -593,15 +721,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
   background: var(--surface);
 }
 .ff:focus { outline: none; border-color: var(--accent); }
-.form-error {
-  grid-column: 1 / -1;
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-top: 4px;
-}
+.edit-form .form-error { grid-column: 1 / -1; margin-top: 4px; }
 
 .toggle-list { display: flex; flex-direction: column; }
 .toggle-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }

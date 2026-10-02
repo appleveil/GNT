@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import api from '@/api/axios'
+import { readApiError } from '@/utils/apiError'
 
 // Owner-only payout rejection (2026-09-15) — same centered-dialog/
 // reason-textarea pattern as VoidEntryModal.vue, but its own component:
@@ -29,9 +30,7 @@ async function onSubmit() {
     })
     emit('rejected', data)
   } catch (err) {
-    error.value = err.response?.data?.detail
-      || err.response?.data?.reason?.[0]
-      || 'Could not reject this payout.'
+    error.value = readApiError(err, 'Could not reject this payout.').message
   } finally {
     submitting.value = false
   }
@@ -111,14 +110,7 @@ textarea {
 }
 textarea:focus { outline: none; border-color: var(--accent); }
 
-.form-error {
-  font-size: 13px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
-  margin-bottom: 12px;
-}
+.form-error { margin-bottom: 12px; }
 
 .actions { display: flex; gap: 14px; }
 .actions .btn { flex: 1; }

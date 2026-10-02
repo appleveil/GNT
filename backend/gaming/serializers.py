@@ -42,6 +42,7 @@ class ClubSettingsSerializer(serializers.ModelSerializer):
             'cashier_can_initiate_payout',
             'observe_min_player_time', 'min_player_time_minutes',
             'track_away_from_table', 'away_max_minutes',
+            'auto_issue_buy_in_on_seating',
         ]
 
     # 30-minute floor, 30-minute increments — see ClubSettings' own
@@ -352,9 +353,13 @@ class ProfitSplitStatusSerializer(serializers.Serializer):
 class GameDaySeatedPlayerSerializer(serializers.Serializer):
     """
     One row of gaming.selectors.game_day_players(game_day) — a GameDayPlayer
-    (see that model) flattened with THIS specific game-day's balance, never
-    lifetime. Added 2026-09-13 for the Cashier's "current game-day players
-    only" list — see CONCEPT.md's "Cashier player-history visibility."
+    (see that model) flattened with the Cashier-visible balance (see
+    selectors.cashier_visible_balance): this game-day's own activity, plus
+    any credit carried forward from a previous game-day that the house
+    still owes this player — never a debt carried forward. Added
+    2026-09-13 for the Cashier's "current game-day players only" list, see
+    CONCEPT.md's "Cashier player-history visibility"; the carried-credit
+    exception added 2026-09-25.
     """
 
     id = serializers.IntegerField(source='player.id')
@@ -392,8 +397,13 @@ class GameDaySeatedPlayerSerializer(serializers.Serializer):
         return selectors.player_has_failed_payout(obj.player, obj.game_day)
 
     def get_balance(self, obj):
+        # cashier_visible_balance, not the raw game-day balance: a debt
+        # carried over from a previous game-day stays hidden as before, but
+        # a credit (the house owes this player) is folded in and shown —
+        # see that selector's docstring and CONCEPT.md's "Cashier
+        # player-history visibility".
         from . import selectors
-        return selectors.player_game_day_balance(obj.player, obj.game_day)
+        return selectors.cashier_visible_balance(obj.player, obj.game_day)
 
     def get_chips_used_today(self, obj):
         if obj.player.chips_limit is None:

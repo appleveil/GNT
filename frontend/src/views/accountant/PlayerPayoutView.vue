@@ -6,6 +6,7 @@ import PlayerBankAccountModal from '@/components/shared/PlayerBankAccountModal.v
 import { usePayoutRequestsStore } from '@/stores/payoutRequests'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
+import { useFormValidation } from '@/composables/useFormValidation'
 
 // Owner-only "Payout" action, reached from the Players page's ⋮ menu — a
 // full page (2026-09-25; started as DirectPayoutModal.vue, converted per
@@ -51,8 +52,17 @@ const hasDefaultBank = computed(() => (player.value?.bank_accounts || []).some(b
 const amountInput = ref('') // plain numeric string, no commas
 const displayAmountInput = computed(() => formatAmountForDisplay(amountInput.value))
 const submitting = ref(false)
-const error = ref('')
 const bankModalOpen = ref(false)
+
+const { touched, errors, isValid, formError, touch, touchAll, applyServerErrors } = useFormValidation({
+  amountInput: {
+    value: amountInput,
+    rules: [
+      v => (Number(v) > 0 ? null : 'Enter an amount.'),
+      v => (Number(v) > available.value ? `Can't exceed what's owed (${N(available.value)}).` : null),
+    ],
+  },
+})
 // Distinguishes "opened because a submit needed a bank account" (auto-retry
 // the payout once one's added) from "opened via the plain 'Manage' link"
 // (just viewing/adding — never auto-submits a payout the Owner didn't ask
@@ -66,10 +76,9 @@ function onPayAll() {
 const N = n => `₦${Number(n).toLocaleString()}`
 
 async function onSubmit() {
-  error.value = ''
+  touchAll()
+  if (!isValid.value) return
   const amount = Number(amountInput.value || 0)
-  if (!amount) { error.value = 'Enter an amount.'; return }
-  if (amount > available.value) { error.value = `Can't exceed what's owed (${N(available.value)}).`; return }
   if (!hasDefaultBank.value) {
     bankModalFromSubmit.value = true
     bankModalOpen.value = true
@@ -82,7 +91,7 @@ async function onSubmit() {
     payoutRequests.fetchPendingCount() // a non-auto-approved payout adds to the sidebar's pending badge
     router.push('/roster')
   } catch (err) {
-    error.value = err.response?.data?.detail || 'Could not initiate the payout.'
+    applyServerErrors(err)
   } finally {
     submitting.value = false
   }
@@ -120,20 +129,22 @@ function onBankAdded() {
 
         <p v-if="!available" class="muted">Nothing currently owed to {{ player.display_name }}.</p>
 
-        <form v-else class="form" @submit.prevent="onSubmit">
+        <form v-else class="form" novalidate @submit.prevent="onSubmit">
           <label class="field">
             <span class="field-label">Amount to send</span>
             <div class="amount-row">
               <input
                 :value="displayAmountInput" type="text" inputmode="numeric" placeholder="0" class="ff"
-                @input="e => (amountInput = parseAmountInput(e.target.value))"
+                :class="{ 'input--invalid': touched.amountInput && errors.amountInput }"
+                @input="e => (amountInput = parseAmountInput(e.target.value))" @blur="touch('amountInput')"
               />
               <button class="link-btn" type="button" @click="onPayAll">All ({{ N(available) }})</button>
             </div>
+            <p v-if="touched.amountInput && errors.amountInput" class="field-error">{{ errors.amountInput }}</p>
           </label>
-          <p v-if="error" class="form-error">{{ error }}</p>
+          <p v-if="formError" class="form-error">{{ formError }}</p>
           <div class="actions">
-            <button class="btn btn--primary" type="submit" :disabled="submitting">{{ submitting ? 'Sending…' : 'Send payout' }}</button>
+            <button class="btn btn--primary" type="submit" :disabled="submitting || !isValid">{{ submitting ? 'Sending…' : 'Send payout' }}</button>
           </div>
         </form>
       </div>
@@ -203,13 +214,6 @@ function onBankAdded() {
 .ff:focus { outline: none; border-color: var(--accent); }
 .link-btn { border: none; background: none; font-size: 12px; font-weight: 700; color: var(--accent-text); cursor: pointer; padding: 0; white-space: nowrap; }
 
-.form-error {
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-}
 .actions { display: flex; justify-content: flex-end; margin-top: 4px; }
 
 .bank-card { padding: 18px 20px; margin-top: 16px; }

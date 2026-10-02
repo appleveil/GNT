@@ -4,6 +4,7 @@ import api from '@/api/axios'
 import RejectPayoutModal from '@/components/shared/RejectPayoutModal.vue'
 import { usePayoutRequestsStore } from '@/stores/payoutRequests'
 import { useToast } from '@/composables/useToast'
+import { readApiError } from '@/utils/apiError'
 
 // Owner-only payout approval queue (Phase C, 2026-09-14). No "list pending"
 // endpoint exists server-side (TransactionViewSet has no filter backend
@@ -78,7 +79,7 @@ async function onApprove(t) {
     toast.success(`${playerName(t.player)}'s payout approved.`)
     load()
   } catch (err) {
-    toast.error(err.response?.data?.detail || 'Could not approve this payout.')
+    toast.error(readApiError(err, 'Could not approve this payout.').message)
   } finally {
     approvingId.value = null
   }

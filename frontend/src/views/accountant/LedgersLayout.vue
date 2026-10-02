@@ -1,16 +1,22 @@
 <script setup>
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
 // Sub-nav chrome for the "Ledgers" section (renamed from "Game Days"
-// 2026-09-26) — two children, Game Days and Off-table (was Outstanding,
-// moved off Dashboard the same day). Just a small pill tab-strip + the
-// matched child route; no data of its own.
+// 2026-09-26) — children Game Days, Off-table (was Outstanding, moved off
+// Dashboard the same day), and Deals (Owner-only placeholder, added
+// 2026-10-02 — content pending from the Owner, see LedgersDealsView.vue).
+// Just a small pill tab-strip + the matched child route; no data of its own.
 const route = useRoute()
+const auth = useAuthStore()
 
-const TABS = [
+const ALL_TABS = [
   { name: 'ledgers-game-days', label: 'Game Days', path: '/ledgers/game-days' },
   { name: 'ledgers-off-table', label: 'Off-table', path: '/ledgers/off-table' },
+  { name: 'ledgers-deals', label: 'Deals', path: '/ledgers/deals', ownerOnly: true },
 ]
+const TABS = computed(() => ALL_TABS.filter(t => !t.ownerOnly || auth.isOwner))
 
 function isActive(tab) {
   return route.name === tab.name

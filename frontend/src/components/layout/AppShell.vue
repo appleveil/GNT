@@ -6,6 +6,7 @@ import { useGameDayStore } from '@/stores/gameDay'
 import { useClubSettingsStore } from '@/stores/clubSettings'
 import { usePayoutRequestsStore } from '@/stores/payoutRequests'
 import { useCloseGameDay } from '@/composables/useCloseGameDay'
+import RowActionsMenu from '@/components/shared/RowActionsMenu.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -70,6 +71,7 @@ const tabs = computed(() => {
   if (role === 'FLOOR_MANAGER') {
     return [
       { name: 'masseuses', label: 'Masseuses', path: '/masseuses' },
+      { name: 'activity-log', label: 'Activity log', path: '/activity' },
       { name: 'club-settings', label: 'Settings', path: '/settings' },
     ]
   }
@@ -87,6 +89,8 @@ const tabs = computed(() => {
       children: [
         { name: 'ledgers-game-days', label: 'Game Days', path: '/ledgers/game-days' },
         { name: 'ledgers-off-table', label: 'Off-table', path: '/ledgers/off-table' },
+        // Owner-only placeholder, added 2026-10-02 — see LedgersDealsView.vue.
+        ...(role === 'OWNER' ? [{ name: 'ledgers-deals', label: 'Deals', path: '/ledgers/deals' }] : []),
       ],
     },
     { name: 'roster', label: 'Players', path: '/roster' },
@@ -149,6 +153,26 @@ async function doLogout() {
   await auth.logout()
   router.push('/login')
 }
+
+// Cashier avatar menu (added 2026-10-02) — the Cashier has no sidebar
+// (tabs() returns [] for that role above), so Close Game-Day, Activity log
+// and Log out used to all sit loose in the topbar. Collapsed into one menu
+// under the avatar to declutter it; every other role is unaffected (they
+// still get the plain avatar + Log out, since they have a sidebar for
+// everything else). Close Game-Day only appears while one is open, same
+// condition as the old standalone button.
+const cashierMenuItems = computed(() => {
+  const items = []
+  if (gameDay.isOpen && canCloseGameDay.value) items.push({ key: 'close-game-day', label: 'Close Game-Day' })
+  items.push({ key: 'activity-log', label: 'Activity log' })
+  items.push({ key: 'logout', label: 'Log out' })
+  return items
+})
+function onCashierMenuSelect(key) {
+  if (key === 'close-game-day') onCloseGameDay()
+  else if (key === 'activity-log') router.push('/activity')
+  else if (key === 'logout') onLogoutClick()
+}
 </script>
 
 <template>
@@ -165,11 +189,21 @@ async function doLogout() {
             </div>
             <div v-else class="status-pill status-pill--closed">No game-day open</div>
             <button
-              v-if="gameDay.isOpen && canCloseGameDay" class="close-gd-btn" type="button"
-              @click="onCloseGameDay"
+              v-if="gameDay.isOpen && canCloseGameDay && auth.user?.role !== 'CASHIER'" class="close-gd-btn"
+              type="button" @click="onCloseGameDay"
             >Close Game-Day</button>
           </template>
-          <div class="user" :title="auth.user?.fullName">
+          <RowActionsMenu
+            v-if="auth.user?.role === 'CASHIER'" :items="cashierMenuItems" align="left"
+            @select="onCashierMenuSelect"
+          >
+            <template #trigger="{ toggle }">
+              <button class="avatar avatar--menu" type="button" :title="auth.user?.fullName" @click="toggle">
+                {{ initial }}
+              </button>
+            </template>
+          </RowActionsMenu>
+          <div v-else class="user" :title="auth.user?.fullName">
             <div class="avatar">{{ initial }}</div>
             <button class="logout" type="button" @click="onLogoutClick">Log out</button>
           </div>
@@ -350,6 +384,10 @@ async function doLogout() {
   font-size: 14px;
   font-weight: 700;
 }
+/* The Cashier's avatar doubles as RowActionsMenu's trigger (added
+   2026-10-02) — a <button>, not the plain <div> above, so it needs its
+   own border/cursor reset to still look exactly like the plain avatar. */
+.avatar--menu { border: none; cursor: pointer; font-family: var(--font-sans); }
 .logout {
   border: none;
   background: none;

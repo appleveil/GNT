@@ -1,14 +1,24 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 
-// Generic table-row "⋮" actions menu (2026-09-24) — first used by
-// RosterListView's Players table (Deal / Chips limit / View ledger /
-// Payout), written generic enough for any other row-action list later.
-// No API calls, no navigation of its own: the caller supplies `items` and
-// reacts to `select`, same "purely presentational" split LedgerTable.vue
-// already established for row rendering.
+// Generic "⋮" actions menu (2026-09-24) — first used by RosterListView's
+// Players table (Deal / Chips limit / View ledger / Payout), written
+// generic enough for any other row-action list later. No API calls, no
+// navigation of its own: the caller supplies `items` and reacts to
+// `select`, same "purely presentational" split LedgerTable.vue already
+// established for row rendering.
+//
+// `trigger` slot (added 2026-10-02) — AppShell.vue's Cashier avatar menu
+// reuses this component with its own avatar circle as the trigger instead
+// of the default ⋮ button; every other caller is unaffected (the default
+// slot content is exactly the old hard-coded button). `align` (same date)
+// lets a left-anchored trigger (the avatar, at the right end of the
+// topbar) open its menu without running off the edge of the screen —
+// RosterListView's ⋮ (always near the right edge of its own row) keeps
+// the default.
 const props = defineProps({
   items: { type: Array, required: true }, // [{ key, label, disabled? }]
+  align: { type: String, default: 'right' }, // 'right' | 'left'
 })
 const emit = defineEmits(['select'])
 
@@ -32,8 +42,10 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
 
 <template>
   <div ref="root" class="actions-menu" @click.stop>
-    <button class="dots-btn" type="button" aria-label="Row actions" @click="toggle">&#8942;</button>
-    <div v-if="open" class="menu-pop">
+    <slot name="trigger" :toggle="toggle" :open="open">
+      <button class="dots-btn" type="button" aria-label="Row actions" @click="toggle">&#8942;</button>
+    </slot>
+    <div v-if="open" class="menu-pop" :class="{ 'menu-pop--left': align === 'left' }">
       <button
         v-for="item in items" :key="item.key" type="button" class="menu-item"
         :class="{ 'menu-item--disabled': item.disabled }" :disabled="item.disabled"
@@ -72,6 +84,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
   display: flex;
   flex-direction: column;
 }
+.menu-pop--left { right: auto; left: 0; }
 .menu-item {
   border: none;
   background: none;

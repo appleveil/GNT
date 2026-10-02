@@ -3,6 +3,9 @@ import { ref, computed, onMounted } from 'vue'
 import api from '@/api/axios'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
+import { useFormValidation, required, minLength } from '@/composables/useFormValidation'
+import { readApiError } from '@/utils/apiError'
+import ActivityLogList from '@/components/shared/ActivityLogList.vue'
 
 // Admin page (Phase C, 2026-09-14) — CRUD-lite sections on one page rather
 // than separate nav tabs, since each is small: Staff accounts, Other Staff
@@ -31,10 +34,26 @@ const staff = ref([])
 const staffLoading = ref(true)
 const newStaff = ref({ username: '', first_name: '', last_name: '', role: 'CASHIER', password: '' })
 const staffCreating = ref(false)
-const staffError = ref('')
 const resetTargetId = ref(null) // staff user id currently showing the reset-password inline form
 const resetPassword = ref('')
 const resetSubmitting = ref(false)
+
+const newStaffUsername = computed({ get: () => newStaff.value.username, set: v => { newStaff.value.username = v } })
+const newStaffPassword = computed({ get: () => newStaff.value.password, set: v => { newStaff.value.password = v } })
+const {
+  touched: staffTouched, errors: staffErrors, isValid: staffIsValid, formError: staffFormError,
+  touch: touchStaff, touchAll: touchAllStaff, applyServerErrors: applyStaffServerErrors, reset: resetStaffValidation,
+} = useFormValidation({
+  username: { value: newStaffUsername, rules: [required('A username is required.')] },
+  password: { value: newStaffPassword, rules: [required('A password is required.'), minLength(8)] },
+})
+
+const {
+  touched: resetTouched, errors: resetErrors, isValid: resetIsValid, formError: resetFormError,
+  touch: touchResetPassword, touchAll: touchAllReset, applyServerErrors: applyResetServerErrors, reset: resetResetValidation,
+} = useFormValidation({
+  password: { value: resetPassword, rules: [required('A password is required.'), minLength(8)] },
+})
 
 async function loadStaff() {
   staffLoading.value = true
@@ -49,15 +68,17 @@ async function loadStaff() {
 }
 
 async function onCreateStaff() {
-  staffError.value = ''
+  touchAllStaff()
+  if (!staffIsValid.value) return
   staffCreating.value = true
   try {
     await api.post('/staff-users/', newStaff.value)
     newStaff.value = { username: '', first_name: '', last_name: '', role: 'CASHIER', password: '' }
+    resetStaffValidation()
     await loadStaff()
     toast.success('Staff account created.')
   } catch (err) {
-    staffError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not create this account.'
+    applyStaffServerErrors(err)
   } finally {
     staffCreating.value = false
   }
@@ -67,24 +88,27 @@ async function onToggleStaffActive(user) {
   try {
     const { data } = await api.patch(`/staff-users/${user.id}/`, { is_active: !user.is_active })
     Object.assign(user, data)
-  } catch {
-    toast.error('Could not update that account.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that account.').message)
   }
 }
 
 function onStartReset(user) {
   resetTargetId.value = user.id
   resetPassword.value = ''
+  resetResetValidation()
 }
 
 async function onSubmitReset(user) {
+  touchAllReset()
+  if (!resetIsValid.value) return
   resetSubmitting.value = true
   try {
     await api.post(`/staff-users/${user.id}/reset-password/`, { password: resetPassword.value })
     resetTargetId.value = null
     toast.success(`${user.username}'s password was reset.`)
   } catch (err) {
-    toast.error(err.response?.data?.password?.[0] || 'Could not reset that password.')
+    applyResetServerErrors(err)
   } finally {
     resetSubmitting.value = false
   }
@@ -103,8 +127,15 @@ const otherStaff = ref([])
 const otherStaffLoading = ref(true)
 const newOtherStaff = ref({ name: '', role: 'MASSEUSE' })
 const otherStaffCreating = ref(false)
-const otherStaffError = ref('')
 const OTHER_STAFF_ROLE_LABEL = { MASSEUSE: 'Masseuse', DEALER: 'Dealer', SERVICE: 'Service' }
+
+const newOtherStaffName = computed({ get: () => newOtherStaff.value.name, set: v => { newOtherStaff.value.name = v } })
+const {
+  touched: otherStaffTouched, errors: otherStaffErrors, isValid: otherStaffIsValid, formError: otherStaffFormError,
+  touch: touchOtherStaff, touchAll: touchAllOtherStaff, applyServerErrors: applyOtherStaffServerErrors, reset: resetOtherStaffValidation,
+} = useFormValidation({
+  name: { value: newOtherStaffName, rules: [required('A name is required.')] },
+})
 
 async function loadOtherStaff() {
   otherStaffLoading.value = true
@@ -119,15 +150,17 @@ async function loadOtherStaff() {
 }
 
 async function onCreateOtherStaff() {
-  otherStaffError.value = ''
+  touchAllOtherStaff()
+  if (!otherStaffIsValid.value) return
   otherStaffCreating.value = true
   try {
     await api.post('/staff-members/', newOtherStaff.value)
     newOtherStaff.value = { name: '', role: newOtherStaff.value.role }
+    resetOtherStaffValidation()
     await loadOtherStaff()
     toast.success('Staff member added.')
   } catch (err) {
-    otherStaffError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add this person.'
+    applyOtherStaffServerErrors(err)
   } finally {
     otherStaffCreating.value = false
   }
@@ -137,8 +170,8 @@ async function onToggleOtherStaffActive(person) {
   try {
     const { data } = await api.patch(`/staff-members/${person.id}/`, { is_active: !person.is_active })
     Object.assign(person, data)
-  } catch {
-    toast.error('Could not update this person.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update this person.').message)
   }
 }
 
@@ -152,10 +185,28 @@ const fmLoading = ref(true)
 const newFm = ref({ name: '', pin: '', staff_user: '' })
 const floorManagerLogins = computed(() => staff.value.filter(u => u.role === 'FLOOR_MANAGER'))
 const fmCreating = ref(false)
-const fmError = ref('')
 const fmResetTargetId = ref(null)
 const fmResetPin = ref('')
 const fmResetSubmitting = ref(false)
+
+const maxLength = (n, message = `Must be at most ${n} characters.`) => value => (value && String(value).length > n ? message : null)
+
+const newFmName = computed({ get: () => newFm.value.name, set: v => { newFm.value.name = v } })
+const newFmPin = computed({ get: () => newFm.value.pin, set: v => { newFm.value.pin = v } })
+const {
+  touched: fmTouched, errors: fmErrors, isValid: fmIsValid, formError: fmFormError,
+  touch: touchFm, touchAll: touchAllFm, applyServerErrors: applyFmServerErrors, reset: resetFmValidation,
+} = useFormValidation({
+  name: { value: newFmName, rules: [required('A name is required.')] },
+  pin: { value: newFmPin, rules: [required('A PIN is required.'), minLength(4), maxLength(8)] },
+})
+
+const {
+  touched: fmResetTouched, errors: fmResetErrors, isValid: fmResetIsValid, formError: fmResetFormError,
+  touch: touchFmResetPin, touchAll: touchAllFmReset, applyServerErrors: applyFmResetServerErrors, reset: resetFmResetValidation,
+} = useFormValidation({
+  pin: { value: fmResetPin, rules: [required('A PIN is required.'), minLength(4), maxLength(8)] },
+})
 
 async function loadFloorManagers() {
   fmLoading.value = true
@@ -170,15 +221,17 @@ async function loadFloorManagers() {
 }
 
 async function onCreateFm() {
-  fmError.value = ''
+  touchAllFm()
+  if (!fmIsValid.value) return
   fmCreating.value = true
   try {
     await api.post('/floor-managers/', { ...newFm.value, staff_user: newFm.value.staff_user || null })
     newFm.value = { name: '', pin: '', staff_user: '' }
+    resetFmValidation()
     await loadFloorManagers()
     toast.success('Floor Manager added.')
   } catch (err) {
-    fmError.value = Object.values(err.response?.data || {})[0]?.[0] || 'Could not add this Floor Manager.'
+    applyFmServerErrors(err)
   } finally {
     fmCreating.value = false
   }
@@ -188,24 +241,27 @@ async function onToggleFmActive(fm) {
   try {
     const { data } = await api.patch(`/floor-managers/${fm.id}/`, { is_active: !fm.is_active })
     Object.assign(fm, data)
-  } catch {
-    toast.error('Could not update that Floor Manager.')
+  } catch (err) {
+    toast.error(readApiError(err, 'Could not update that Floor Manager.').message)
   }
 }
 
 function onStartFmReset(fm) {
   fmResetTargetId.value = fm.id
   fmResetPin.value = ''
+  resetFmResetValidation()
 }
 
 async function onSubmitFmReset(fm) {
+  touchAllFmReset()
+  if (!fmResetIsValid.value) return
   fmResetSubmitting.value = true
   try {
     await api.patch(`/floor-managers/${fm.id}/`, { pin: fmResetPin.value })
     fmResetTargetId.value = null
     toast.success(`${fm.name}'s PIN was reset.`)
   } catch (err) {
-    toast.error(err.response?.data?.pin?.[0] || 'Could not reset that PIN.')
+    applyFmResetServerErrors(err)
   } finally {
     fmResetSubmitting.value = false
   }
@@ -366,7 +422,7 @@ async function onSubmitStagedRows() {
     toast.success(`${data.created.length} code${data.created.length === 1 ? '' : 's'} added.`)
     if (data.errors?.length) accountCodesError.value = data.errors.join(' ')
   } catch (err) {
-    accountCodesError.value = err.response?.data?.detail || err.response?.data?.errors?.join(' ') || 'Could not add these codes.'
+    accountCodesError.value = err.response?.data?.errors?.join(' ') || readApiError(err, 'Could not add these codes.').message
   } finally {
     accountCodesCreating.value = false
   }
@@ -453,6 +509,14 @@ onMounted(() => {
       </template>
     </div>
 
+    <!-- Visible to both roles, like Account Codes above — Owner sees every
+         entry, Accountant sees every Cashier's plus their own (see
+         gaming.selectors.visible_activity). -->
+    <div class="card section-card">
+      <div class="section-title">Activity log</div>
+      <ActivityLogList />
+    </div>
+
     <template v-if="auth.isOwner">
     <div class="card section-card">
       <div class="section-title">Staff accounts</div>
@@ -468,15 +532,30 @@ onMounted(() => {
           <button class="link-btn" type="button" @click="onStartReset(u)">Reset password</button>
         </div>
         <div v-if="resetTargetId" class="inline-form">
-          <input v-model="resetPassword" type="password" placeholder="New password (min 8 chars)" class="inline-input" />
-          <button class="btn btn--secondary" type="button" :disabled="resetSubmitting || resetPassword.length < 8" @click="onSubmitReset(staff.find(u => u.id === resetTargetId))">
+          <div class="field">
+            <input
+              v-model="resetPassword" type="password" placeholder="New password (min 8 chars)" class="inline-input"
+              :class="{ 'input--invalid': resetTouched.password && resetErrors.password }"
+              @blur="touchResetPassword('password')"
+            />
+            <p v-if="resetTouched.password && resetErrors.password" class="field-error">{{ resetErrors.password }}</p>
+          </div>
+          <button class="btn btn--secondary" type="button" :disabled="resetSubmitting || !resetIsValid" @click="onSubmitReset(staff.find(u => u.id === resetTargetId))">
             {{ resetSubmitting ? 'Saving…' : 'Save' }}
           </button>
           <button class="link-btn link-btn--muted" type="button" @click="resetTargetId = null">Cancel</button>
         </div>
+        <p v-if="resetTargetId && resetFormError" class="form-error">{{ resetFormError }}</p>
 
-        <form class="create-form" @submit.prevent="onCreateStaff">
-          <input v-model="newStaff.username" type="text" placeholder="Username" required class="ff" />
+        <form class="create-form" novalidate @submit.prevent="onCreateStaff">
+          <div class="field">
+            <input
+              v-model="newStaff.username" type="text" placeholder="Username" class="ff"
+              :class="{ 'input--invalid': staffTouched.username && staffErrors.username }"
+              @blur="touchStaff('username')"
+            />
+            <p v-if="staffTouched.username && staffErrors.username" class="field-error">{{ staffErrors.username }}</p>
+          </div>
           <input v-model="newStaff.first_name" type="text" placeholder="First name" class="ff" />
           <input v-model="newStaff.last_name" type="text" placeholder="Last name" class="ff" />
           <select v-model="newStaff.role" class="ff">
@@ -485,10 +564,17 @@ onMounted(() => {
             <option value="OWNER">Owner</option>
             <option value="FLOOR_MANAGER">Floor Manager</option>
           </select>
-          <input v-model="newStaff.password" type="password" placeholder="Password" required class="ff" />
-          <button class="btn btn--primary" type="submit" :disabled="staffCreating">{{ staffCreating ? 'Adding…' : '+ Add staff' }}</button>
+          <div class="field">
+            <input
+              v-model="newStaff.password" type="password" placeholder="Password" class="ff"
+              :class="{ 'input--invalid': staffTouched.password && staffErrors.password }"
+              @blur="touchStaff('password')"
+            />
+            <p v-if="staffTouched.password && staffErrors.password" class="field-error">{{ staffErrors.password }}</p>
+          </div>
+          <button class="btn btn--primary" type="submit" :disabled="staffCreating || !staffIsValid">{{ staffCreating ? 'Adding…' : '+ Add staff' }}</button>
         </form>
-        <p v-if="staffError" class="form-error">{{ staffError }}</p>
+        <p v-if="staffFormError" class="form-error">{{ staffFormError }}</p>
       </template>
     </div>
 
@@ -507,16 +593,23 @@ onMounted(() => {
           <button class="link-btn" type="button" @click="onToggleOtherStaffActive(p)">{{ p.is_active ? 'Deactivate' : 'Activate' }}</button>
         </div>
 
-        <form class="create-form" @submit.prevent="onCreateOtherStaff">
-          <input v-model="newOtherStaff.name" type="text" placeholder="Name" required class="ff" />
+        <form class="create-form" novalidate @submit.prevent="onCreateOtherStaff">
+          <div class="field">
+            <input
+              v-model="newOtherStaff.name" type="text" placeholder="Name" class="ff"
+              :class="{ 'input--invalid': otherStaffTouched.name && otherStaffErrors.name }"
+              @blur="touchOtherStaff('name')"
+            />
+            <p v-if="otherStaffTouched.name && otherStaffErrors.name" class="field-error">{{ otherStaffErrors.name }}</p>
+          </div>
           <select v-model="newOtherStaff.role" class="ff">
             <option value="MASSEUSE">Masseuse</option>
             <option value="DEALER">Dealer</option>
             <option value="SERVICE">Service</option>
           </select>
-          <button class="btn btn--primary" type="submit" :disabled="otherStaffCreating">{{ otherStaffCreating ? 'Adding…' : '+ Add' }}</button>
+          <button class="btn btn--primary" type="submit" :disabled="otherStaffCreating || !otherStaffIsValid">{{ otherStaffCreating ? 'Adding…' : '+ Add' }}</button>
         </form>
-        <p v-if="otherStaffError" class="form-error">{{ otherStaffError }}</p>
+        <p v-if="otherStaffFormError" class="form-error">{{ otherStaffFormError }}</p>
       </template>
     </div>
 
@@ -538,23 +631,45 @@ onMounted(() => {
           <button class="link-btn" type="button" @click="onStartFmReset(fm)">Reset PIN</button>
         </div>
         <div v-if="fmResetTargetId" class="inline-form">
-          <input v-model="fmResetPin" type="password" placeholder="New PIN (4-8 chars)" class="inline-input" />
-          <button class="btn btn--secondary" type="button" :disabled="fmResetSubmitting || fmResetPin.length < 4" @click="onSubmitFmReset(floorManagers.find(f => f.id === fmResetTargetId))">
+          <div class="field">
+            <input
+              v-model="fmResetPin" type="password" placeholder="New PIN (4-8 chars)" class="inline-input"
+              :class="{ 'input--invalid': fmResetTouched.pin && fmResetErrors.pin }"
+              @blur="touchFmResetPin('pin')"
+            />
+            <p v-if="fmResetTouched.pin && fmResetErrors.pin" class="field-error">{{ fmResetErrors.pin }}</p>
+          </div>
+          <button class="btn btn--secondary" type="button" :disabled="fmResetSubmitting || !fmResetIsValid" @click="onSubmitFmReset(floorManagers.find(f => f.id === fmResetTargetId))">
             {{ fmResetSubmitting ? 'Saving…' : 'Save' }}
           </button>
           <button class="link-btn link-btn--muted" type="button" @click="fmResetTargetId = null">Cancel</button>
         </div>
+        <p v-if="fmResetTargetId && fmResetFormError" class="form-error">{{ fmResetFormError }}</p>
 
-        <form class="create-form" @submit.prevent="onCreateFm">
-          <input v-model="newFm.name" type="text" placeholder="Name" required class="ff" />
-          <input v-model="newFm.pin" type="password" placeholder="PIN (4-8 chars)" required class="ff" />
+        <form class="create-form" novalidate @submit.prevent="onCreateFm">
+          <div class="field">
+            <input
+              v-model="newFm.name" type="text" placeholder="Name" class="ff"
+              :class="{ 'input--invalid': fmTouched.name && fmErrors.name }"
+              @blur="touchFm('name')"
+            />
+            <p v-if="fmTouched.name && fmErrors.name" class="field-error">{{ fmErrors.name }}</p>
+          </div>
+          <div class="field">
+            <input
+              v-model="newFm.pin" type="password" placeholder="PIN (4-8 chars)" class="ff"
+              :class="{ 'input--invalid': fmTouched.pin && fmErrors.pin }"
+              @blur="touchFm('pin')"
+            />
+            <p v-if="fmTouched.pin && fmErrors.pin" class="field-error">{{ fmErrors.pin }}</p>
+          </div>
           <select v-model="newFm.staff_user" class="ff">
             <option value="">No linked login</option>
             <option v-for="u in floorManagerLogins" :key="u.id" :value="u.id">Link to {{ u.username }}</option>
           </select>
-          <button class="btn btn--primary" type="submit" :disabled="fmCreating">{{ fmCreating ? 'Adding…' : '+ Add Floor Manager' }}</button>
+          <button class="btn btn--primary" type="submit" :disabled="fmCreating || !fmIsValid">{{ fmCreating ? 'Adding…' : '+ Add Floor Manager' }}</button>
         </form>
-        <p v-if="fmError" class="form-error">{{ fmError }}</p>
+        <p v-if="fmFormError" class="form-error">{{ fmFormError }}</p>
       </template>
     </div>
     </template>
@@ -579,7 +694,8 @@ onMounted(() => {
 .link-btn { border: none; background: none; font-size: 12px; font-weight: 700; color: var(--accent-text); cursor: pointer; padding: 0; white-space: nowrap; }
 .link-btn--muted { color: var(--text-tertiary); font-weight: 500; }
 
-.inline-form { display: flex; align-items: center; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.inline-form { display: flex; align-items: flex-start; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.field { display: flex; flex-direction: column; gap: 4px; }
 .inline-input {
   height: 36px;
   border: 1px solid var(--border-strong);
@@ -623,14 +739,7 @@ onMounted(() => {
   background: var(--surface);
 }
 .ff:focus { outline: none; border-color: var(--accent); }
-.form-error {
-  font-size: 12.5px;
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-top: 8px;
-}
+.form-error { margin-top: 8px; }
 .form-warning {
   font-size: 12.5px;
   color: var(--warning-text);

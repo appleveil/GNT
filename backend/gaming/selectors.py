@@ -4,13 +4,15 @@ queries over Transaction" table. Nothing here is stored; every balance is
 computed at query time.
 """
 
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from .models import GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
+from accounts.models import StaffUser
+
+from .models import ActivityLog, GameDay, GameDayPlayer, GameDaySummary, ProfitSplitArrangement, Transaction
 
 ZERO = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
 
@@ -19,6 +21,10 @@ DEBIT_TYPES = {
     Transaction.Type.CHIPS_OUT,
     Transaction.Type.PAYOUT,
     Transaction.Type.DEAL_TRANSFER_OUT,
+    # Added 2026-09-25 — the dateless half of drawing down a carried
+    # forward credit against a buy-in; see PLAYER_BALANCE_IN below and
+    # Transaction.Type's own comment.
+    Transaction.Type.PLAYER_BALANCE_OUT,
 }
 # Credits increase a player's balance (chips returned, any form of payment, write-offs).
 CREDIT_TYPES = {
@@ -38,6 +44,10 @@ CREDIT_TYPES = {
     # player's own debt. See services._apply_profit_split_stake and
     # gaming/views.py's "SPA" label (constants/transactionTypes.js).
     Transaction.Type.PROFIT_SPLIT_STAKE,
+    # Added 2026-09-25 — the ledger-visible, game-day-dated credit half of
+    # drawing down a player's carried-forward credit against a buy-in; see
+    # services.record_transaction and Transaction.Type's own comment.
+    Transaction.Type.PLAYER_BALANCE_IN,
 }
 # Rake/tips have no player and never touch a player or game-day balance.
 EXCLUDED_FROM_GAME_DAY_LEDGER = {Transaction.Type.RAKE, Transaction.Type.TIP}
@@ -231,6 +241,44 @@ def bulk_player_game_day_balances(player_ids, game_day):
     )
     rows = qs.values('player').annotate(total=Sum('signed_amount'))
     return {row['player']: row['total'] for row in rows}
+
+
+def player_prior_balance(player, game_day):
+    """
+    A player's lifetime balance from BEFORE this game-day started — the
+    lifetime total with tonight's own activity excluded. Used to decide
+    whether a carried-forward figure is safe to show a Cashier at all; see
+    cashier_visible_balance.
+    """
+    lifetime = player_balance(player)
+    if game_day is None:
+        return lifetime
+    return lifetime - player_game_day_balance(player, game_day)
+
+
+def cashier_visible_balance(player, game_day):
+    """
+    What a Cashier is allowed to see and draw new buy-ins against (see
+    CONCEPT.md's "Cashier player-history visibility"). A DEBT carried over
+    from before today stays completely invisible — the Cashier only ever
+    sees tonight's own game-day activity in that case, same as before.
+
+    A CREDIT carried over (the house owes the player from an earlier
+    game-day) is the opposite: it's shown, and it's folded into the figure
+    returned here so it gets drawn against before any of tonight's own
+    buy-ins count as new debt against chips_limit or force a cash payment
+    — see record_transaction's CHIPS_OUT branch and chips_room_remaining,
+    which both consume this instead of the raw game-day balance.
+
+    Once a carried-over credit is fully consumed, the value returned here
+    can legitimately go negative — that negative portion is tonight's own
+    net activity (today's buy-ins minus the credit that covered part of
+    them), not old debt resurfacing, so showing it doesn't violate the
+    visibility rule above.
+    """
+    today = player_game_day_balance(player, game_day) if game_day else Decimal('0')
+    prior = player_prior_balance(player, game_day)
+    return today + prior if prior >= Decimal('0') else today
 
 
 def player_has_failed_payout(player, game_day):
@@ -435,65 +483,79 @@ def dashboard_totals():
     return total_debt, total_credit, debtor_count, creditor_count
 
 
-def _profit_split_periods_elapsed(arrangement, now):
+def _profit_split_periods_elapsed(arrangement, game_day):
     """
-    How many complete reset-periods have passed since an arrangement was
-    created, and when the CURRENT one started — computed live from
-    created_at + cadence, never stored (see ProfitSplitArrangement's
-    docstring). A ONE_OFF arrangement has exactly one period spanning its
-    whole lifetime. Months are real calendar months (via dateutil), not a
-    fixed 30-day chunk — weeks/days are fixed-length, which is unambiguous
-    for them.
+    For PER_GAME: how many OTHER distinct game-days this arrangement has
+    already seen stake activity on ("periods_elapsed" — compared against
+    max_resets, now a count of games played, not calendar periods), and
+    the current period's own start (the current game-day's started_at, for
+    display). `game_day` itself is excluded from the count — it answers
+    "how many games came before this one," not "including it."
+
+    For ONE_OFF (or no current game-day): always (0, arrangement.created_at)
+    — a single period spanning the arrangement's whole lifetime.
+
+    Revised 2026-10-02 (was wall-clock Daily/Weekly/Monthly stepping from
+    created_at — see ProfitSplitArrangement.ResetCadence's own comment on
+    why that was the wrong basis for a cap meant to apply per game night).
+    Computed live from Transaction rows, never stored (see
+    ProfitSplitArrangement's docstring).
     """
-    Cadence = ProfitSplitArrangement.ResetCadence
-    start = arrangement.created_at
-    if arrangement.reset_cadence == Cadence.ONE_OFF:
-        return 0, start
-    if arrangement.reset_cadence == Cadence.DAILY:
-        from datetime import timedelta
-        step = timedelta(days=1)
-    elif arrangement.reset_cadence == Cadence.WEEKLY:
-        from datetime import timedelta
-        step = timedelta(weeks=1)
-    elif arrangement.reset_cadence == Cadence.MONTHLY:
-        from dateutil.relativedelta import relativedelta
-        periods, period_start = 0, start
-        while period_start + relativedelta(months=1) <= now:
-            period_start += relativedelta(months=1)
-            periods += 1
-        return periods, period_start
-    else:
-        raise ValueError(f'Unknown reset cadence: {arrangement.reset_cadence}')
-    periods = max(0, (now - start) // step)
-    return periods, start + periods * step
+    if arrangement.reset_cadence == ProfitSplitArrangement.ResetCadence.ONE_OFF or game_day is None:
+        return 0, arrangement.created_at
+    other_games_played = (
+        Transaction.objects.filter(
+            profit_split_arrangement=arrangement, type=Transaction.Type.PROFIT_SPLIT_STAKE, is_voided=False,
+        )
+        .exclude(game_day=game_day)
+        .values_list('game_day_id', flat=True)
+        .distinct()
+        .count()
+    )
+    return other_games_played, game_day.started_at
 
 
-def profit_split_status(arrangement, now=None):
+def profit_split_status(arrangement, game_day=None, now=None):
     """
     Everything needed to enforce/display a Profit Split arrangement,
     computed live — never stored, matching this file's "balances are
     computed, not stored" philosophy (SCHEMA.md). "How much the house has
     covered" is a live SUM over PROFIT_SPLIT_STAKE rows FK'd to this
     arrangement, never a mutable counter.
+
+    `game_day` (added 2026-10-02, defaults to current_open_game_day()) is
+    the game-day the caller is asking about — it determines the current
+    PER_GAME period (ignored entirely for a ONE_OFF arrangement).
     """
     now = now or timezone.now()
-    periods_elapsed, period_start = _profit_split_periods_elapsed(arrangement, now)
+    if game_day is None:
+        game_day = current_open_game_day()
+    periods_elapsed, period_start = _profit_split_periods_elapsed(arrangement, game_day)
 
     stake_qs = Transaction.objects.filter(
         profit_split_arrangement=arrangement, type=Transaction.Type.PROFIT_SPLIT_STAKE, is_voided=False,
     )
-    covered_this_period = stake_qs.filter(created_at__gte=period_start).aggregate(
-        total=Coalesce(Sum('amount'), ZERO),
-    )['total']
+    is_per_game = arrangement.reset_cadence == ProfitSplitArrangement.ResetCadence.PER_GAME
+    if is_per_game and game_day is not None:
+        covered_this_period = stake_qs.filter(game_day=game_day).aggregate(
+            total=Coalesce(Sum('amount'), ZERO),
+        )['total']
+    else:
+        covered_this_period = stake_qs.filter(created_at__gte=period_start).aggregate(
+            total=Coalesce(Sum('amount'), ZERO),
+        )['total']
     cumulative_covered = stake_qs.aggregate(total=Coalesce(Sum('amount'), ZERO))['total']
 
+    # Priority order (per explicit instruction, 2026-10-02 — was end date →
+    # number of games → total value): total value → end date → number of
+    # games. The first one hit is reported as the reason.
     exhausted_reason = None
-    if arrangement.ends_at and now >= arrangement.ends_at:
+    if arrangement.max_cumulative_value is not None and cumulative_covered >= arrangement.max_cumulative_value:
+        exhausted_reason = 'max cumulative value reached'
+    elif arrangement.ends_at and now >= arrangement.ends_at:
         exhausted_reason = 'end date reached'
     elif arrangement.max_resets is not None and periods_elapsed >= arrangement.max_resets:
         exhausted_reason = 'max resets reached'
-    elif arrangement.max_cumulative_value is not None and cumulative_covered >= arrangement.max_cumulative_value:
-        exhausted_reason = 'max cumulative value reached'
 
     if exhausted_reason is not None:
         available_this_period = Decimal('0')
@@ -526,9 +588,11 @@ def chips_room_remaining(player, game_day):
     that entirely: it's not paired against anything, it's a single live
     answer, always correct because it's derived fresh from the two
     quantities the system already tracks correctly:
-      - L' = the player's own remaining debt room (chips_limit minus
-        their current TRUE net debt — already reflects any chips they've
-        returned mid-session, via player_game_day_balance).
+      - L' = the player's own remaining debt room (chips_limit plus their
+        current cashier_visible_balance — already reflects any chips
+        they've returned mid-session, and any credit carried forward from
+        a previous game-day that the house still owes them; see
+        cashier_visible_balance).
       - A' = the deal's remaining stake cap this period
         (profit_split_status's available_stake_this_period).
 
@@ -542,31 +606,49 @@ def chips_room_remaining(player, game_day):
     After one 1500000 buy-in (uses the player's FULL debt room and
     exactly 750000 of the cap): L'=0, A'=250000, room=min(0, 250000)=0 —
     correctly zero, matching record_transaction's own block. Reduces to
-    plain (chips_limit - current debt) whenever there's no active
+    plain (chips_limit + current balance) whenever there's no active
     arrangement (or it's exhausted, or stake%<=0) — one formula, one code
     path, for both cases.
 
-    record_transaction's own chips_limit enforcement does not call this —
-    it already gets the correct answer, per buy-in, by checking the
-    player's own portion (after _apply_profit_split_stake) against the
-    real chips_limit directly. This exists purely for display.
+    record_transaction's own chips_limit enforcement does not call this
+    function itself, but computes L' the same way (against the player's
+    own portion after _apply_profit_split_stake) — kept as two call sites
+    on the same cashier_visible_balance rather than one shared function,
+    since this one is purely for display and the other is the actual gate.
     """
     if player.chips_limit is None:
         return None
-    current_balance = player_game_day_balance(player, game_day) if game_day else Decimal('0')
-    current_debt = max(-current_balance, Decimal('0'))
-    remaining_debt_room = max(player.chips_limit - current_debt, Decimal('0'))
+    current_balance = cashier_visible_balance(player, game_day)
+    remaining_debt_room = max(player.chips_limit + current_balance, Decimal('0'))
 
     arrangement = (
         ProfitSplitArrangement.objects.filter(player=player, is_active=True).order_by('-created_at').first()
     )
     if arrangement is None or arrangement.house_stake_pct <= 0:
         return remaining_debt_room
-    status = profit_split_status(arrangement)
+    status = profit_split_status(arrangement, game_day=game_day)
     if status['is_exhausted']:
         return remaining_debt_room
 
     stake_fraction = arrangement.house_stake_pct / Decimal('100')
     via_stake_ratio = remaining_debt_room / (Decimal('1') - stake_fraction)
     via_remaining_cap = remaining_debt_room + status['available_stake_this_period']
-    return min(via_stake_ratio, via_remaining_cap).quantize(Decimal('1'))
+    # Always round down: rounding up could advertise ₦1 more than
+    # record_transaction's own gate will actually allow.
+    return min(via_stake_ratio, via_remaining_cap).quantize(Decimal('1'), rounding=ROUND_DOWN)
+
+
+def visible_activity(user):
+    """
+    What a given role is allowed to see in the Activity log — see
+    ActivityLog's own docstring. Owner: everything. Accountant and Floor
+    Manager: every Cashier's entries, plus their own. Cashier: their own
+    only. Filters on the SNAPSHOT actor_role (not a live join to the
+    actor's current role) for the same reason ActivityLog stores it that
+    way — see that model's docstring.
+    """
+    if user.role == StaffUser.Role.OWNER:
+        return ActivityLog.objects.all()
+    if user.role in (StaffUser.Role.ACCOUNTANT, StaffUser.Role.FLOOR_MANAGER):
+        return ActivityLog.objects.filter(Q(actor_role=StaffUser.Role.CASHIER) | Q(actor=user))
+    return ActivityLog.objects.filter(actor=user)

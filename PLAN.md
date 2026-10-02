@@ -2118,6 +2118,298 @@ the same way, and `chips_room_remaining` matched the hand-computed formula
 at both points (₦1,000,000, then ₦700,000); throwaway data cleaned up
 afterward.
 
+**Follow-up, same day — missed backfill, found by tracing a live game-day.**
+The three stake pairs recorded before this redesign (John/WWI 1,
+game-day 19) were identified before the change but never migrated: their
+`CHIPS_OUT` rows still held the halved amount, and once `PROFIT_SPLIT_STAKE`
+became a credit they were discounted twice — John showed −₦500,000 instead
+of −₦1,500,000, and the game-day's `chips_out_total` read ₦2.75M instead of
+₦3.75M. Data migration `gaming.0026_backfill_profit_split_stake_pairs`
+raises each unlinked stake row's `CHIPS_OUT` to the full amount, links the
+pair, and voids the stake of any buy-in that was already voided (the old
+code never cascaded voids to the then-neutral stake row). Irreversible by
+design. Applied to `test1`; John and the chip total now read correctly.
+Also: `chips_room_remaining` now always rounds down (it rounded to nearest,
+which could advertise ₦1 more than the real gate allows). 5 new tests.
+
+### A credit carried forward is now visible to the Cashier and drawn against first (2026-09-25)
+
+Explicit narrowing of the "Cashier player-history visibility" rule
+(CONCEPT.md), prompted by a real case: Liam had a positive balance carried
+forward from a previous game-day (the house owed him), but the Cashier's
+screen only ever showed tonight's own game-day balance — so he was shown
+as starting fresh, his `chips_limit` would have started counting down from
+his very first buy-in tonight, and he'd have been pushed toward a cash
+payment before the money the house already held for him was ever touched.
+
+The blanket rule only ever needed to hide a carried-forward **debt** — a
+carried-forward **credit** was never the thing worth protecting against,
+and hiding it was actively harmful. New `selectors.cashier_visible_balance
+(player, game_day)` is now the single source for every Cashier-facing
+balance figure: a debt from before today still never surfaces (unchanged);
+a credit does, and is folded into the figure returned — so it's what
+`GameDaySeatedPlayerSerializer.balance`, `chips_used_today`,
+`chips_room_remaining`, `accounts.PlayerSerializer`'s Cashier-branch
+`balance`/`chips_used_today`, and `record_transaction`'s own `chips_limit`
+gate (`gaming/services.py`, the `CHIPS_OUT` branch) all now read instead of
+`player_game_day_balance` directly. `chips_room_remaining`'s own formula
+also needed a real fix alongside the swap: `remaining_debt_room` was
+`chips_limit - current_debt`, which silently discarded a positive balance
+instead of adding it to the room; it's now `chips_limit + current_balance`
+(signed), which reduces to the same thing whenever the balance is
+negative or zero and correctly adds the credit on top of the limit when
+it's positive. Once a carried credit is exhausted mid-session the balance
+shown can legitimately go negative — that's the night's own activity net
+of the credit, not old debt resurfacing, so it's not a re-opening of the
+gap the visibility rule exists to close.
+
+No frontend changes needed: `ActiveGameDayView.vue`'s balance hero and
+credit-limit badge, and `TransactionEntryModal.vue`'s room-remaining guard,
+already read these same serializer fields (wired during the Profit-Split
+redesign above) — they inherit the corrected figures automatically.
+
+Verified: 13 new tests (`CashierVisibleCreditTests`) covering the selector
+directly, `chips_limit` enforcement with a credit in play (both within and
+beyond credit+limit), `chips_room_remaining` before/after a buy-in that
+spans the credit into real debt, and both API endpoints (seated-player
+list, general Player list) for a Cashier vs. an Owner. Full suite green
+(332 tests).
+
+### "One line per action" — drawing down a carried credit gets its own real ledger entry, "Player balance" (2026-09-25, same day)
+
+Follow-up on the entry above: `cashier_visible_balance` draws a carried
+credit down correctly, but purely at READ time — nothing recorded that it
+happened, so the Cashier's ledger showed only the CHIPS_OUT line with no
+explanation for why the balance afterward didn't drop by the full amount.
+Per explicit instruction: one line per action, so the buy-in stays exactly
+"chips issued," and a second, explicit line — **"Player balance"** — records
+how much of it was actually covered by the player's own existing balance.
+
+Implemented as a real linked pair, `PLAYER_BALANCE_IN`/`PLAYER_BALANCE_OUT`,
+auto-created by `record_transaction`'s CHIPS_OUT branch, sized at
+`min(available carried credit, the player's own share after any stake
+deal)`: `PLAYER_BALANCE_IN` is dated tonight (a real `CREDIT_TYPES` row,
+labeled "Player balance," visible on the Cashier's own ledger exactly like
+"SPA" already is) and is what actually offsets the CHIPS_OUT line;
+`PLAYER_BALANCE_OUT` is dateless (`game_day=None`, Outstanding-ledger only
+— same convention `record_deal_transfer` already uses), and is what
+genuinely draws the credit down so it can't be reapplied to a later buy-in,
+tonight or on a future night. Verified with worked numbers that this can't
+double-count against the existing read-time blend: the OUT leg's debit and
+the IN leg's credit net to zero on the player's lifetime total, so
+`player_prior_balance` correctly reflects what's left afterward — the two
+mechanisms (real ledger line + live blend for not-yet-applied credit)
+compose without conflict.
+
+Real-world complication this surfaced: `Transaction.linked_transaction` is
+strictly one-to-one, and a stake-covered buy-in already uses that slot on
+its `CHIPS_OUT` row to point at its `PROFIT_SPLIT_STAKE` credit — it can't
+also point at a `PLAYER_BALANCE_IN` row when both apply to the same buy-in.
+Resolved with a second, plain (non-unique) FK, `source_buy_in`, set only on
+`PLAYER_BALANCE_IN`, pointing back at its `CHIPS_OUT` — `linked_transaction`
+stays reserved for true, mutual pairs (Deals Transfer, stake↔buy-in,
+Player-balance IN↔OUT). `void_transaction` was generalized from voiding a
+single linked partner to a small recursive walk across all three
+relationships (`linked_transaction`, `source_buy_in`, and its reverse,
+`balance_applications`) — voiding ANY row in a connected group (the buy-in,
+its stake credit, its Player-balance pair) now voids the whole group,
+verified from every entry point, including the combined case where a single
+buy-in has both a stake credit and a Player-balance credit at once.
+
+No frontend changes needed — `PLAYER_BALANCE_IN` is a real `Transaction`
+row, so it appears in the ledger feed and renders through the existing
+generic `TRANSACTION_TYPES`-driven row rendering (`LedgerTable.vue`) like
+any other type; only a label/tone entry was added to
+`constants/transactionTypes.js`. `PLAYER_BALANCE_OUT` never reaches any
+game-day-scoped ledger by construction (dateless), not by any masking rule.
+
+Verified: 10 new tests (`PlayerBalanceLedgerLineTests`) — pair creation and
+sizing (full credit coverage, partial/capped coverage, capped against the
+player's own share when a stake deal is also active), progressive draw-down
+across two buy-ins in one night, the OUT leg's absence from any game-day
+ledger, the Cashier-facing ledger endpoint showing both lines, and void
+cascade from every entry point (the buy-in, the Player-balance credit
+itself, and the combined stake+Player-balance case). New migration
+`gaming.0027_transaction_source_buy_in_alter_transaction_type`, applied to
+`test1`. Full suite green.
+
+### The Cashier's chips-limit badge collapses to one figure, "Available now" (2026-09-26)
+
+Follow-up: even after "SPA" became a visible, honestly-labeled ledger line
+(2026-09-28 redesign above), the Cashier still couldn't tell how many chips
+a player could actually take at any moment. The badge paired
+`chips_used_today` against `chips_room_remaining` ("₦250,000 used · room for
+₦1,000,000 more"), but with a Profit-Split deal active, part of what was
+issued came from the house's own stake — `chips_used_today` (the player's
+own net debt) and the gross chips handed out don't share a basis, so the
+pairing invited a comparison that never quite added up, and it partially
+revealed that a deal existed at all. An earlier attempt (showing an inflated
+credit limit paired against the same "used" figure) was tried and reverted
+during the original redesign for the identical reason — see that section
+above.
+
+Resolved by removing the pairing rather than fixing the arithmetic: the
+Cashier now sees exactly **one** number, **"Available now"** —
+`chips_room_remaining` on its own, unpaired. The credit limit, `chips_used_today`,
+and the deal's terms (stake %, cap, remaining cap) are hidden from the
+Cashier entirely, on-screen and in the rejection message; the Owner and
+Accountant still see the real credit limit via the Roster screen. The "SPA"
+and "Player balance" ledger lines stay visible, so the Cashier's own ledger
+still adds up — only the two *summary* figures (limit, used) are hidden, not
+the underlying entries. No change to the underlying math:
+`chips_room_remaining` already correctly accounted for the credit limit, the
+deal's remaining cap, and any carried-forward credit (2026-09-25 above) —
+this is a presentation change only.
+
+- `ActiveGameDayView.vue`'s badge: `Credit limit: {used} used · room for
+  {remaining} more` → `Available now: {remaining}`.
+- `TransactionEntryModal.vue`: the inline hint and the over-limit warning
+  reworded to name only the available figure; `exceedsChipsLimit` renamed
+  `exceedsAvailable` (same `chips_room_remaining` comparison, unchanged).
+- `record_transaction`'s CHIPS_OUT rejection message no longer names the
+  credit limit or "debt after this issuance" — it names only
+  `chips_room_remaining`, matching what's on screen.
+
+Verified: new test (`test_rejection_names_only_the_available_figure_not_the_limit_or_debt`)
+asserts the rejection message contains the room figure and neither "limit"
+nor "debt". Full suite green, `npm run build` clean.
+
+### Five-phase batch: Cashier seating/chips, per-game deal caps, Owner placeholders, Activity log, one form-validation style (2026-10-02)
+
+A large batch of follow-ups from live testing, implemented as five phases.
+**All five phases are complete, tested, and built clean.** Migrations
+`gaming.0028`–`0031` applied to `test1`.
+
+**Phase 1 — Cashier seating and chips friction.**
+- `ClubSettings.auto_issue_buy_in_on_seating` (migration `0028`, default
+  **off**) gates `seat_player`'s old always-on default-buy-in CHIPS_OUT.
+  Toggle lives in the Settings screen's "Cashier permissions" card.
+- `TransactionEntryModal.vue` pre-fills the Issue Chips amount from
+  `gameDay.current.buy_in_amount` (falling back to ₦500,000) via a new
+  `defaultAmount` prop, so the first buy-in is a one-tap manual entry
+  instead of relying on the automation.
+- The "Unassigned" pill row on `ActiveGameDayView.vue` is removed.
+  `AddPlayerModal.vue`'s "+ New Player" button now POSTs straight to
+  `/players/` (registers only, no seating) instead of going through
+  `seat_player`; `PlayerViewSet.create` (`accounts/views.py`) auto-assigns
+  the next `AccountCode` when none is given, mirroring
+  `_assign_next_account_code`. The Existing-player picker now excludes only
+  players who already hold a seat number or left — a seated-but-unassigned
+  player still shows up needing a seat.
+- `AppShell.vue`: the Cashier's Close Game-Day / Activity log / Log out are
+  collapsed into one dropdown under the avatar (`RowActionsMenu.vue` grew a
+  `trigger` slot + `align` prop for this). Every other role is unchanged.
+- Tests: `AutoIssueBuyInOnSeatingTests`, a seat-an-unassigned-player
+  regression, `PlayerViewSet.create` auto-assign tests.
+
+**Phase 2 — Profit-Split stake cap, per game instead of per wall-clock period.**
+`ProfitSplitArrangement.ResetCadence`'s Daily/Weekly/Monthly are replaced
+by a single `PER_GAME` (`ONE_OFF` unchanged) — migration `0029` (schema) +
+`0030` (data backfill, rewrites any existing Daily/Weekly/Monthly row to
+`PER_GAME`). The cap now refills when a new game-day opens;
+`periods_elapsed`/`max_resets` ("number of games," renamed from "number of
+resets") count distinct game-days the arrangement saw stake activity on,
+not calendar periods — an empty night doesn't consume one. `game_day` is
+threaded through `profit_split_status`/`_apply_profit_split_stake`/
+`chips_room_remaining`. End-condition priority also changed, per explicit
+instruction: **total value → end date → number of games** (was date →
+resets → value) — whichever is hit first is reported.
+`DealProfitSplitView.vue`: "Cap per period" → "Cap per game", the Resets
+select loses Daily/Weekly/Monthly, "Number of resets" → "Number of games",
+field order matches the new priority. Tests: cap-refills-on-new-game-day,
+games-played-not-periods, empty-night-doesn't-count, priority-order.
+
+**Phase 3 — Owner placeholders (content pending from the Owner).**
+`DashboardView.vue` gets an Owner-only "Deals ROI" stat card showing "—"
+(no backend field yet). `LedgersLayout.vue`/`AppShell.vue` gain a third,
+Owner-only "Deals" entry under Ledgers → `LedgersDealsView.vue`, a plain
+"Details to follow" placeholder at `/ledgers/deals`.
+
+**Phase 4 — Activity log.** New `gaming.models.ActivityLog` (migration
+`0031`) — append-only, one row per staff action (chips/payments/rake/tips,
+voids, seat/leave/move, open/close game-day, payout request/approve/reject,
+deal created/ended, credit-limit change, settings/table change, staff
+created, password/PIN reset, account codes added, player registered,
+login). **Lives in `gaming`, not `accounts`**, even though several entries
+originate in `accounts.views` — `accounts` is in both `SHARED_APPS` and
+`TENANT_APPS` (see settings/base.py), so a hard FK from an `accounts` model
+into `gaming` (GameDay/Transaction) fails to migrate against the public
+schema, which has no `gaming` tables at all. `gaming.activity.log_activity`
+is the one place that writes a row, and it no-ops outright when
+`connection.schema_name` is the public schema (covers the handful of
+`accounts.views` call sites reachable from a public-schema login).
+`gaming.selectors.visible_activity(user)` is the one place that scopes
+reads: Owner sees everything; Accountant and Floor Manager see every
+Cashier's entries plus their own; Cashier sees only their own — filtered on
+`actor_role`, a snapshot at write time, not a live join (a promoted Cashier's
+old entries still read as Cashier entries).
+`GET /activity-log/` (`accounts/views.py`, `ActivityLogView` +
+`LimitOffsetPagination`, the only paginated endpoint in the app — a
+deliberate, scoped exception, not a global pagination change) takes
+`?actor=`/`?action=`/`?date_from=`/`?date_to=`. Frontend:
+`components/shared/ActivityLogList.vue` (filters + table, actor dropdown
+Owner-only since `StaffUserViewSet.list` is Owner-only), mounted inside
+`AdminView.vue` for Owner/Accountant, and behind a new `/activity` route
+(`views/shared/ActivityLogView.vue`) for the Floor Manager's sidebar tab and
+the Cashier's avatar-menu entry.
+Tests: `ActivityLogTests` (18) — model/helper, the public-schema no-op
+(mocks `gaming.activity.connection`), the full visibility matrix including
+the snapshot-vs-live-role case, one service-call test per action category,
+and API scoping/filtering.
+
+**Phase 5 — one form-validation style across the site. COMPLETE.**
+A site-wide audit found ~4 inconsistent validation styles across 22 forms
+(no shared error-reading, six different ad-hoc variants for reading a DRF
+error, some forms with no client-side validation at all). New shared
+pieces: `utils/apiError.js`'s `readApiError(err)` → `{ message, fields }`
+(handles `detail`, field arrays, `non_field_errors`, and AdminView's bulk
+`errors` array — the one place every form now reads a failed response);
+`composables/useFormValidation.js` (rule factories `required`/`minValue`/
+`maxValue`/`maxPct`/`minPct`/`digits`/`minLength`, plus `touched`/`errors`/
+`isValid`/`formError`/`touch`/`touchAll`/`applyServerErrors`); new global
+CSS in `common.css` (`.input--invalid`, `.field-error`, `.form-error`).
+Confirmed with the user: Save stays **disabled** until the form is valid
+(not just revealing errors on a disabled-free submit); every migrated
+`<form>` gets `novalidate` so no browser validation bubbles sneak in
+alongside the custom ones.
+
+Migrated: `DealProfitSplitView.vue` (+ live house-stake-%/custom-%
+validation, per the Phase 2 instruction), `DealFixedView.vue`,
+`DealTransferView.vue`, `TransactionEntryModal.vue`, `AddPlayerModal.vue`,
+`BankAccountFields.vue`, `useAuthorizerConfirm.js`/`usePlainConfirm.js`
+(their PIN-sheet error used to be `detail`-only — a real bug, now fixed),
+`CreditLimitModal.vue`, `PlayerBankAccountModal.vue`, `VoidEntryModal.vue`,
+`RejectPayoutModal.vue`, `PlayerPayoutView.vue` (was the one form with no
+disabled-submit guard at all — now has one), `LoginView.vue`/`stores/auth.js`,
+`MasseuseListView.vue`, `ClubSettingsView.vue` (table edit, min player
+time, away time, payout threshold, FX rate — each field-level validated;
+`editForm`/`newRate` are plain refs reassigned wholesale rather than
+stable reactive objects, so each tracked field gets its own get/set
+`computed` for `useFormValidation` to bind to; the toggle switches keep
+their toast-only pattern but now read the message via `readApiError`),
+`AdminView.vue` (create-staff, staff password reset, create-other-staff,
+create-Floor-Manager, Floor-Manager PIN reset — all five folded into the
+shared pattern; the Account Codes staging form keeps its own
+`validateRow`/staged-rows flow since that's pre-submit client-side staging
+logic, not a single-submission form, but its final batch-submit error
+reads through `readApiError` as a fallback). The remaining toast-only row
+actions — `ActiveGameDayView.vue`'s move/rejoin/payout/leave-without-chips,
+`PayoutsView.vue`'s approve, `DashboardView.vue`'s open-game-day — now read
+their catch-block message via `readApiError` instead of reaching into
+`err.response?.data?.detail` by hand.
+
+`StartGameDayModal.vue` and `CloseGameDayModal.vue`/`useCloseGameDay.js`
+were reviewed and left as-is — both already disable their submit until
+valid and don't exhibit the error-reading bug (their actual submit errors
+surface through the already-fixed `useAuthorizerConfirm`/`usePlainConfirm`).
+`TransactionEntryModal.vue`'s distinctive "turn the whole amount box red"
+styling was kept rather than reshaped to the plain `.field-error` look —
+functionally equivalent, and a good fit for its money-entry UI
+specifically.
+
+Verified: full backend suite green (372 tests), `npm run build` clean
+after every batch, including the final one.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

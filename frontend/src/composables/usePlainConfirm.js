@@ -13,6 +13,7 @@
  * TransactionEntryModal.vue for the branch itself).
  */
 import { ref } from 'vue'
+import { readApiError } from '@/utils/apiError'
 
 export const isOpen = ref(false)
 export const title = ref('')
@@ -52,7 +53,8 @@ export function usePlainConfirm() {
       isOpen.value = false
       onSubmitCallback = null
     } catch (err) {
-      error.value = err.response?.data?.detail || 'Something went wrong. Try again.'
+      // Was `detail`-only — see useAuthorizerConfirm.js's matching fix.
+      error.value = readApiError(err).message
     } finally {
       submitting.value = false
     }

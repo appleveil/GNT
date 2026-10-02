@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import api from '@/api/axios'
+import { readApiError } from '@/utils/apiError'
 
 // v-model is { bank_name, bank_code, account_number, account_name } — account_name
 // is the Paystack-resolved name once looked up, blank until then. The bank_code
@@ -110,7 +111,7 @@ async function resolveAccount() {
     resolvedName.value = data.account_name
     emitModel()
   } catch (err) {
-    resolveError.value = err.response?.data?.detail || "Could not verify this account — check the number and bank."
+    resolveError.value = readApiError(err, "Could not verify this account — check the number and bank.").message
   } finally {
     resolving.value = false
   }
