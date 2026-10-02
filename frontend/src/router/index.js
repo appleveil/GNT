@@ -148,6 +148,10 @@ const routes = [
           { path: 'off-table', name: 'ledgers-off-table', component: OffTableView, meta: { roles: BACK_OFFICE_ROLES } },
           // Owner-only placeholder, added 2026-10-02 — see LedgersDealsView.vue.
           { path: 'deals', name: 'ledgers-deals', component: LedgersDealsView, meta: { roles: OWNER_ONLY_ROLES } },
+          // Moved in from its own top-level sidebar tab, 2026-10-02, per
+          // explicit request — `/main-account` below redirects here so old
+          // links/bookmarks still work.
+          { path: 'main-account', name: 'ledgers-main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
         ],
       },
       { path: 'roster', name: 'roster', component: RosterListView, meta: { roles: BACK_OFFICE_ROLES } },
@@ -160,7 +164,7 @@ const routes = [
       // v-if="auth.isOwner", so this doesn't hand Accountant anything else.
       { path: 'admin', name: 'admin', component: AdminView, meta: { roles: BACK_OFFICE_ROLES } },
       { path: 'payouts', name: 'payouts', component: PayoutsView, meta: { roles: OWNER_ONLY_ROLES } },
-      { path: 'main-account', name: 'main-account', component: MainAccountLedgerView, meta: { roles: OWNER_ONLY_ROLES } },
+      { path: 'main-account', redirect: '/ledgers/main-account' },
       { path: 'deals/:playerId', name: 'deal-type-picker', component: DealTypePickerView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'deals/:playerId/fixed', name: 'deal-fixed', component: DealFixedView, meta: { roles: OWNER_ONLY_ROLES } },
       { path: 'deals/:playerId/transfer', name: 'deal-transfer', component: DealTransferView, meta: { roles: OWNER_ONLY_ROLES } },

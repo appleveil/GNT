@@ -2639,6 +2639,268 @@ class ProfitSplitArrangementTests(APITestCase):
         response = self.client.get('/api/deals/profit-split/active/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    # --- by-arrangement-id status (2026-10-02, for the Deals ledger's "click Deal ID" pop-up) ---
+
+    def test_arrangement_status_by_id_works_even_once_inactive(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+        )
+        services.deactivate_profit_split_arrangement(arrangement, self.owner)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/deals/profit-split/arrangement/{arrangement.pk}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['arrangement']['id'], arrangement.pk)
+
+    def test_cashier_cannot_view_arrangement_status_by_id(self):
+        arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(50), cap_amount=Decimal(100000),
+        )
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get(f'/api/deals/profit-split/arrangement/{arrangement.pk}/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ProfitSplitReturnTests(APITestCase):
+    """
+    "SPA In" (added 2026-10-02) — the payout-side counterpart to the stake
+    side's "SPA Out", exercised in ProfitSplitArrangementTests above. Terms
+    confirmed with the user via a worked example (buy-in ₦500,000; deal
+    stake 40%, capped at ₦100,000/game; ₦800,000 returned) — see
+    services._compute_profit_split_return's own docstring and PLAN.md's
+    dated entry for the full confirmation.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner_spa', password='x', role=StaffUser.Role.OWNER)
+        self.cashier = StaffUser.objects.create_user(username='cashier_spa', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI SPA1', display_name='SPA Player')
+        self.game_day = services.open_game_day(80, timezone.now(), self.owner)
+        self.fm = FloorManager(name='SPA Floor Boss', created_by=self.owner)
+        self.fm.set_pin('8888')
+        self.fm.save()
+        # "Chips returned can never exceed chips issued" is a GAME-DAY-WIDE
+        # ceiling (gaming.services.record_transaction), not per-player — a
+        # player can legitimately cash out more than their own buy-in (won
+        # off other players at the table). An opponent with a large enough
+        # stack of their own keeps every test below's cash-out figures
+        # (well under this) from tripping that unrelated check.
+        opponent = Player.objects.create(account_code='WWI SPA2', display_name='SPA Opponent')
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(2000000), recorded_by=self.cashier,
+            game_day=self.game_day, player=opponent, floor_manager_id=self.fm.pk, floor_manager_pin='8888',
+        )
+
+    def _buy_in(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='8888',
+        )
+
+    def _cash_out(self, amount):
+        return services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(amount), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player,
+            floor_manager_id=self.fm.pk, floor_manager_pin='8888',
+        )
+
+    def test_worked_example_after_buyin_stake_ratio(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+        )
+        self._buy_in(500000)  # house covers min(40% * 500000, 100000) = 100000
+        cash_out_txn = self._cash_out(800000)
+        self.assertEqual(cash_out_txn.amount, Decimal(800000))  # full physical amount
+        return_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_RETURN, player=self.player)
+        # Profit = 800000 - 500000 = 300000; house's WRITTEN stake % (40%), not the
+        # smaller share actually covered after the cap (20%): 40% * 300000 = 120000.
+        self.assertEqual(return_txn.amount, Decimal(120000))
+        self.assertEqual(return_txn.linked_transaction_id, cash_out_txn.pk)
+        self.assertEqual(cash_out_txn.linked_transaction_id, return_txn.pk)
+        # -500000 (buy-in) + 100000 (stake credit) + 800000 (cash-out) - 120000 (SPA In)
+        self.assertEqual(selectors.player_game_day_balance(self.player, self.game_day), Decimal(280000))
+
+    def test_before_buyin_basis_applies_to_the_whole_return(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+            payout_basis=ProfitSplitArrangement.PayoutBasis.BEFORE_BUYIN,
+        )
+        self._buy_in(500000)
+        self._cash_out(800000)
+        return_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_RETURN, player=self.player)
+        self.assertEqual(return_txn.amount, Decimal(320000))  # 40% of the full 800000
+
+    def test_custom_ratio_method(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+            payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.CUSTOM_RATIO, custom_ratio_pct=Decimal(25),
+        )
+        self._buy_in(500000)
+        self._cash_out(800000)
+        return_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_RETURN, player=self.player)
+        self.assertEqual(return_txn.amount, Decimal(75000))  # 25% of the 300000 profit
+
+    def test_fixed_method_is_a_threshold_not_a_subtraction(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+            payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.FIXED,
+            fixed_amount=Decimal(50000), fixed_offset=Decimal(200000),
+        )
+        self._buy_in(500000)
+        # Profit (150000) doesn't exceed the 200000 offset — house takes nothing.
+        self._cash_out(650000)
+        self.assertFalse(Transaction.objects.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN).exists())
+        # Profit now 300000, over the offset — house takes the flat fixed_amount, not fixed_amount - offset.
+        self._cash_out(150000)
+        return_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_RETURN, player=self.player)
+        self.assertEqual(return_txn.amount, Decimal(50000))
+
+    def test_losing_night_after_buyin_basis_takes_no_cut(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+        )
+        self._buy_in(500000)
+        txn = self._cash_out(300000)  # below the buy-in — no profit
+        self.assertEqual(txn.amount, Decimal(300000))
+        self.assertFalse(Transaction.objects.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN).exists())
+
+    def test_partial_cash_outs_total_the_same_as_one_full_return(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(1000000),
+        )
+        self._buy_in(200000)
+        self._cash_out(500000)  # profit so far 300000, target 40% = 120000
+        self._cash_out(300000)  # profit now 600000, target 240000, minus 120000 already taken = 120000
+        total_returned = sum(
+            Transaction.objects.filter(
+                type=Transaction.Type.PROFIT_SPLIT_RETURN, player=self.player,
+            ).values_list('amount', flat=True),
+            Decimal(0),
+        )
+        self.assertEqual(total_returned, Decimal(240000))  # same as 40% of a single 800000-on-200000 cash-out
+
+    def test_no_active_arrangement_means_no_cut(self):
+        txn = self._cash_out(800000)
+        self.assertEqual(txn.amount, Decimal(800000))
+        self.assertFalse(Transaction.objects.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN).exists())
+
+    def test_payout_turned_off_stores_as_zero_percent_and_takes_no_cut(self):
+        # Matches how DealProfitSplitView.vue saves "Payout off" — CUSTOM_RATIO
+        # at 0%, no special-casing needed in _compute_profit_split_return.
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+            payout_split_method=ProfitSplitArrangement.PayoutSplitMethod.CUSTOM_RATIO, custom_ratio_pct=Decimal(0),
+        )
+        self._buy_in(500000)
+        self._cash_out(800000)
+        self.assertFalse(Transaction.objects.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN).exists())
+
+    def test_void_cascades_from_cash_out_to_its_profit_split_return(self):
+        services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+        )
+        self._buy_in(500000)
+        cash_out_txn = self._cash_out(800000)
+        return_txn = Transaction.objects.get(type=Transaction.Type.PROFIT_SPLIT_RETURN, player=self.player)
+
+        services.void_transaction(cash_out_txn, self.owner, 'test void')
+
+        cash_out_txn.refresh_from_db()
+        return_txn.refresh_from_db()
+        self.assertTrue(cash_out_txn.is_voided)
+        self.assertTrue(return_txn.is_voided)
+
+
+class DealsLedgerTests(APITestCase):
+    """
+    Owner-only Ledgers -> Deals page (added 2026-10-02) — see
+    gaming.selectors.deals_ledger_summary/deals_ledger_detail and
+    gaming.views.DealsLedgerView/DealsLedgerDetailView.
+    """
+
+    def setUp(self):
+        self.owner = StaffUser.objects.create_user(username='owner_dl', password='x', role=StaffUser.Role.OWNER)
+        self.accountant = StaffUser.objects.create_user(
+            username='acct_dl', password='x', role=StaffUser.Role.ACCOUNTANT,
+        )
+        self.cashier = StaffUser.objects.create_user(username='cashier_dl', password='x', role=StaffUser.Role.CASHIER)
+        self.player = Player.objects.create(account_code='WWI DL1', display_name='Deal Player')
+        self.quiet_game_day = services.open_game_day(90, timezone.now(), self.owner)  # no Profit Split activity at all
+        self.game_day = services.open_game_day(91, timezone.now(), self.owner)
+        self.fm = FloorManager(name='DL Floor Boss', created_by=self.owner)
+        self.fm.set_pin('9999')
+        self.fm.save()
+        # See ProfitSplitReturnTests.setUp's own comment — the "chips
+        # returned can't exceed chips issued" check is game-day-wide.
+        opponent = Player.objects.create(account_code='WWI DL2', display_name='Deal Opponent')
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(2000000), recorded_by=self.cashier,
+            game_day=self.game_day, player=opponent, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        self.arrangement = services.create_profit_split_arrangement(
+            self.player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(800000), recorded_by=self.cashier,
+            game_day=self.game_day, player=self.player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        # SPA Out = 100000 (stake capped), SPA In = 120000 (40% of 300000 profit)
+
+    def test_summary_only_lists_game_days_with_profit_split_activity(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/deals/ledger/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        game_day_ids = [row['game_day_id'] for row in response.data]
+        self.assertEqual(game_day_ids, [self.game_day.id])  # the quiet game-day is excluded
+
+    def test_summary_stake_roi_net(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/deals/ledger/')
+        row = response.data[0]
+        self.assertEqual(Decimal(row['stake_total']), Decimal(100000))
+        self.assertEqual(Decimal(row['roi_total']), Decimal(120000))
+        self.assertEqual(Decimal(row['net']), Decimal(-20000))  # Stake - ROI, can be negative
+
+    def test_detail_row_figures(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/deals/ledger/{self.game_day.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        row = response.data[0]
+        self.assertEqual(row['player_name'], 'Deal Player')
+        self.assertEqual(row['arrangement_id'], self.arrangement.pk)
+        self.assertEqual(Decimal(row['chips']), Decimal(500000))
+        self.assertEqual(Decimal(row['cash_out']), Decimal(800000))
+        self.assertEqual(Decimal(row['spa']), Decimal(100000))
+        self.assertEqual(Decimal(row['roi']), Decimal(120000))
+
+    def test_detail_for_a_quiet_game_day_is_empty(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f'/api/deals/ledger/{self.quiet_game_day.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_accountant_cannot_view_the_deals_ledger(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.get('/api/deals/ledger/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cashier_cannot_view_the_deals_ledger(self):
+        self.client.force_authenticate(self.cashier)
+        response = self.client.get('/api/deals/ledger/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_dashboard_deals_roi_is_spa_in_minus_spa_out(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(response.data['deals_roi_this_month']), Decimal(20000))  # 120000 - 100000
+
 
 class StartGameDayFlowTests(APITestCase):
     """

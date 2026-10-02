@@ -18,6 +18,8 @@ from .serializers import (
     CloseGameDaySerializer,
     ConversionRateSerializer,
     CreateProfitSplitArrangementSerializer,
+    DealsLedgerDetailRowSerializer,
+    DealsLedgerSummaryRowSerializer,
     DealTransferSerializer,
     GameDayChipsTotalsSerializer,
     GameDaySeatedPlayerSerializer,
@@ -630,6 +632,25 @@ class PlayerProfitSplitStatusView(APIView):
         return Response(ProfitSplitStatusSerializer({'arrangement': arrangement, **status_data}).data)
 
 
+class ProfitSplitArrangementStatusView(APIView):
+    """
+    Same figures as PlayerProfitSplitStatusView, keyed by the
+    arrangement's own id rather than a player — works for a past
+    (no-longer-active) arrangement too, which that view deliberately won't
+    return (it only ever looks up a player's CURRENT active one). Added
+    2026-10-02 for the Deals ledger page's "click Deal ID -> summary
+    pop-up" (views/accountant/LedgersDealsView.vue) — a ledger row may
+    reference an arrangement that's since been replaced or ended.
+    """
+
+    permission_classes = [IsOwner]
+
+    def get(self, request, pk):
+        arrangement = get_object_or_404(ProfitSplitArrangement, pk=pk)
+        status_data = selectors.profit_split_status(arrangement)
+        return Response(ProfitSplitStatusSerializer({'arrangement': arrangement, **status_data}).data)
+
+
 class DeactivateProfitSplitArrangementView(APIView):
     """Owner-only — ends an arrangement early. See gaming.services.deactivate_profit_split_arrangement."""
 
@@ -639,6 +660,35 @@ class DeactivateProfitSplitArrangementView(APIView):
         arrangement = get_object_or_404(ProfitSplitArrangement, pk=pk)
         arrangement = services.deactivate_profit_split_arrangement(arrangement, request.user)
         return Response(ProfitSplitArrangementSerializer(arrangement).data)
+
+
+class DealsLedgerView(APIView):
+    """
+    Owner-only Ledgers -> Deals page (added 2026-10-02) — the summary half,
+    one row per game-day with any Profit Split activity. See
+    gaming.selectors.deals_ledger_summary.
+    """
+
+    permission_classes = [IsOwner]
+
+    def get(self, request):
+        rows = selectors.deals_ledger_summary()
+        return Response(DealsLedgerSummaryRowSerializer(rows, many=True).data)
+
+
+class DealsLedgerDetailView(APIView):
+    """
+    The detail half of the page above — one row per player/arrangement for
+    one game-day, shown when that game-day's summary row is clicked. See
+    gaming.selectors.deals_ledger_detail.
+    """
+
+    permission_classes = [IsOwner]
+
+    def get(self, request, game_day_id):
+        game_day = get_object_or_404(GameDay, pk=game_day_id)
+        rows = selectors.deals_ledger_detail(game_day)
+        return Response(DealsLedgerDetailRowSerializer(rows, many=True).data)
 
 
 class DashboardView(APIView):
@@ -664,6 +714,11 @@ class DashboardView(APIView):
         if request.user.role == StaffUser.Role.OWNER:
             data['main_account_balance'] = selectors.main_account_balance()
             data['total_rake_this_month'] = selectors.total_rake_this_month()
+            # Added 2026-10-02, replacing the "—" placeholder — this
+            # calendar month's net SPA In minus SPA Out, club-wide. See
+            # selectors.dashboard_deals_roi's own docstring for why this is
+            # the opposite sign from the Deals ledger page's own Net column.
+            data['deals_roi_this_month'] = selectors.dashboard_deals_roi()
         else:
             data['outstanding_chips'] = selectors.outstanding_chips_total()
         return Response(data)

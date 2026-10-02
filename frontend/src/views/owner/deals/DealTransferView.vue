@@ -170,7 +170,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </template>
     </template>
 
-    <div v-if="confirmSwitch" class="overlay">
+    <div v-if="confirmSwitch" class="overlay" @click.self="confirmSwitch = null">
       <div class="dialog card">
         <div class="eyebrow">Change recipient?</div>
         <p class="dialog-text">This will clear the amount and reason you've entered for {{ target?.display_name }}.</p>

@@ -313,6 +313,9 @@ function validateRow(row, label) {
   if (!(row.code && row.account_number && row.account_name)) {
     return `${label}: code, account number, and account name are all required.`
   }
+  if (!/^\d{10}$/.test(row.account_number)) {
+    return `${label}: account number must be exactly 10 digits.`
+  }
   const dupeInPool = accountCodes.value.some(c => c.code === row.code || c.account_number === row.account_number)
   if (dupeInPool) {
     return `${label}: already exists in the pool.`

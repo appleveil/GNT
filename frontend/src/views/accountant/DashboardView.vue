@@ -151,14 +151,19 @@ const N = n => `₦${Number(n).toLocaleString()}`
           <div class="stat-label">Main account balance</div>
           <div class="stat-value">{{ N(totals.main_account_balance) }}</div>
         </div>
-        <!-- Placeholder, added 2026-10-02 — Owner asked for a "Deals ROI"
-             card; definition (what counts as the return, over what period)
-             is still pending from them, so this shows "—" until there's a
-             real number to compute. No backend field yet — see PLAN.md's
-             dated entry. -->
-        <div v-if="auth.isOwner" class="card stat-card">
+        <!-- Added 2026-10-02 as a "—" placeholder, filled in the same day
+             once the figure was confirmed: this month's total SPA In minus
+             total SPA Out, club-wide (selectors.dashboard_deals_roi) — the
+             house's own net gain from Profit Split deals so far this
+             month. Positive = net gain; negative = net spend so far (not
+             necessarily a bad sign — an active deal may still recoup it).
+             Opposite sign from the Deals ledger page's own Net column by
+             design — see that selector's docstring. -->
+        <div v-if="totals.deals_roi_this_month !== undefined" class="card stat-card">
           <div class="stat-label">Deals ROI</div>
-          <div class="stat-value">—</div>
+          <div class="stat-value" :class="Number(totals.deals_roi_this_month) >= 0 ? 'money--pos' : 'money--neg'">
+            {{ N(totals.deals_roi_this_month) }}
+          </div>
           <div class="stat-stub">This month</div>
         </div>
       </div>

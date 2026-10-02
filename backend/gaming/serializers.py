@@ -350,6 +350,33 @@ class ProfitSplitStatusSerializer(serializers.Serializer):
     available_stake_this_period = serializers.DecimalField(max_digits=14, decimal_places=0)
 
 
+class DealsLedgerSummaryRowSerializer(serializers.Serializer):
+    """One row of gaming.selectors.deals_ledger_summary — see that function's own docstring."""
+
+    game_day_id = serializers.IntegerField()
+    number = serializers.IntegerField()
+    date = serializers.DateTimeField()
+    stake_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    roi_total = serializers.DecimalField(max_digits=14, decimal_places=0)
+    net = serializers.DecimalField(max_digits=14, decimal_places=0)
+
+
+class DealsLedgerDetailRowSerializer(serializers.Serializer):
+    """One row of gaming.selectors.deals_ledger_detail — see that function's own docstring."""
+
+    player_id = serializers.IntegerField()
+    player_name = serializers.CharField()
+    chips = serializers.DecimalField(max_digits=14, decimal_places=0)
+    arrangement_id = serializers.IntegerField()
+    house_stake_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
+    payout_split_method = serializers.ChoiceField(choices=ProfitSplitArrangement.PayoutSplitMethod.choices)
+    custom_ratio_pct = serializers.DecimalField(max_digits=5, decimal_places=2, allow_null=True)
+    fixed_amount = serializers.DecimalField(max_digits=14, decimal_places=0, allow_null=True)
+    spa = serializers.DecimalField(max_digits=14, decimal_places=0)
+    cash_out = serializers.DecimalField(max_digits=14, decimal_places=0)
+    roi = serializers.DecimalField(max_digits=14, decimal_places=0)
+
+
 class GameDaySeatedPlayerSerializer(serializers.Serializer):
     """
     One row of gaming.selectors.game_day_players(game_day) — a GameDayPlayer

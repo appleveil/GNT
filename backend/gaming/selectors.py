@@ -25,6 +25,11 @@ DEBIT_TYPES = {
     # forward credit against a buy-in; see PLAYER_BALANCE_IN below and
     # Transaction.Type's own comment.
     Transaction.Type.PLAYER_BALANCE_OUT,
+    # Added 2026-10-02 — the house's cut of a cash-out ("SPA In"), paired
+    # with the full-amount CHIPS_IN it's deducted from — see
+    # Transaction.Type.PROFIT_SPLIT_RETURN's own comment and
+    # services._compute_profit_split_return.
+    Transaction.Type.PROFIT_SPLIT_RETURN,
 }
 # Credits increase a player's balance (chips returned, any form of payment, write-offs).
 CREDIT_TYPES = {
@@ -515,6 +520,30 @@ def _profit_split_periods_elapsed(arrangement, game_day):
     return other_games_played, game_day.started_at
 
 
+def profit_split_return_progress(arrangement, player, game_day):
+    """
+    Tonight's running totals needed to compute the house's payout-side cut
+    at cash-out — see services._compute_profit_split_return, which reads
+    these to apply payout_basis/payout_split_method against THIS game-day's
+    own activity: this player's total buy-ins and total chips already
+    returned tonight (before whatever CHIPS_IN is currently being
+    recorded), and how much PROFIT_SPLIT_RETURN has already been taken
+    against this arrangement tonight. The last figure is what lets a
+    partial cash-out work correctly: the caller computes the target total
+    cut against the night's running total (including the new CHIPS_IN),
+    then subtracts this off, so two partial returns end up taking the same
+    total a single full return would.
+    """
+    non_voided = Transaction.objects.filter(player=player, game_day=game_day, is_voided=False)
+    return {
+        'buy_ins_tonight': _sum_amount(non_voided.filter(type=Transaction.Type.CHIPS_OUT)),
+        'returned_before_this': _sum_amount(non_voided.filter(type=Transaction.Type.CHIPS_IN)),
+        'already_taken_tonight': _sum_amount(
+            non_voided.filter(profit_split_arrangement=arrangement, type=Transaction.Type.PROFIT_SPLIT_RETURN),
+        ),
+    }
+
+
 def profit_split_status(arrangement, game_day=None, now=None):
     """
     Everything needed to enforce/display a Profit Split arrangement,
@@ -636,6 +665,102 @@ def chips_room_remaining(player, game_day):
     # Always round down: rounding up could advertise ₦1 more than
     # record_transaction's own gate will actually allow.
     return min(via_stake_ratio, via_remaining_cap).quantize(Decimal('1'), rounding=ROUND_DOWN)
+
+
+def deals_ledger_summary():
+    """
+    One row per game-day with any Profit Split stake (SPA Out) or return
+    (SPA In) activity — added 2026-10-02 for the Owner-only Ledgers ->
+    Deals page (views/accountant/LedgersDealsView.vue), copying
+    GameDaysListView's own master/detail-on-one-page pattern. Per the
+    user's explicit spec: Stake = that night's total SPA Out,
+    ROI = that night's total SPA In, Net = Stake − ROI (can be negative —
+    a night where the house's SPA In exceeded its SPA Out is a net GAIN,
+    shown as a negative "cost" here; this is the opposite sign from the
+    Owner dashboard's "Deals ROI" card, which nets the other way — see
+    dashboard_deals_roi below).
+    """
+    game_day_ids = (
+        Transaction.objects.filter(
+            type__in=(Transaction.Type.PROFIT_SPLIT_STAKE, Transaction.Type.PROFIT_SPLIT_RETURN),
+            is_voided=False, game_day__isnull=False,
+        )
+        .values_list('game_day_id', flat=True)
+        .distinct()
+    )
+    rows = []
+    for gd in GameDay.objects.filter(id__in=game_day_ids).order_by('-started_at'):
+        txns = Transaction.objects.filter(game_day=gd, is_voided=False)
+        stake_total = _sum_amount(txns.filter(type=Transaction.Type.PROFIT_SPLIT_STAKE))
+        roi_total = _sum_amount(txns.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN))
+        rows.append({
+            'game_day_id': gd.id, 'number': gd.number, 'date': gd.started_at,
+            'stake_total': stake_total, 'roi_total': roi_total, 'net': stake_total - roi_total,
+        })
+    return rows
+
+
+def deals_ledger_detail(game_day):
+    """
+    One row per (player, arrangement) with Profit Split activity on this
+    one game-day — the detail table under deals_ledger_summary's row for
+    it. Per the user's spec: Player/Chips (this player's total CHIPS_OUT
+    tonight, not scoped to the arrangement — a player's whole night, same
+    as every other per-player total in this file) / Deal ID (the
+    arrangement's own pk — displayed as "PS-<id>" by the frontend) /
+    house_stake_pct + the raw payout-split fields (the frontend formats
+    "Stake / Split" itself, same convention as DealProfitSplitView.vue's
+    own PAYOUT_METHOD_LABEL) / SPA (this arrangement's total SPA Out
+    tonight) / Cash-out (this player's total CHIPS_IN tonight) / ROI (this
+    arrangement's total SPA In tonight).
+    """
+    arrangement_ids = (
+        Transaction.objects.filter(
+            game_day=game_day, is_voided=False,
+            type__in=(Transaction.Type.PROFIT_SPLIT_STAKE, Transaction.Type.PROFIT_SPLIT_RETURN),
+        )
+        .values_list('profit_split_arrangement_id', flat=True)
+        .distinct()
+    )
+    rows = []
+    for arr in ProfitSplitArrangement.objects.filter(id__in=arrangement_ids).select_related('player'):
+        player_txns = Transaction.objects.filter(game_day=game_day, player=arr.player, is_voided=False)
+        rows.append({
+            'player_id': arr.player_id,
+            'player_name': arr.player.display_name,
+            'chips': _sum_amount(player_txns.filter(type=Transaction.Type.CHIPS_OUT)),
+            'arrangement_id': arr.id,
+            'house_stake_pct': arr.house_stake_pct,
+            'payout_split_method': arr.payout_split_method,
+            'custom_ratio_pct': arr.custom_ratio_pct,
+            'fixed_amount': arr.fixed_amount,
+            'spa': _sum_amount(
+                player_txns.filter(profit_split_arrangement=arr, type=Transaction.Type.PROFIT_SPLIT_STAKE),
+            ),
+            'cash_out': _sum_amount(player_txns.filter(type=Transaction.Type.CHIPS_IN)),
+            'roi': _sum_amount(
+                player_txns.filter(profit_split_arrangement=arr, type=Transaction.Type.PROFIT_SPLIT_RETURN),
+            ),
+        })
+    return rows
+
+
+def dashboard_deals_roi():
+    """
+    This calendar month's net Profit Split result, club-wide — total SPA
+    In minus total SPA Out, confirmed with the user for the Owner
+    dashboard's "Deals ROI" card (added 2026-10-02, previously a "—"
+    placeholder — see DashboardView.vue). Opposite sign from
+    deals_ledger_summary's own Net column by design (per the user's
+    answer): this is the house's own net GAIN for the month, not its net
+    spend.
+    """
+    now = timezone.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    txns = Transaction.objects.filter(is_voided=False, created_at__gte=month_start)
+    spa_out = _sum_amount(txns.filter(type=Transaction.Type.PROFIT_SPLIT_STAKE))
+    spa_in = _sum_amount(txns.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN))
+    return spa_in - spa_out
 
 
 def visible_activity(user):

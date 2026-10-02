@@ -353,15 +353,14 @@ class ProfitSplitArrangement(models.Model):
     not stored" balance philosophy (SCHEMA.md). See
     gaming.selectors.profit_split_status.
 
-    Scope note: only the STAKE side (buy-in funding) is actually applied
-    automatically, in gaming.services.record_transaction's CHIPS_OUT branch.
-    The payout_basis/payout_split_method/custom_ratio_pct/fixed_amount/
-    fixed_offset fields are captured as configuration only for now and are
-    not yet wired into initiate_payout's actual math — the concept doc
-    itself says the Fixed method's off-set is an input to capture, "not
-    actually doing the maths for what goes to whom," and no worked example
-    was given for the ratio methods either. Revisit once that math is
-    actually wanted.
+    Both sides are applied automatically: the STAKE side (buy-in funding)
+    in gaming.services.record_transaction's CHIPS_OUT branch, and the
+    PAYOUT side (the house's cut of a cash-out, confirmed 2026-10-02 with a
+    worked example — see PLAN.md's dated entry) in that same function's
+    CHIPS_IN branch, via services._compute_profit_split_return. The
+    payout_basis/payout_split_method/custom_ratio_pct/fixed_amount/
+    fixed_offset fields below drive that computation; see that function's
+    own docstring for exactly how.
     """
 
     class ResetCadence(models.TextChoices):
@@ -455,6 +454,20 @@ class Transaction(models.Model):
         # that. See ProfitSplitArrangement's docstring and
         # services.record_transaction.
         PROFIT_SPLIT_STAKE = 'PROFIT_SPLIT_STAKE', 'Profit split — house stake'
+        # Added 2026-10-02 — the payout side of a Profit Split arrangement,
+        # labeled "SPA In" on the Cashier ledger (today's buy-in-side
+        # PROFIT_SPLIT_STAKE is "SPA Out") — the house's cut of a player's
+        # cash-out, per the arrangement's payout_basis/payout_split_method/
+        # custom_ratio_pct/fixed_amount/fixed_offset (previously stored but
+        # unused, see ProfitSplitArrangement's docstring). A DEBIT (see
+        # selectors.DEBIT_TYPES) against the player, created alongside the
+        # full-amount CHIPS_IN row and linked to it (Transaction.linked_transaction)
+        # — reducing what the club owes the player this way, rather than
+        # touching the CHIPS_IN amount itself, is what makes a subsequent
+        # payout of the player's balance automatically send only their
+        # share, with no change needed to payout code. See
+        # services._compute_profit_split_return.
+        PROFIT_SPLIT_RETURN = 'PROFIT_SPLIT_RETURN', 'Profit split — house return'
         # TABLE_BUY_IN/TABLE_CASH_OUT (added 2026-09-21, a second tracked
         # step between CHIPS_OUT and a Table) were REMOVED 2026-09-21 —
         # reverted back to one step: CHIPS_OUT alone represents a buy-in.
@@ -614,10 +627,12 @@ class Transaction(models.Model):
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='balance_applications',
     )
 
-    # Set only on a PROFIT_SPLIT_STAKE row (and, for display, on the paired
-    # CHIPS_OUT row it was split from) — see ProfitSplitArrangement.
-    # PROTECT: a historical stake contribution should never lose which
-    # arrangement it came from, even if that arrangement is later deactivated.
+    # Set on a PROFIT_SPLIT_STAKE row (and, for display, on the paired
+    # CHIPS_OUT row it was split from), and likewise on a
+    # PROFIT_SPLIT_RETURN row (and its paired CHIPS_IN) — see
+    # ProfitSplitArrangement. PROTECT: a historical stake/return
+    # contribution should never lose which arrangement it came from, even
+    # if that arrangement is later deactivated.
     profit_split_arrangement = models.ForeignKey(
         ProfitSplitArrangement, on_delete=models.PROTECT, null=True, blank=True, related_name='transactions',
     )

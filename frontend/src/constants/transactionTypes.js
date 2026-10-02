@@ -52,7 +52,19 @@ export const TRANSACTION_TYPES = {
   // not the earlier balance-neutral "Profit Split Stake" label from a time
   // this was hidden/informational only. amountTone: credit, not neutral,
   // now that it's a real balance-affecting entry like any other credit.
-  PROFIT_SPLIT_STAKE: { label: 'SPA', actionLabel: 'SPA', lane: 'other', physicalCount: false, amountTone: 'credit' },
+  // Renamed "SPA" -> "SPA Out" 2026-10-02 to pair with the new SPA In
+  // below (the cash-out-side counterpart), per explicit instruction.
+  PROFIT_SPLIT_STAKE: { label: 'SPA Out', actionLabel: 'SPA Out', lane: 'other', physicalCount: false, amountTone: 'credit' },
+  // The payout-side counterpart to SPA Out above, added 2026-10-02 — the
+  // house's cut of a player's cash-out, per their Profit Split
+  // arrangement's payout terms (see gaming.services._compute_profit_split_return).
+  // Also never a player-initiated entry; auto-created by
+  // record_transaction's CHIPS_IN branch, paired via linked_transaction
+  // with the CHIPS_IN it's drawn from. A real debit (see
+  // gaming.selectors.DEBIT_TYPES) — it's what makes a later payout send
+  // only the player's own share, without the payout code itself needing
+  // to know anything about Profit Split.
+  PROFIT_SPLIT_RETURN: { label: 'SPA In', actionLabel: 'SPA In', lane: 'other', physicalCount: false, amountTone: 'debit' },
   // "One line per action" (added 2026-09-25, explicit instruction): a
   // buy-in's CHIPS_OUT line stays "chips issued" only — when part of it is
   // covered by a player's own carried-forward credit (the house owes them

@@ -41,7 +41,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 </script>
 
 <template>
-  <div v-if="preview" class="overlay">
+  <div v-if="preview" class="overlay" @click.self="cancel">
     <div class="dialog card">
       <div class="eyebrow">Close Game-Day #{{ gameDay.current?.number }}?</div>
 
@@ -69,7 +69,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       <template v-if="preview.close_blocked_reason">
         <p class="form-error">{{ preview.close_blocked_reason }}</p>
         <div class="actions">
-          <button class="btn btn--secondary" type="button" @click="cancel">Close</button>
+          <button class="btn btn--secondary" type="button" @click="cancel">Cancel</button>
         </div>
       </template>
 
@@ -100,6 +100,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       <template v-else-if="rakeConfirmStep">
         <p class="rake-check">Rake for tonight is ₦0 — are you sure none was taken?</p>
         <div class="actions">
+          <button class="btn btn--secondary" type="button" @click="cancel">Cancel</button>
           <button class="btn btn--secondary" type="button" @click="cancelRakeConfirm">Go back</button>
           <button class="btn btn--primary" type="button" @click="confirmNoRake">Yes, ₦0 is correct</button>
         </div>

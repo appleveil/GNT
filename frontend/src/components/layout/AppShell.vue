@@ -89,8 +89,14 @@ const tabs = computed(() => {
       children: [
         { name: 'ledgers-game-days', label: 'Game Days', path: '/ledgers/game-days' },
         { name: 'ledgers-off-table', label: 'Off-table', path: '/ledgers/off-table' },
-        // Owner-only placeholder, added 2026-10-02 — see LedgersDealsView.vue.
-        ...(role === 'OWNER' ? [{ name: 'ledgers-deals', label: 'Deals', path: '/ledgers/deals' }] : []),
+        // Both Owner-only, added/moved 2026-10-02 — see LedgersDealsView.vue
+        // and MainAccountLedgerView.vue. Main Account moved in from its own
+        // top-level tab (per explicit request) — it's no longer listed
+        // separately below.
+        ...(role === 'OWNER' ? [
+          { name: 'ledgers-deals', label: 'Deals', path: '/ledgers/deals' },
+          { name: 'ledgers-main-account', label: 'Main Account', path: '/ledgers/main-account' },
+        ] : []),
       ],
     },
     { name: 'roster', label: 'Players', path: '/roster' },
@@ -98,7 +104,6 @@ const tabs = computed(() => {
   if (role === 'OWNER') {
     base.push(
       { name: 'payouts', label: 'Payout requests', path: '/payouts' },
-      { name: 'main-account', label: 'Main Account', path: '/main-account' },
       { name: 'admin', label: 'Admin', path: '/admin' },
       { name: 'club-settings', label: 'Settings', path: '/settings' },
     )
@@ -194,7 +199,7 @@ function onCashierMenuSelect(key) {
             >Close Game-Day</button>
           </template>
           <RowActionsMenu
-            v-if="auth.user?.role === 'CASHIER'" :items="cashierMenuItems" align="left"
+            v-if="auth.user?.role === 'CASHIER'" :items="cashierMenuItems" open-on="hover"
             @select="onCashierMenuSelect"
           >
             <template #trigger="{ toggle }">
@@ -242,7 +247,7 @@ function onCashierMenuSelect(key) {
     </div>
 
     <!-- Logout while a game-day is open — see onLogoutClick's own comment. -->
-    <div v-if="logoutConfirmOpen" class="overlay">
+    <div v-if="logoutConfirmOpen" class="overlay" @click.self="onCancelLogout">
       <div class="dialog card">
         <div class="eyebrow">Log out with Game-Day #{{ gameDay.current?.number }} still open?</div>
         <p class="muted">Logging out doesn't close the game-day — it stays open for whoever logs back in.</p>

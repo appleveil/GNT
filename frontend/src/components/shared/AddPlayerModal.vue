@@ -230,7 +230,7 @@ function onModeChange(next) {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="overlay" @click.self="submitting || emit('close')">
     <div class="sheet">
       <div class="grip" />
       <div class="head">

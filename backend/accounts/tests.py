@@ -349,6 +349,30 @@ class AccountCodeAPITests(APITestCase):
         self.assertEqual(len(response.data['created']), 1)
         self.assertEqual(len(response.data['errors']), 2)
 
+    def test_account_number_must_be_exactly_10_digits(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/account-codes/', {
+            'codes': [
+                self._row('WWI 110', '900000011'),  # 9 digits
+                self._row('WWI 111', '90000001122'),  # 11 digits
+                self._row('WWI 112', '900000011A'),  # non-digit
+                self._row('WWI 113', '9000000113'),  # clean — still gets created
+            ],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data['created']), 1)
+        self.assertEqual(len(response.data['errors']), 3)
+        for err in response.data['errors']:
+            self.assertIn('exactly 10 digits', err)
+        self.assertEqual(AccountCode.objects.filter(code='WWI 113').count(), 1)
+        self.assertFalse(AccountCode.objects.filter(code__in=['WWI 110', 'WWI 111', 'WWI 112']).exists())
+
+    def test_single_row_create_also_enforces_10_digits(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post('/api/account-codes/', self._row('WWI 114', '12345'), format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('account_number', response.data)
+
     def test_accountant_can_manage_the_pool_cashier_cannot(self):
         self.client.force_authenticate(self.accountant)
         response = self.client.post('/api/account-codes/', {'codes': [self._row('WWI 104', '9000000104')]}, format='json')

@@ -587,7 +587,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       @close="onEntryClosed" @saved="onEntrySaved"
     />
 
-    <div v-if="paymentPickerOpen" class="overlay">
+    <div v-if="paymentPickerOpen" class="overlay" @click.self="paymentPickerOpen = false">
       <div class="dialog card leave-dialog">
         <div class="eyebrow">{{ selectedPlayer?.display_name }} &mdash; Payment</div>
         <p class="muted">How is this payment coming in?</p>
@@ -600,7 +600,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
     </div>
 
-    <div v-if="leaveTarget" class="overlay">
+    <div v-if="leaveTarget" class="overlay" @click.self="leaveTarget = null">
       <div class="dialog card leave-dialog">
         <div class="eyebrow">{{ leaveTarget.display_name }} is leaving the table</div>
         <p class="muted">Are they returning any chips first?</p>
@@ -620,7 +620,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       :recorded-by-name="auth.user?.fullName" @close="voidTarget = null" @voided="onVoided"
     />
 
-    <div v-if="moveSeatTarget" class="overlay">
+    <div v-if="moveSeatTarget" class="overlay" @click.self="moveSeatTarget = null">
       <div class="dialog card">
         <div class="eyebrow">Move {{ moveSeatTarget.display_name }}</div>
         <p class="muted">Pick a seat — an occupied one swaps places, an empty one just moves them.</p>
@@ -637,7 +637,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </div>
     </div>
 
-    <div v-if="rejoinTarget" class="overlay">
+    <div v-if="rejoinTarget" class="overlay" @click.self="rejoinTarget = null">
       <div class="dialog card">
         <div class="eyebrow">Rejoin {{ rejoinTarget.display_name }}</div>
         <p class="muted">Pick an empty seat to bring them back to the table.</p>

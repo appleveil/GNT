@@ -38,7 +38,7 @@ async function onSubmit() {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="overlay" @click.self="submitting || emit('close')">
     <div class="dialog card">
       <div class="title">Decline this payout?</div>
       <p class="subtitle">The player is told nothing moved — this stays visible in their history, marked declined, with your reason.</p>

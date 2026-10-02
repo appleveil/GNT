@@ -41,7 +41,7 @@ async function onSubmit() {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="overlay" @click.self="submitting || emit('close')">
     <div class="dialog card">
       <div class="title">Void this entry?</div>
       <p class="subtitle">This stays visible in the ledger, marked voided, for audit — it isn't deleted.</p>

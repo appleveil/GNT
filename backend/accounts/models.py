@@ -1,5 +1,6 @@
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.models import AbstractUser
+from django.core.validators import RegexValidator
 from django.db import models
 
 
@@ -156,7 +157,16 @@ class AccountCode(models.Model):
     """
 
     code = models.CharField(max_length=20, unique=True)
-    account_number = models.CharField(max_length=20, unique=True)
+    # Exactly 10 digits (added 2026-10-02, per the bank's own DVA format) —
+    # enforced here for the single-row create path (the serializer's
+    # `UniqueValidator`/this validator both run via ModelSerializer); the
+    # real bulk-create path (AccountCodeViewSet.create) uses `bulk_create`,
+    # which skips full_clean(), so it re-checks the same `\d{10}` pattern
+    # itself rather than relying on this validator firing there too.
+    account_number = models.CharField(
+        max_length=20, unique=True,
+        validators=[RegexValidator(r'^\d{10}$', 'Must be exactly 10 digits.')],
+    )
     account_name = models.CharField(max_length=150)
     linked_player = models.OneToOneField(
         Player, on_delete=models.PROTECT, null=True, blank=True, related_name='account_code_entry',

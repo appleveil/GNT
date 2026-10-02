@@ -1,3 +1,5 @@
+import re
+
 from django.db import transaction as db_transaction
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -375,6 +377,8 @@ class AccountCodeViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewset
             label = code or account_number or f'Row {i + 1}'
             if not (code and account_number and account_name):
                 errors.append(f'{label}: code, account number, and account name are all required.')
+            elif not re.fullmatch(r'\d{10}', account_number):
+                errors.append(f'{label}: account number must be exactly 10 digits.')
             elif code in seen_codes or account_number in seen_numbers:
                 errors.append(f'{label}: duplicated within this batch.')
             else:

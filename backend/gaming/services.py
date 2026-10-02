@@ -742,6 +742,73 @@ def _apply_profit_split_stake(player, amount, game_day):
     return amount - house_portion, house_portion, arrangement
 
 
+def _compute_profit_split_return(player, game_day, amount):
+    """
+    Returns (house_portion, arrangement_or_None) — the house's cut taken at
+    cash-out ("SPA In" on the Cashier ledger) for a CHIPS_IN of `amount`,
+    per the arrangement's payout_basis/payout_split_method/
+    custom_ratio_pct/fixed_amount/fixed_offset. No active arrangement, or
+    one whose payout math comes out to zero, falls through to "house takes
+    nothing," so this is a no-op for every player without a live payout
+    cut, by construction — mirrors _apply_profit_split_stake's own shape.
+
+    Terms confirmed with the user via a worked example, 2026-10-02 (see
+    PLAN.md's dated entry): buy-in ₦500,000; deal stake 40%, capped at
+    ₦100,000/game (so the house actually covers ₦100,000 tonight — 20% of
+    the buy-in); ₦800,000 returned.
+      - `payout_basis=AFTER_BUYIN`: the cut applies to PROFIT only —
+        max(returned − bought-in, 0) for the night, here ₦300,000.
+        `BEFORE_BUYIN`: it applies to the whole amount returned, ₦800,000.
+      - `STAKE_RATIO`: the house takes the arrangement's WRITTEN
+        `house_stake_pct` of that amount (40% of ₦300,000 = ₦120,000) — NOT
+        the smaller share actually covered after the cap (20%).
+        `CUSTOM_RATIO`: `custom_ratio_pct` of that amount. `FIXED`:
+        `fixed_amount`, but only once that amount exceeds `fixed_offset` —
+        a threshold, not a subtraction; a blank offset means 0.
+      - Capped at the amount it's taken from, rounded to whole Naira
+        (never kobo, matching every other amount in this schema).
+
+    Computed over THIS game_day's own totals, not lifetime — the split
+    applies per game, matching the stake side's own PER_GAME cadence —
+    recomputed fresh on every cash-out rather than stored (this schema's
+    usual "computed, not stored" philosophy). Handles PARTIAL cash-outs:
+    the target cut is computed against the night's running total chips
+    returned so far INCLUDING this one, then whatever's already been taken
+    as PROFIT_SPLIT_RETURN tonight is subtracted off — two partial returns
+    end up taking the same total the house would take from one full return.
+    """
+    if game_day is None:
+        return Decimal('0'), None
+    arrangement = (
+        ProfitSplitArrangement.objects.filter(player=player, is_active=True).order_by('-created_at').first()
+    )
+    if arrangement is None:
+        return Decimal('0'), None
+
+    progress = selectors.profit_split_return_progress(arrangement, player, game_day)
+    buy_ins_tonight = progress['buy_ins_tonight']
+    returned_total = progress['returned_before_this'] + amount
+
+    if arrangement.payout_basis == ProfitSplitArrangement.PayoutBasis.AFTER_BUYIN:
+        split_base = max(returned_total - buy_ins_tonight, Decimal('0'))
+    else:
+        split_base = returned_total
+
+    method = arrangement.payout_split_method
+    if method == ProfitSplitArrangement.PayoutSplitMethod.STAKE_RATIO:
+        target_house_share = split_base * arrangement.house_stake_pct / Decimal('100')
+    elif method == ProfitSplitArrangement.PayoutSplitMethod.CUSTOM_RATIO:
+        target_house_share = split_base * (arrangement.custom_ratio_pct or Decimal('0')) / Decimal('100')
+    else:  # FIXED
+        offset = arrangement.fixed_offset or Decimal('0')
+        target_house_share = (arrangement.fixed_amount or Decimal('0')) if split_base > offset else Decimal('0')
+    target_house_share = min(target_house_share, split_base).quantize(Decimal('1'))
+
+    house_portion = max(target_house_share - progress['already_taken_tonight'], Decimal('0'))
+    house_portion = min(house_portion, amount)  # never more than this specific cash-out
+    return house_portion, arrangement
+
+
 def record_transaction(
     *, type, amount, recorded_by, game_day=None, player=None, notes='', currency='NGN',
     conversion_rate=None, channel=None, floor_manager_id=None, floor_manager_pin=None,
@@ -831,6 +898,16 @@ def record_transaction(
     player_portion, house_portion, arrangement = amount, Decimal('0'), None
     if type == Transaction.Type.CHIPS_OUT and player is not None:
         player_portion, house_portion, arrangement = _apply_profit_split_stake(player, amount, game_day)
+
+    # "Deals" Profit Split payout (added 2026-10-02): the house's cut of a
+    # cash-out ("SPA In"), computed the same way the stake side is — see
+    # _compute_profit_split_return for the full math. The CHIPS_IN amount
+    # itself is never reduced (same "always the full physical amount"
+    # principle as the stake side's CHIPS_OUT) — the cut is posted as its
+    # own linked debit below instead.
+    return_portion, return_arrangement = Decimal('0'), None
+    if type == Transaction.Type.CHIPS_IN and player is not None:
+        return_portion, return_arrangement = _compute_profit_split_return(player, game_day, amount)
 
     if type == Transaction.Type.CHIPS_OUT and player is not None and player.chips_limit is not None:
         # cashier_visible_balance (not the raw game-day balance): a credit
@@ -988,7 +1065,11 @@ def record_transaction(
         # PROFIT_SPLIT_STAKE row below is now a real credit (see
         # selectors.CREDIT_TYPES) that brings the player's balance back
         # down to their true player_portion, instead of baking the discount
-        # directly into this row.
+        # directly into this row. Same principle on the CHIPS_IN side,
+        # added 2026-10-02: a CHIPS_IN row always records the full amount
+        # physically returned, and PROFIT_SPLIT_RETURN (a real debit — see
+        # selectors.DEBIT_TYPES) is the house's cut of it, posted as its
+        # own linked row below rather than shrinking this one.
         txn = Transaction.objects.create(
             game_day=game_day, player=player, type=type, amount=amount,
             currency=currency, conversion_rate=conversion_rate,
@@ -996,7 +1077,9 @@ def record_transaction(
             recorded_by=recorded_by, floor_manager=fm,
             confirmed_at=timezone.now() if fm else None,
             tip_category=tip_category, masseuse=masseuse,
-            profit_split_arrangement=arrangement if house_portion > 0 else None,
+            profit_split_arrangement=(
+                arrangement if house_portion > 0 else (return_arrangement if return_portion > 0 else None)
+            ),
         )
         if house_portion > 0:
             stake_txn = Transaction.objects.create(
@@ -1012,6 +1095,24 @@ def record_transaction(
             # voided CHIPS_OUT would leave its stake credit standing,
             # wrongly crediting the player for a buy-in that never happened.
             txn.linked_transaction = stake_txn
+            txn.save(update_fields=['linked_transaction'])
+        if return_portion > 0:
+            # "SPA In" (added 2026-10-02) — the payout-side counterpart to
+            # the stake side's "SPA Out" above: the house's cut of this
+            # cash-out, posted as its own linked debit rather than reducing
+            # the CHIPS_IN amount itself (same "always the full physical
+            # amount" principle). Bidirectional linked_transaction, same
+            # pattern as the stake pairing — this CHIPS_IN's own
+            # linked_transaction slot is never taken by anything else, so
+            # no conflict with that pattern's source_buy_in fallback.
+            return_txn = Transaction.objects.create(
+                game_day=game_day, player=player, type=Transaction.Type.PROFIT_SPLIT_RETURN,
+                amount=return_portion, channel=Transaction.Channel.DEAL,
+                notes=f'House cut of this cash-out ({return_arrangement.get_payout_split_method_display()})',
+                recorded_by=recorded_by, profit_split_arrangement=return_arrangement,
+                linked_transaction=txn,
+            )
+            txn.linked_transaction = return_txn
             txn.save(update_fields=['linked_transaction'])
         if applied_balance > 0:
             # "Player balance" (added 2026-09-25): one line per action — the
@@ -1147,9 +1248,9 @@ def create_profit_split_arrangement(
     with no other legitimate caller. Creating a new arrangement for a
     player automatically deactivates any previous active one for them —
     see ProfitSplitArrangement's docstring on why only one is meant to
-    apply at a time. Only the stake side is actually enforced automatically
-    (record_transaction's CHIPS_OUT branch); the payout-split fields are
-    captured as configuration only for now.
+    apply at a time. Both the stake side (record_transaction's CHIPS_OUT
+    branch) and the payout side (that same function's CHIPS_IN branch, via
+    _compute_profit_split_return) are enforced automatically.
     """
     if operator.role != StaffUser.Role.OWNER:
         raise AuthorizationError('Only the Owner can set up a Profit Split arrangement.')

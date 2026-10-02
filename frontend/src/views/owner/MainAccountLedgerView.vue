@@ -27,6 +27,12 @@ import { useToast } from '@/composables/useToast'
 // everywhere else this type renders (e.g. the Cashier's own ledger, a
 // manual in-person transfer at the table). See LedgerTable.vue's
 // `row.type_label` for how a per-row override works.
+//
+// Lives at /ledgers/main-account as of 2026-10-02 (was the flat
+// /main-account, now a redirect to here) — moved under LedgersLayout.vue
+// alongside its other sub-pages, per explicit request, which owns the
+// page-level header + sub-nav. This component's own former page-header/
+// <h1> was removed as duplicate chrome, same as GameDaysListView.vue's.
 const toast = useToast()
 
 const players = ref([])
@@ -83,11 +89,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 <template>
   <div class="page">
-    <div class="page-header">
-      <h1>Main Account</h1>
-      <p>Money that actually touches the club's bank account — player deposits sweeping in, payouts going out. No chip activity.</p>
-    </div>
-
     <p v-if="loading" class="muted">Loading…</p>
 
     <template v-else>
@@ -115,9 +116,6 @@ const N = n => `₦${Number(n).toLocaleString()}`
 
 <style scoped>
 .page { max-width: 1100px; }
-.page-header { margin-bottom: 24px; }
-.page-header h1 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
-.page-header p { font-size: 13.5px; color: var(--text-secondary); margin: 0; max-width: 620px; }
 .muted { color: var(--text-secondary); font-size: 13px; }
 
 .balance-card { padding: 16px 18px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }

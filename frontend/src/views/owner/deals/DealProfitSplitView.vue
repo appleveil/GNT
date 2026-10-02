@@ -5,6 +5,7 @@ import api from '@/api/axios'
 import { formatAmountForDisplay, parseAmountInput } from '@/utils/amountInput'
 import { useToast } from '@/composables/useToast'
 import { useFormValidation, minPct, maxPct } from '@/composables/useFormValidation'
+import ProfitSplitSummary from '@/components/shared/ProfitSplitSummary.vue'
 
 // "Deals" Stake and Profit Split (2026-09-23) — mirrors mobile's
 // ProfitSplitScreen.tsx/ProfitSplitDetailScreen.tsx, wired to the real
@@ -148,12 +149,7 @@ async function onSubmit() {
 }
 
 const RESET_CADENCE_LABEL = { ONE_OFF: 'One-off', PER_GAME: 'Per game' }
-const PAYOUT_BASIS_LABEL = { BEFORE_BUYIN: 'Before buy-in', AFTER_BUYIN: 'After buy-in' }
-const PAYOUT_METHOD_LABEL = { STAKE_RATIO: 'Ratio: according to stake', CUSTOM_RATIO: 'Ratio: house percentage', FIXED: 'Fixed amount' }
 
-function formatDate(iso) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
 const N = n => `₦${Number(n).toLocaleString()}`
 </script>
 
@@ -169,42 +165,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
         <p>{{ player.display_name }} &middot; {{ player.account_code }}</p>
       </div>
 
-      <div v-if="status" class="card status-card">
-        <div class="status-head">
-          <span class="badge badge--approved">ACTIVE</span>
-          <span class="status-since">since {{ formatDate(status.arrangement.created_at) }}</span>
-        </div>
-
-        <div class="status-grid">
-          <div class="status-box">
-            <div class="status-label">Covered this period</div>
-            <div class="status-value">{{ N(status.covered_this_period) }}</div>
-          </div>
-          <div class="status-box">
-            <div class="status-label">Cumulative covered</div>
-            <div class="status-value">{{ N(status.cumulative_covered) }}</div>
-          </div>
-          <div class="status-box">
-            <div class="status-label">Available this period</div>
-            <div class="status-value">{{ N(status.available_stake_this_period) }}</div>
-          </div>
-        </div>
-
-        <p v-if="status.is_exhausted" class="exhausted-note">Exhausted — {{ status.exhausted_reason }}</p>
-
-        <div class="config-lines">
-          <div class="config-line">
-            <span class="config-key">Stake</span>
-            <span>{{ status.arrangement.house_stake_pct }}% of buy-in, capped at {{ N(status.arrangement.cap_amount) }} {{ status.arrangement.reset_cadence === 'ONE_OFF' ? 'total' : 'per game' }}</span>
-          </div>
-          <div class="config-line">
-            <span class="config-key">Payout</span>
-            <span>{{ PAYOUT_BASIS_LABEL[status.arrangement.payout_basis] }}, {{ PAYOUT_METHOD_LABEL[status.arrangement.payout_split_method] }}<template v-if="status.arrangement.payout_split_method === 'CUSTOM_RATIO'"> ({{ status.arrangement.custom_ratio_pct }}%)</template><template v-if="status.arrangement.payout_split_method === 'FIXED'"> ({{ N(status.arrangement.fixed_amount) }})</template></span>
-          </div>
-        </div>
-
-        <button class="btn btn--danger end-btn" type="button" @click="confirmEnd = true">End arrangement</button>
-      </div>
+      <ProfitSplitSummary v-if="status" :status="status" show-end-button class="status-card-wrap" @end="confirmEnd = true" />
 
       <button v-if="status && !showForm" class="link-btn" type="button" @click="showForm = true">Set up a new arrangement &rarr;</button>
 
@@ -335,7 +296,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
       </form>
     </template>
 
-    <div v-if="confirmEnd" class="overlay">
+    <div v-if="confirmEnd" class="overlay" @click.self="deactivating || (confirmEnd = false)">
       <div class="dialog card">
         <div class="eyebrow">End this arrangement?</div>
         <p class="dialog-text">The per-period cap stops applying to future buy-ins — this doesn't undo any stake already covered.</p>
@@ -358,20 +319,7 @@ const N = n => `₦${Number(n).toLocaleString()}`
 .page-header h1 { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 2px; }
 .page-header p { font-size: 12.5px; color: var(--text-tertiary); margin: 0; }
 
-.status-card { padding: 18px 20px; margin-bottom: 16px; }
-.status-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-.status-since { font-size: 11.5px; color: var(--text-tertiary); }
-.status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
-.status-box { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
-.status-label { font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px; }
-.status-value { font-family: var(--font-mono); font-weight: 700; font-size: 15px; color: var(--text-primary); }
-.exhausted-note { font-size: 12px; color: var(--warning-text); background: var(--warning-bg); border-radius: var(--radius-sm); padding: 8px 10px; margin: 0 0 12px; }
-
-.config-lines { border-top: 1px solid var(--border); padding-top: 12px; margin-bottom: 14px; }
-.config-line { display: flex; gap: 8px; font-size: 12.5px; color: var(--text-secondary); padding: 3px 0; line-height: 1.5; }
-.config-key { font-weight: 700; color: var(--text-tertiary); flex-shrink: 0; width: 52px; }
-
-.end-btn { width: 100%; }
+.status-card-wrap { margin-bottom: 16px; }
 
 .link-btn { display: block; border: none; background: none; font-size: 13px; font-weight: 700; color: var(--accent-text); cursor: pointer; padding: 8px 0 20px; }
 .link-btn:hover { text-decoration: underline; }

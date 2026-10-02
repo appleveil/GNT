@@ -45,7 +45,7 @@ async function onSubmit() {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" @click.self="submitting || emit('close')">
     <div class="dialog card">
       <div class="head">
         <div class="eyebrow">{{ player.display_name }} &mdash; credit limit</div>

@@ -11,22 +11,64 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 // `trigger` slot (added 2026-10-02) — AppShell.vue's Cashier avatar menu
 // reuses this component with its own avatar circle as the trigger instead
 // of the default ⋮ button; every other caller is unaffected (the default
-// slot content is exactly the old hard-coded button). `align` (same date)
-// lets a left-anchored trigger (the avatar, at the right end of the
-// topbar) open its menu without running off the edge of the screen —
-// RosterListView's ⋮ (always near the right edge of its own row) keeps
-// the default.
+// slot content is exactly the old hard-coded button). `align` picks which
+// edge of the trigger the menu lines up with: 'right' (default) grows the
+// menu leftward, which is what a trigger near the right edge of the page
+// needs; 'left' grows it rightward.
+//
+// `openOn: 'hover'` also opens the menu on mouse hover or keyboard focus
+// and closes it shortly after the pointer/focus leaves. Tap/click still
+// toggles, for touch screens with no hover. A tap fires focus (and, on
+// some browsers, emulated hover) just before its click, so a click that
+// lands within OPEN_GRACE_MS of a hover/focus open leaves the menu open
+// instead of toggling it straight back shut.
 const props = defineProps({
   items: { type: Array, required: true }, // [{ key, label, disabled? }]
   align: { type: String, default: 'right' }, // 'right' | 'left'
+  openOn: { type: String, default: 'click' }, // 'click' | 'hover'
 })
 const emit = defineEmits(['select'])
 
+const OPEN_GRACE_MS = 400
+const CLOSE_DELAY_MS = 150
+
 const open = ref(false)
 const root = ref(null)
+let openedAt = 0
+let closeTimer = null
+
+function cancelClose() {
+  clearTimeout(closeTimer)
+  closeTimer = null
+}
+function openSoft() {
+  cancelClose()
+  if (!open.value) {
+    open.value = true
+    openedAt = Date.now()
+  }
+}
+function closeSoon() {
+  cancelClose()
+  closeTimer = setTimeout(() => { open.value = false }, CLOSE_DELAY_MS)
+}
 
 function toggle() {
+  cancelClose()
+  if (open.value && props.openOn === 'hover' && Date.now() - openedAt < OPEN_GRACE_MS) return
   open.value = !open.value
+}
+function onPointerEnter(e) {
+  if (props.openOn === 'hover' && e.pointerType === 'mouse') openSoft()
+}
+function onPointerLeave(e) {
+  if (props.openOn === 'hover' && e.pointerType === 'mouse') closeSoon()
+}
+function onFocusIn() {
+  if (props.openOn === 'hover') openSoft()
+}
+function onFocusOut(e) {
+  if (props.openOn === 'hover' && !root.value?.contains(e.relatedTarget)) closeSoon()
 }
 function onSelect(item) {
   if (item.disabled) return
@@ -37,11 +79,17 @@ function onClickOutside(e) {
   if (open.value && root.value && !root.value.contains(e.target)) open.value = false
 }
 onMounted(() => document.addEventListener('click', onClickOutside))
-onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onClickOutside)
+  cancelClose()
+})
 </script>
 
 <template>
-  <div ref="root" class="actions-menu" @click.stop>
+  <div
+    ref="root" class="actions-menu" @click.stop
+    @pointerenter="onPointerEnter" @pointerleave="onPointerLeave" @focusin="onFocusIn" @focusout="onFocusOut"
+  >
     <slot name="trigger" :toggle="toggle" :open="open">
       <button class="dots-btn" type="button" aria-label="Row actions" @click="toggle">&#8942;</button>
     </slot>

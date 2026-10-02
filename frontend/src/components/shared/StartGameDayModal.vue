@@ -105,7 +105,7 @@ function onStartConfirm() {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="overlay" @click.self="emit('close')">
     <div class="sheet">
       <div class="grip" />
       <div class="head">

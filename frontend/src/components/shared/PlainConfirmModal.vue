@@ -5,7 +5,7 @@ const { isOpen, title, subtitle, submitting, error, cancel, submit } = usePlainC
 </script>
 
 <template>
-  <div v-if="isOpen" class="overlay">
+  <div v-if="isOpen" class="overlay" @click.self="submitting || cancel()">
     <div class="sheet">
       <div class="grip" />
       <div class="sheet-title">{{ title }}</div>

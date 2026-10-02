@@ -10,7 +10,7 @@ const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
 </script>
 
 <template>
-  <div v-if="isOpen" class="overlay">
+  <div v-if="isOpen" class="overlay" @click.self="submitting || cancel()">
     <div class="sheet">
       <div class="grip" />
 

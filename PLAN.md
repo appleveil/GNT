@@ -2410,6 +2410,317 @@ specifically.
 Verified: full backend suite green (372 tests), `npm run build` clean
 after every batch, including the final one.
 
+### Cashier menu/modal fixes, account-code validation, Main Account move, SPA In, Deals ledger (2026-10-02, in progress)
+
+Second round of live-testing follow-ups. **Work through this one step at a
+time, top to bottom: re-read a step before starting it, tick it here once
+it's verified, and don't start the next step until then.** If context is
+cleared mid-way, resume from the first unticked box. Each step lists the
+files it touches and how to verify it.
+
+Conventions that apply to every step:
+- Forms use `useFormValidation` + `readApiError` (see the previous entry).
+- Backend tests: `cd backend && source venv/bin/activate && python manage.py
+  test gaming accounts payments --keepdb`, run in the background, **one run
+  at a time** (two concurrent `--keepdb` runs corrupt the test DB).
+- Migrations: also apply to the dev tenant with
+  `python manage.py tenant_command migrate --schema=test1 gaming`.
+- Frontend: `cd frontend && npm run build` must be clean.
+- Commit only when the user says so.
+
+#### Phase 1 — Cashier UI fixes (frontend only)
+
+- [x] **1a. Avatar menu: open on hover/focus, stay on the page.**
+  `components/shared/RowActionsMenu.vue`: new `openOn` prop (`'click'`
+  default, so the Players ⋮ menu is unchanged; `'hover'`). Hover mode:
+  `mouseenter`/`focusin` opens, `mouseleave`/`focusout` closes after
+  ~150ms (lets the pointer cross the gap). Tap/click still toggles — the
+  Cashier is on a touch tablet with no hover. Click-outside stays.
+  Clipping cause: `.menu-pop` is `right: 0` by default and `align="left"`
+  switches it to `left: 0`, anchoring a 160px menu to the ~30px avatar's
+  left edge so it spills off the right of the page. Fix: the avatar uses
+  the default right anchor (menu grows leftward into the page).
+  `components/layout/AppShell.vue` (~:197-204): pass `open-on="hover"`, drop
+  `align="left"`. Verify: build; Players ⋮ menu still click-only.
+  **Done** — `RowActionsMenu.vue` gained `openOn` ('click'/'hover'),
+  `pointerenter`/`pointerleave`(`pointerType==='mouse'` only, so touch taps
+  don't fire it)/`focusin`/`focusout` handlers, a 150ms close-delay timer
+  so the pointer can cross the trigger→menu gap, and an "open grace" guard
+  (400ms) so a touch tap's own focus-then-click sequence doesn't
+  immediately re-toggle the menu shut. `AppShell.vue` now passes
+  `open-on="hover"` and no `align` (defaults to `'right'`, growing
+  leftward). `RosterListView.vue`'s ⋮ menu passes neither prop —
+  unaffected. Build clean.
+- [x] **1b. Close Game-Day: Cancel on every branch, click-outside cancels.**
+  `components/shared/CloseGameDayModal.vue` has four branches: blocked
+  (only a "Close" button → becomes Cancel), discrepancy (has Cancel),
+  rake-confirm ("Go back" steps back inside the modal — keep it, add
+  Cancel beside it), default (has Cancel). Add `@click.self` on `.overlay`
+  to emit close, ignored while a submit is in flight. No modal in the app
+  closes on a backdrop click today; apply the same one-line handler to
+  the other overlay modals too (per the user's answer to question 4
+  below).
+  **Done** — all four `CloseGameDayModal.vue` branches now have a working
+  Cancel (blocked branch's "Close" renamed; rake-confirm branch gained a
+  Cancel next to "Go back"); `.overlay` gained `@click.self="cancel"`
+  (`cancel()` is a full reset, safe in every branch — the actual close
+  POST happens in the separately-stacked `AuthorizerConfirmModal`, which
+  covers the full viewport with its own overlay, so this one is never
+  clickable mid-submit). **Correction to the research**:
+  `CreditLimitModal.vue` already had `@click.self="emit('close')")` — one
+  modal did have the pattern, just not the three I'd named as the
+  comparison set. Applied `@click.self` (guarded by each modal's own
+  `submitting`/`deactivating` ref where one exists, otherwise
+  unconditional since no async submit happens before the trigger function
+  itself resets the state) to every other overlay in the app:
+  `StartGameDayModal.vue`, `AddPlayerModal.vue`, `PlainConfirmModal.vue`,
+  `VoidEntryModal.vue`, `RejectPayoutModal.vue`, `AuthorizerConfirmModal.vue`,
+  `PlayerBankAccountModal.vue`, `TransactionEntryModal.vue`,
+  `AppShell.vue`'s logout-confirm, `DealTransferView.vue`'s
+  change-recipient confirm, `DealProfitSplitView.vue`'s end-arrangement
+  confirm, and `ActiveGameDayView.vue`'s four inline overlays (payment
+  picker, leave-with-chips prompt, move-seat picker, rejoin-seat picker).
+  Build clean.
+- [x] **1c. Activity log: a way back for the Cashier.**
+  `views/shared/ActivityLogView.vue`: `back-btn` ("← Game-day" →
+  `/game-day`), Cashier only — Floor Manager/Owner reach it from their
+  sidebar. Same `back-btn` markup/CSS as `views/accountant/PlayerPayoutView.vue`.
+  **Done.** Build clean. **Phase 1 complete.**
+
+#### Phase 2 — Account codes: account number exactly 10 digits, unique
+
+- [x] **2a. Backend.** `backend/accounts/views.py` `AccountCodeViewSet.create`
+  bulk loop (~:372-379): after the required-fields check, reject
+  `account_number` not matching `^\d{10}$` with
+  `"{label}: account number must be exactly 10 digits."` (same plain-string
+  `errors` format as the loop's other errors). Uniqueness is already
+  enforced there (in-batch + against the DB) — keep it. Also add a
+  `RegexValidator` to `AccountCode.account_number`
+  (`backend/accounts/models.py:159`) for the single-row create path
+  (`bulk_create` skips model validators, so the view check is the real
+  one). Migration for the validator. Tests in `AccountCodeAPITests`
+  (`backend/accounts/tests.py` ~:306): 9 digits, 11 digits, non-digits.
+  Check test1's existing codes against the rule and report any that fail.
+  **Done** — migration `accounts/0010_alter_accountcode_account_number.py`,
+  applied to test1. 2 new tests (bulk + single-row path), both green; full
+  `AccountCodeAPITests` (7) green. **test1 has 3 pre-existing codes that
+  fail the new rule** (`123456789`, `123456790`, `123456791` — 9 digits
+  each): the rule is enforced on new codes only, nothing retroactive runs
+  against them, so they stay as-is unless the user asks to fix them.
+- [x] **2b. Frontend.** `views/owner/AdminView.vue` `validateRow()`: same
+  10-digit check, before the duplicate checks. Covers both the "+ Add
+  row" form and file uploads. **Done.** Build clean. **Phase 2 complete**
+  (full backend suite run pending, see wrap-up).
+
+#### Phase 3 — Main Account moves under Ledgers (frontend only)
+
+- [x] **3.** `router/index.js`: Main Account becomes a `ledgers` child at
+  `/ledgers/main-account` (name `ledgers-main-account`, Owner-only); keep
+  `/main-account` as a redirect. `views/accountant/LedgersLayout.vue`
+  `ALL_TABS` and `AppShell.vue`'s Ledgers `children`: add it (`ownerOnly`),
+  order Game Days, Off-table, Deals, Main Account. Remove its top-level
+  sidebar entry in `AppShell.vue` (~:96-104). `views/owner/MainAccountLedgerView.vue`:
+  drop any page header that duplicates the tab bar, otherwise unchanged.
+  ("No second sub-menu inside Ledgers pages" is already true everywhere —
+  nothing to do for that request.)
+  **Done** — old `main-account` route now `{ path: 'main-account',
+  redirect: '/ledgers/main-account' }`; `MainAccountLedgerView.vue` had its
+  own `<h1>Main Account</h1>` + subtitle + their CSS removed (matching
+  `GameDaysListView.vue`'s own precedent, confirmed by that file's own
+  comment — it already dropped its header the same way when it moved
+  under `LedgersLayout` on 2026-09-26). Build clean; no other file
+  referenced the old `/main-account` path or route name.
+
+#### Phase 4 — SPA In: the house's share taken at cash-out (backend core)
+
+Today the house's stake is only taken at buy-in (`_apply_profit_split_stake`
+→ a linked `PROFIT_SPLIT_STAKE` "SPA" credit). The CHIPS_IN path has no
+profit-split logic, and `ProfitSplitArrangement`'s payout fields
+(`payout_basis`, `payout_split_method`, `custom_ratio_pct`, `fixed_amount`,
+`fixed_offset`) are stored but never used.
+
+- [x] **4a. Model + type.** New `Transaction.Type.PROFIT_SPLIT_RETURN`
+  (label "SPA In"), migration. A **debit** in `selectors.DEBIT_TYPES`: it
+  reduces what the club owes the player, so the later payout of the
+  player's balance automatically sends only their share — no payout-code
+  change needed. Remove the "configuration only" scope note from the
+  `ProfitSplitArrangement` docstring.
+  **Done** — migration `gaming/migrations/0032_alter_transaction_type.py`,
+  applied to test1.
+- [x] **4b. Math + recording.** New `_compute_profit_split_return(player,
+  game_day, amount)` beside `_apply_profit_split_stake` in
+  `backend/gaming/services.py`, returning `(house_portion, arrangement)`.
+  New selector `selectors.profit_split_return_progress(arrangement,
+  player, game_day)` gives it the night's running totals (this player's
+  buy-ins tonight, chips returned before this one, SPA In already taken
+  tonight against this arrangement) — kept in `selectors.py` rather than
+  reaching into that module's private `_sum_amount` from `services.py`.
+  In `record_transaction`'s CHIPS_IN branch: the CHIPS_IN row keeps the
+  **full** amount; if the house share > 0, a linked `PROFIT_SPLIT_RETURN`
+  row is created (`channel=DEAL`, FK'd to the arrangement, paired via
+  `linked_transaction` — that slot is never otherwise used on a CHIPS_IN
+  row, so no conflict with the CHIPS_OUT side's own use of it for SPA Out).
+  **Math — confirmed with the user via a worked example** (buy-in
+  ₦500,000; deal stake 40%, capped at ₦100,000/game, i.e. the house
+  actually covers ₦100,000/20% tonight; ₦800,000 returned):
+  - split base: After buy-in (default) = max(returned − bought-in, 0) for
+    the night = ₦300,000 here; Before buy-in = the whole amount returned
+    = ₦800,000.
+  - house share: Ratio by stake = split base × the arrangement's WRITTEN
+    `house_stake_pct` ÷ 100 — 40% × ₦300,000 = **₦120,000**, NOT the
+    smaller share actually covered after the cap (20%). House percentage =
+    split base × `custom_ratio_pct` ÷ 100. Fixed = `fixed_amount`, but
+    only once the split base exceeds `fixed_offset` — a threshold, not a
+    subtraction; a blank offset means 0.
+  - capped at the split base, rounded to whole Naira; a "payout off" deal
+    is stored as House percentage at 0%, so the share comes out as 0 with
+    no special case.
+  - partial cash-outs: the target is computed against the night's running
+    total (including the one being recorded), then whatever
+    `PROFIT_SPLIT_RETURN` has already been taken tonight is subtracted off
+    — confirmed two partial returns total the same as one full return
+    would (test below).
+- [x] **4c. Wiring.** Void cascade needed no code change — the existing
+  recursive `_void` already follows `linked_transaction`, and since the
+  CHIPS_IN/SPA-In pairing uses that same field the same way the
+  CHIPS_OUT/SPA-Out pairing does, voiding a cash-out already voids its SPA
+  In too (test added). No separate Activity log entry for the SPA In row
+  itself, matching the existing precedent — the buy-in side's SPA Out
+  never got one either; the CHIPS_IN's own log entry is what's already
+  there. `frontend/src/constants/transactionTypes.js`: new
+  `PROFIT_SPLIT_RETURN` entry (`physicalCount: false`, `amountTone:
+  'debit'`, label "SPA In"); today's `PROFIT_SPLIT_STAKE` label renamed
+  "SPA" → "SPA Out" per the user's confirmation (question 3). No other
+  frontend file hardcoded the old "SPA" label.
+- [x] **4d. Tests.** New `ProfitSplitReturnTests` (9 tests) in
+  `backend/gaming/tests.py`: the worked example, Before-buy-in basis,
+  House-percentage method, Fixed method (both sides of the threshold),
+  a losing night taking no cut, partial cash-outs totaling the same as
+  one full return, no-arrangement no-cut, "payout off" stored as 0% taking
+  no cut, and the void cascade. (A dedicated "payout amount after SPA In"
+  test was folded into the worked-example test's balance assertion rather
+  than kept separate — `player_game_day_balance` is exactly the figure a
+  payout caps against, so asserting it there already covers the claim.)
+  All 9 green, plus the existing 42 `ProfitSplitArrangementTests` still
+  green (no regression). Migrated test1. **Live check on test1 — still to
+  do, see wrap-up.**
+
+#### Phase 5 — Ledgers → Deals performance page (depends on Phase 4)
+
+- [x] **5a. Backend.** Selectors in `backend/gaming/selectors.py` + Owner-only
+  (`IsOwner`) endpoints:
+  - `GET /ledgers/deals/`: one row per game-day with any SPA or SPA In
+    activity — Date, Stake (total SPA), ROI (total SPA In), Net (Stake −
+    ROI, can be negative).
+  - `GET /ledgers/deals/<game_day_id>/`: one row per player × arrangement
+    that night — Player, Chips (total CHIPS_OUT), Deal ID, Stake/Split,
+    SPA, Cash-out (total CHIPS_IN), ROI (total SPA In). Split shows the %
+    for either ratio method, ₦ for Fixed, "—" when payout is off.
+  Tests for both.
+  **Done**, with one naming correction: the actual routes are
+  `/api/deals/ledger/` and `/api/deals/ledger/<game_day_id>/` (grouped with
+  the other `deals/*` endpoints in `gaming/urls.py`, not
+  `/ledgers/deals/*`, which is the FRONTEND route for the page itself —
+  the two aren't meant to share a path). New `selectors.deals_ledger_summary()`/
+  `deals_ledger_detail(game_day)`, `views.DealsLedgerView`/
+  `DealsLedgerDetailView`, `serializers.DealsLedgerSummaryRowSerializer`/
+  `DealsLedgerDetailRowSerializer`. The "Stake/Split" column's raw figures
+  (`house_stake_pct`, `payout_split_method`, `custom_ratio_pct`,
+  `fixed_amount`) are returned as-is rather than pre-formatted into a
+  string — matches this codebase's existing convention
+  (`ProfitSplitArrangementSerializer` does the same; the frontend already
+  has a `PAYOUT_METHOD_LABEL` map in `DealProfitSplitView.vue` to reuse).
+  **Interpretation flagged for review**: the original spec's single
+  "Stake / Split" column header reads as two values in one cell — Stake
+  (the deal's buy-in-side `house_stake_pct`) and Split (the payout-side
+  term) — rather than one value; built that way, easy to adjust if meant
+  differently. New `DealsLedgerTests` (7 tests: summary excludes a
+  game-day with no Profit Split activity, Stake/ROI/Net figures, detail
+  row figures, detail for a quiet game-day is empty, Accountant and
+  Cashier both forbidden). Also added `selectors.dashboard_deals_roi()`
+  for 5c below, with its own test.
+- [x] **5b. Frontend.** `views/accountant/LedgersDealsView.vue` copies
+  `GameDaysListView.vue`'s layout: summary table, click a row → detail
+  table inline below, same scroll-into-view and 5-per-page pagination.
+  Deal ID shown as `PS-<id>`; clicking it opens a summary pop-up (no
+  navigation). The status card markup in
+  `views/owner/deals/DealProfitSplitView.vue` moves into a shared
+  `components/shared/ProfitSplitSummary.vue` used by both.
+  **Done.** `ProfitSplitSummary.vue` takes a `status` prop (same shape
+  both `GET /deals/profit-split/{player_id}/` and the new
+  `GET /deals/profit-split/arrangement/{id}/` return) and an optional
+  `showEndButton` (off by default — ending an arrangement stays
+  `DealProfitSplitView.vue`'s own action; the pop-up is read-only). Its
+  badge reads the arrangement's own `is_active` (ACTIVE/ENDED) rather than
+  being hardcoded "ACTIVE", since the ledger's pop-up can reference a
+  since-ended arrangement, unlike `DealProfitSplitView.vue` which only
+  ever shows a player's current one. New backend endpoint
+  `GET /deals/profit-split/arrangement/<id>/` (view
+  `ProfitSplitArrangementStatusView`) was needed for this — the existing
+  `GET /deals/profit-split/<player_id>/` only ever looks up a player's
+  CURRENT active arrangement and returns `null` otherwise, which breaks
+  for a ledger row referencing a past, already-replaced one; 2 new tests.
+  `DealProfitSplitView.vue` shrank from 11.88kB to 9.43kB after the
+  extraction, confirming the card's markup/CSS/labels (`PAYOUT_BASIS_LABEL`/
+  `PAYOUT_METHOD_LABEL`, now dead there) moved rather than duplicated.
+  `LedgersDealsView.vue`'s own Deal-ID pop-up is a plain centered dialog
+  (not a full modal component) since it's read-only with no form. Build
+  clean; backend test suite run pending, see wrap-up.
+- [x] **5c. Dashboard card** (per question 5): fill the Owner-only "Deals
+  ROI" card in `views/accountant/DashboardView.vue` with total SPA In this
+  month − total SPA Out this month (non-voided), from a small selector.
+  **Done** — card now shows `totals.deals_roi_this_month`, colored via the
+  existing `money--pos`/`money--neg` convention already used by the two
+  stat cards above it (positive = net gain, negative = net spend so far).
+  Build clean.
+
+#### Wrap-up
+
+- [x] CONCEPT.md: SPA In, Main Account's new home. Mark this entry complete.
+  Full backend suite + `npm run build` one final time.
+  **Done.** CONCEPT.md: new "SPA In" paragraph under "Chips limit" (with
+  the full worked-example confirmation), and a new "Owner's Ledgers
+  section, revised 2026-10-02" paragraph covering the Main Account move
+  and the new Deals ledger/dashboard card. Full backend suite: **392/392
+  green** (383 after Phase 4 + 2 new `ProfitSplitArrangementStatusView`
+  tests + 7 `DealsLedgerTests`). `npm run build` clean. Migrations applied
+  to test1 throughout (`accounts.0010`, `gaming.0032`). **Live-checked on
+  test1's real dev DB** (isolated test player/opponent/game-day, cleaned
+  up after): a 40%-stake/₦100k-cap deal with a ₦500k buy-in and a ₦800k
+  cash-out produced SPA Out ₦100,000 and SPA In ₦120,000 exactly as the
+  worked example predicts, `player_game_day_balance` came out to
+  ₦280,000, the two rows linked both directions, the Deals ledger
+  summary/detail selectors reported the right figures, and voiding the
+  cash-out correctly voided its SPA In too. Also live-checked over HTTP
+  against the running dev server: `GET /api/deals/ledger/` and
+  `GET /api/dashboard/` both return real figures from test1's existing
+  data, and the account-code bulk-add endpoint correctly accepts a
+  10-digit number while rejecting a 9-digit one with the expected message.
+  **This entire second-round batch (Phases 1–5) is now complete.**
+
+#### Questions (answers recorded here before Phase 4 starts)
+
+1. Payout terms, confirmed against a worked example (buy-in ₦500k, deal
+   stake 40% capped at ₦100k/game, ₦800k returned):
+   - **Basis:** After buy-in = the cut applies to profit only, max(C − B,
+     0) (₦300k; nothing on a losing night). Before buy-in = the cut
+     applies to the whole return, C (₦800k).
+   - **Ratio: according to stake** = the **deal's written house stake %**
+     (40% → ₦120k on ₦300k), NOT the share actually covered after the cap.
+   - **Ratio: house percentage** = `custom_ratio_pct` of the amount.
+   - **Fixed** = `fixed_amount` when the amount exceeds `fixed_offset`
+     (see 2).
+   The 4b math above is updated to match.
+2. Fixed + off-set: house takes `fixed_amount` whenever the amount exceeds
+   the off-set? → **Yes — off-set is a threshold.**
+3. Rename today's buy-in "SPA" to "SPA Out"? → **Yes, rename to "SPA Out".**
+4. Click-outside closes every modal, or only Close Game-Day? → **Every
+   modal** (ignored while a submit is in flight).
+5. Fill the dashboard "Deals ROI" card now? → **Yes: total SPA In this
+   month minus total SPA Out this month** (the house's net gain — note
+   this is the opposite sign of the Deals ledger's Net column, which is
+   Stake − ROI per the original request).
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.
