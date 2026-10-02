@@ -458,12 +458,21 @@ def total_rake_this_month():
     Feeds the Owner Dashboard's "Total rake this month" stat card, which
     replaced "Unreturned chips" there on 2026-09-23 — Accountant's own
     dashboard still gets outstanding_chips_total, unchanged.
+
+    Scoped by the game-day's own `started_at`, not each transaction's own
+    `created_at` (revised 2026-10-02) — a game-day that starts late one
+    month and runs past midnight into the next belongs, in full, to the
+    month it started in. Without this, a rake entry posted after midnight
+    on a game-day that opened the night before would count toward the new
+    month instead of the one the whole night belongs to.
     """
     start_of_month = timezone.localtime(timezone.now()).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0,
     )
     return _sum_amount(
-        Transaction.objects.filter(type=Transaction.Type.RAKE, is_voided=False, created_at__gte=start_of_month)
+        Transaction.objects.filter(
+            type=Transaction.Type.RAKE, is_voided=False, game_day__started_at__gte=start_of_month,
+        )
     )
 
 
@@ -754,10 +763,15 @@ def dashboard_deals_roi():
     deals_ledger_summary's own Net column by design (per the user's
     answer): this is the house's own net GAIN for the month, not its net
     spend.
+
+    Scoped by each transaction's own game-day's `started_at`, not the
+    transaction's own `created_at` (revised 2026-10-02, same reasoning as
+    total_rake_this_month) — a game-day that crosses into a new month
+    keeps its SPA In/Out with the month it started in, in full.
     """
-    now = timezone.now()
+    now = timezone.localtime(timezone.now())
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    txns = Transaction.objects.filter(is_voided=False, created_at__gte=month_start)
+    txns = Transaction.objects.filter(is_voided=False, game_day__started_at__gte=month_start)
     spa_out = _sum_amount(txns.filter(type=Transaction.Type.PROFIT_SPLIT_STAKE))
     spa_in = _sum_amount(txns.filter(type=Transaction.Type.PROFIT_SPLIT_RETURN))
     return spa_in - spa_out

@@ -2721,6 +2721,42 @@ profit-split logic, and `ProfitSplitArrangement`'s payout fields
    this is the opposite sign of the Deals ledger's Net column, which is
    Stake − ROI per the original request).
 
+### Deals ROI/rake month-crossing attribution; Deals ledger Game-day column + corrected detail headers (2026-10-02, same day)
+
+Follow-up after confirming the "Deals ROI" dashboard card is in fact total
+SPA In − total SPA Out for the month (it was — verified against
+`selectors.dashboard_deals_roi`).
+
+- [x] **Month-crossing fix.** Both `dashboard_deals_roi` and
+  `total_rake_this_month` scoped "this month" by each transaction's own
+  `created_at` — so a game-day that opened last month but posted a SPA
+  In/Out or RAKE entry after midnight this month would wrongly count
+  toward this month instead of staying with the night it belongs to.
+  **Done** — both now filter by `game_day__started_at__gte=month_start`
+  instead. Rewrote `test_total_rake_this_month_only_counts_this_calendar_month`
+  to cover a crossing game-day explicitly (started last month, rake
+  entry's own `created_at` forced into this month, excluded from this
+  month's total); added
+  `test_dashboard_deals_roi_excludes_a_crossing_game_days_activity_from_the_wrong_month`
+  alongside it for the ROI card. Full `gaming`/`accounts`/`payments`
+  suite green.
+- [x] **Deals ledger — Game-day column + sub-heading.** Added a "Game-day"
+  column (showing `#<number>`) after Date in the summary table, and a
+  "Game-Day #N" heading above the detail table — same sub-heading
+  convention as Ledgers → Game Days' own detail panel (`GameDaysListView.vue`'s
+  `.detail-head`/`<h2>`). **Done.**
+- [x] **Deals ledger detail table — corrected SPA In/Out labels + new ROI
+  column.** The detail table's "SPA (₦)" and "ROI" headers were
+  mislabeled relative to what they actually show — confirmed against
+  `deals_ledger_detail`'s own docstring and `DealsLedgerTests`' fixture
+  comments (`spa` = SPA Out/stake total, `roi` = SPA In/return total).
+  Relabeled "SPA (₦)" → **"SPA Out"** and "ROI" → **"SPA In"** (matching
+  the data already in those columns, not swapped), then added a genuinely
+  new final **"ROI"** column = SPA In − SPA Out per player/arrangement,
+  same sign convention as the dashboard's own "Deals ROI" card (`rowRoi()`
+  in `LedgersDealsView.vue`, `money--pos`/`money--neg` colored). **Done.**
+  `npm run build` clean.
+
 ## 3. Design decisions
 
 - **Owner/Accountant/Platform-Admin frontend: same Vue app** as Cashier, with role-gated routes+nav (mirrors how Leyyow Affiliates admin is structured — one app, many roles) — not a separate app/build. Cashier's own stores/axios setup already generalize cleanly for this.

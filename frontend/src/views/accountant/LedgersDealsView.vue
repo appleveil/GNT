@@ -79,6 +79,11 @@ async function openGameDay(row) {
   await loadDetail(row.game_day_id)
 }
 
+// The summary row behind the currently-open detail panel — feeds its
+// "Game-Day #N" heading, same sub-heading convention as
+// GameDaysListView.vue's own detail-head.
+const detailGameDay = computed(() => rows.value.find(r => r.game_day_id === detailId.value) || null)
+
 async function onViewGameDay(row) {
   if (detailId.value === row.game_day_id) return
   await openGameDay(row)
@@ -122,6 +127,15 @@ function closeDealSummary() {
   dealSummaryOpen.value = false
   dealSummary.value = null
 }
+
+// Per-row ROI on the detail table — SPA In (row.roi, despite the field's
+// own name — see deals_ledger_detail's docstring) minus SPA Out (row.spa):
+// the house's own net gain for this player/arrangement tonight, same sign
+// convention as dashboard_deals_roi/DashboardView.vue's "Deals ROI" card
+// (positive = gain for the house).
+function rowRoi(row) {
+  return Number(row.roi) - Number(row.spa)
+}
 </script>
 
 <template>
@@ -132,7 +146,7 @@ function closeDealSummary() {
     <template v-else>
       <div class="table">
         <div class="t-head">
-          <span>Date</span><span>Stake</span><span>ROI</span><span>Net</span>
+          <span>Date</span><span>Game-day</span><span>Stake</span><span>ROI</span><span>Net</span>
         </div>
         <div
           v-for="row in pagedRows" :key="row.game_day_id" class="t-row"
@@ -140,6 +154,7 @@ function closeDealSummary() {
           @click="onViewGameDay(row)"
         >
           <span>{{ formatDate(row.date) }}</span>
+          <span class="mono">#{{ row.number }}</span>
           <span class="money">{{ N(row.stake_total) }}</span>
           <span class="money">{{ N(row.roi_total) }}</span>
           <span class="money" :class="Number(row.net) <= 0 ? 'money--pos' : 'money--neg'">{{ N(row.net) }}</span>
@@ -161,11 +176,14 @@ function closeDealSummary() {
       <div v-if="detailId" id="deals-detail" class="detail">
         <p v-if="detailLoading" class="muted">Loading…</p>
         <template v-else>
+          <div class="detail-head">
+            <h2>Game-Day #{{ detailGameDay?.number }}</h2>
+          </div>
           <p v-if="!detailRows.length" class="muted">No Profit Split activity for this game-day.</p>
           <div v-else class="detail-table">
             <div class="dt-head">
               <span>Player</span><span>Chips</span><span>Deal ID</span><span>Stake / Split</span>
-              <span>SPA (₦)</span><span>Cash-out</span><span>ROI</span>
+              <span>SPA Out</span><span>Cash-out</span><span>SPA In</span><span>ROI</span>
             </div>
             <div v-for="row in detailRows" :key="row.arrangement_id + '-' + row.player_id" class="dt-row">
               <span>{{ row.player_name }}</span>
@@ -175,6 +193,7 @@ function closeDealSummary() {
               <span class="money">{{ N(row.spa) }}</span>
               <span class="money">{{ N(row.cash_out) }}</span>
               <span class="money">{{ N(row.roi) }}</span>
+              <span class="money" :class="rowRoi(row) >= 0 ? 'money--pos' : 'money--neg'">{{ N(rowRoi(row)) }}</span>
             </div>
           </div>
         </template>
@@ -199,7 +218,7 @@ function closeDealSummary() {
 .table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }
 .t-head, .t-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
   align-items: center;
   padding: 0 20px;
   gap: 8px;
@@ -211,6 +230,7 @@ function closeDealSummary() {
 .t-row:hover { background: var(--bg); }
 .t-row--selected { background: var(--accent-bg); }
 .t-row--selected:hover { background: var(--accent-bg); }
+.mono { font-family: var(--font-mono); color: var(--text-secondary); }
 .money { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .money.money--pos { color: var(--success-text); }
 .money.money--neg { color: var(--danger-text); }
@@ -242,10 +262,12 @@ function closeDealSummary() {
 /* ── Detail panel — opens inline below the list, same rhythm as
    GameDaysListView.vue's own ── */
 .detail { margin-top: 26px; }
+.detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.detail-head h2 { font-size: 19px; font-weight: 700; color: var(--text-primary); margin: 0; }
 .detail-table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }
 .dt-head, .dt-row {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.9fr 1.3fr 1fr 1fr 1fr;
+  grid-template-columns: 1.3fr 0.9fr 0.8fr 1.2fr 0.9fr 0.9fr 0.9fr 0.9fr;
   align-items: center;
   padding: 0 20px;
   gap: 8px;

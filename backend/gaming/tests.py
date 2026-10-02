@@ -1030,22 +1030,33 @@ class DashboardAndMainAccountAPITests(APITestCase):
         self.assertEqual(response.data['creditor_count'], 2)
 
     def test_total_rake_this_month_only_counts_this_calendar_month(self):
-        game_day = GameDay.objects.create(number=88, started_at=timezone.now(), opened_by=self.owner)
         now = timezone.localtime(timezone.now())
-        this_month = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
-        last_month = (this_month - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+        this_month_start = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
+        last_month_start = (this_month_start - timedelta(days=1)).replace(
+            day=1, hour=12, minute=0, second=0, microsecond=0,
+        )
 
+        this_month_game_day = GameDay.objects.create(
+            number=88, started_at=this_month_start, opened_by=self.owner,
+        )
         in_month_txn = Transaction.objects.create(
-            game_day=game_day, type=Transaction.Type.RAKE, amount=Decimal(5000),
+            game_day=this_month_game_day, type=Transaction.Type.RAKE, amount=Decimal(5000),
             channel=Transaction.Channel.CHIPS, recorded_by=self.owner,
         )
-        Transaction.objects.filter(pk=in_month_txn.pk).update(created_at=this_month)
+        Transaction.objects.filter(pk=in_month_txn.pk).update(created_at=now)
 
-        out_of_month_txn = Transaction.objects.create(
-            game_day=game_day, type=Transaction.Type.RAKE, amount=Decimal(9000),
+        # A game-day that STARTED last month but ran a rake entry just now
+        # (crossing midnight into this month) — that rake still belongs to
+        # last month, the month the whole night started in, not to this
+        # month just because its own created_at timestamp lands here.
+        crossing_game_day = GameDay.objects.create(
+            number=89, started_at=last_month_start, opened_by=self.owner,
+        )
+        crossing_txn = Transaction.objects.create(
+            game_day=crossing_game_day, type=Transaction.Type.RAKE, amount=Decimal(9000),
             channel=Transaction.Channel.CHIPS, recorded_by=self.owner,
         )
-        Transaction.objects.filter(pk=out_of_month_txn.pk).update(created_at=last_month)
+        Transaction.objects.filter(pk=crossing_txn.pk).update(created_at=now)
 
         self.client.force_authenticate(self.owner)
         response = self.client.get('/api/dashboard/')
@@ -2900,6 +2911,41 @@ class DealsLedgerTests(APITestCase):
         response = self.client.get('/api/dashboard/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(Decimal(response.data['deals_roi_this_month']), Decimal(20000))  # 120000 - 100000
+
+    def test_dashboard_deals_roi_excludes_a_crossing_game_days_activity_from_the_wrong_month(self):
+        now = timezone.localtime(timezone.now())
+        last_month_start = (now.replace(day=1) - timedelta(days=1)).replace(
+            day=1, hour=12, minute=0, second=0, microsecond=0,
+        )
+        crossing_game_day = services.open_game_day(92, last_month_start, self.owner)
+        crossing_opponent = Player.objects.create(account_code='WWI DL3', display_name='Crossing Opponent')
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(2000000), recorded_by=self.cashier,
+            game_day=crossing_game_day, player=crossing_opponent, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        crossing_player = Player.objects.create(account_code='WWI DL4', display_name='Crossing Player')
+        services.create_profit_split_arrangement(
+            crossing_player, self.owner, house_stake_pct=Decimal(40), cap_amount=Decimal(100000),
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_OUT, amount=Decimal(500000), recorded_by=self.cashier,
+            game_day=crossing_game_day, player=crossing_player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        services.record_transaction(
+            type=Transaction.Type.CHIPS_IN, amount=Decimal(800000), recorded_by=self.cashier,
+            game_day=crossing_game_day, player=crossing_player, floor_manager_id=self.fm.pk, floor_manager_pin='9999',
+        )
+        # Force this game-day's own transactions into "this month" — as if
+        # the whole night actually happened well after midnight — to prove
+        # attribution follows the game-day's own started_at, not these.
+        Transaction.objects.filter(game_day=crossing_game_day).update(created_at=timezone.now())
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get('/api/dashboard/')
+        # Unchanged from the base fixture's 20000 — this crossing game-day
+        # has the identical SPA Out/In (100000/120000) but must NOT add on
+        # top, since it belongs to last month.
+        self.assertEqual(Decimal(response.data['deals_roi_this_month']), Decimal(20000))
 
 
 class StartGameDayFlowTests(APITestCase):
