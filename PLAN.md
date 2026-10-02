@@ -2756,6 +2756,21 @@ SPA In − total SPA Out for the month (it was — verified against
   same sign convention as the dashboard's own "Deals ROI" card (`rowRoi()`
   in `LedgersDealsView.vue`, `money--pos`/`money--neg` colored). **Done.**
   `npm run build` clean.
+- [x] **LedgersLayout.vue's header now follows the open sub-page, not a
+  fixed "Ledgers."** The user deliberately deleted the in-page sub-tab
+  strip (redundant with the sidebar's own Ledgers children) — found as an
+  unstaged local change; confirmed deliberate, so cleaned up its now-dead
+  script (`route`/`auth`/`computed` imports, the `ALL_TABS` array) and
+  dangling CSS (`.sub-tabs`, `.sub-tab:hover` with no base `.sub-tab` left
+  to style) rather than leaving residue. Separately, the page's `<h1>` and
+  description were still hardcoded to "Ledgers" / "Game-day activity, and
+  everything recorded off the table." regardless of which child page was
+  open — accurate back when there were only two children, stale once Deals
+  and Main Account joined. **Done** — a small `PAGES` lookup keyed by
+  `route.name` now drives both: titles match AppShell.vue's own Ledgers
+  sidebar labels exactly (Game Days / Off-table / Deals / Main Account),
+  descriptions summarize each ledger's own scope per CONCEPT.md's four-
+  ledgers section. `npm run build` clean.
 
 ## 3. Design decisions
 
