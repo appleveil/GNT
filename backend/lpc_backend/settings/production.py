@@ -48,9 +48,10 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': config('REDIS_URL'),
-    }
-}
+# No Redis deployed (deliberate, 2026-10-03) — Django's own default
+# per-process LocMemCache is used instead. Nothing in this codebase reads
+# from the cache today, so there's no cross-process consistency need yet;
+# revisit if that changes. Celery itself (base.py's CELERY_BROKER_URL)
+# still defaults to a localhost Redis URL, but that connection is only
+# ever opened when a task is actually submitted — there are none, and the
+# `worker`/`beat` Procfile processes aren't deployed, so this is inert.
