@@ -42,7 +42,7 @@ async function onSubmit() {
             <circle cx="12" cy="12" r="8" /><path d="M12 8v8M8 12h8" />
           </svg>
         </div>
-        <div class="login-title">Cashier Login</div>
+        <div class="login-title">Staff Login</div>
         <div class="login-subtitle">Player Payment Tracking — Staff Access</div>
       </div>
 
